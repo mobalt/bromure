@@ -85,6 +85,35 @@ function headersOf(txtPath) {
   return line ? line.slice("headers:".length).trim() : undefined;
 }
 
+// --verify <catalog.json>: check an already signed catalog instead of building
+// one — its signature, every module's own signature, and each module file in
+// --modules against the sha256/size the catalog vouches for. Lets the catalog
+// be signed on one machine (the one holding the key) and uploaded from another.
+const verifyPath = opt("verify");
+if (verifyPath) {
+  const pub = publicKeyFromRaw(req("public-key"));
+  const dir = req("modules");
+  const cat = JSON.parse(readFileSync(verifyPath, "utf8"));
+  const fail = (msg) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(1); };
+  if (cat.sourceHash !== req("source-hash").toLowerCase()) fail(`catalog is for ${cat.sourceHash}`);
+  if (!cat.signature) fail("catalog is unsigned");
+  if (!verify(null, signingPayload(cat, cat.signature.signedAt), pub, Buffer.from(cat.signature.edSignature, "base64")))
+    fail("catalog signature does NOT verify against the pinned key");
+  for (const m of cat.modules) {
+    if (!m.signature || !verify(null, moduleSigningPayload(cat.sourceHash, m), pub, Buffer.from(m.signature, "base64")))
+      fail(`module ${m.kernel}: signature does NOT verify`);
+    const file = join(dir, `bromure_sentry-${m.kernel}.ko`);
+    if (!existsSync(file)) continue;   // published earlier, not rebuilt here
+    const body = readFileSync(file);
+    if (body.length !== m.bytes || createHash("sha256").update(body).digest("hex") !== m.sha256.toLowerCase())
+      fail(`module ${m.kernel}: ${file} doesn't match the catalog`);
+    const sig = existsSync(`${file}.sig`) && JSON.parse(readFileSync(`${file}.sig`, "utf8"));
+    if (!sig || sig.edSignature !== m.signature) fail(`module ${m.kernel}: ${file}.sig is missing or differs`);
+  }
+  console.log(`make-sentry-catalog: ${verifyPath} verifies (${cat.modules.length} kernel(s), signed ${cat.signature.signedAt})`);
+  process.exit(0);
+}
+
 const sourceHash = req("source-hash").toLowerCase();
 if (!/^[0-9a-f]{64}$/.test(sourceHash)) { console.error("make-sentry-catalog: bad --source-hash"); process.exit(2); }
 const modulesDir = req("modules");

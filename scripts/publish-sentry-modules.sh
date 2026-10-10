@@ -22,11 +22,15 @@
 #      DO_SPACES_BUCKET DO_SPACES_PUBLIC_BASE SPARKLE_PRIVATE_KEY
 #      SENTRY_CATALOG_PUBLIC_KEY (default: the app's pinned SUPublicEDKey)
 #      DRY_RUN=1 builds + signs the catalog but uploads nothing.
+#      PRESIGNED=1 publishes the catalog.json + modules/*.ko.sig already in
+#      <out dir> (signed elsewhere by scripts/sign-sentry-modules.sh) after
+#      verifying them against the pinned key; SPARKLE_PRIVATE_KEY isn't needed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT="${1:?usage: publish-sentry-modules.sh <ci-build out dir>}"
 DRY_RUN="${DRY_RUN:-0}"
+PRESIGNED="${PRESIGNED:-0}"
 enabled() { case "${1:-}" in 1|true|TRUE|yes) return 0;; *) return 1;; esac; }
 # Must match ImageCatalogStore.pinnedPublicKeyBase64 / SUPublicEDKey.
 SENTRY_CATALOG_PUBLIC_KEY="${SENTRY_CATALOG_PUBLIC_KEY:-G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=}"
@@ -46,16 +50,21 @@ fi
 if ! enabled "$DRY_RUN"; then
     : "${DO_SPACES_KEY:?}" "${DO_SPACES_SECRET:?}" "${DO_SPACES_ENDPOINT:?}"
     : "${DO_SPACES_REGION:?}" "${DO_SPACES_BUCKET:?}" "${DO_SPACES_PUBLIC_BASE:?}"
-    : "${SPARKLE_PRIVATE_KEY:?}"
+    enabled "$PRESIGNED" || : "${SPARKLE_PRIVATE_KEY:?}"
 fi
 
 CATALOG="$OUT/catalog.json"
 PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
-SIGN=()
-enabled "$DRY_RUN" && [ -z "${SPARKLE_PRIVATE_KEY:-}" ] && SIGN=(--allow-unsigned)
-node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
-    ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$CATALOG" ${SIGN[@]+"${SIGN[@]}"}
+if enabled "$PRESIGNED"; then
+    node tools/make-sentry-catalog.mjs --verify "$CATALOG" --source-hash "$HASH" --modules "$OUT/modules" \
+        --public-key "$SENTRY_CATALOG_PUBLIC_KEY"
+else
+    SIGN=()
+    enabled "$DRY_RUN" && [ -z "${SPARKLE_PRIVATE_KEY:-}" ] && SIGN=(--allow-unsigned)
+    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
+        ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$CATALOG" ${SIGN[@]+"${SIGN[@]}"}
+fi
 
 put() { node tools/spaces-put.mjs "$@"; }
 IMMUTABLE="public, max-age=31536000, immutable"
