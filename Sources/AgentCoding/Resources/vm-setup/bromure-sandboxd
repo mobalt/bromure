@@ -1356,10 +1356,25 @@ def _sanitize_env(plan, requested):
     }
     blocked = ("LD_", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
                "PYTHONSTARTUP", "PERL5OPT", "GIT_CONFIG", "IFS")
+    # `GIT_CONFIG` as a prefix is meant to stop config INJECTION --
+    # `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and the
+    # `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` triple, any of which can set
+    # `core.fsmonitor` and turn a `git status` into arbitrary execution. That is
+    # exactly right, and `GIT_CONFIG_NOSYSTEM` is the one name it catches by
+    # accident: it REMOVES a config source rather than adding one.
+    #
+    # Stripping it silently defeated agentd's own hardening on every sandboxed
+    # git call -- `_GIT_SAFE_ENV` sets it, this dropped it, and sandboxed git
+    # went on reading /etc/gitconfig. Low severity, because that file is
+    # root-owned and read-only under the policy, but the intent was being
+    # discarded without a word. Found by checking the merge's new git call
+    # sites, and it predates them.
+    allowed_despite_prefix = ("GIT_CONFIG_NOSYSTEM",)
     for key, value in (requested or {}).items():
         if not isinstance(key, str) or not isinstance(value, str):
             continue
-        if any(key.startswith(prefix) for prefix in blocked):
+        if (key not in allowed_despite_prefix
+                and any(key.startswith(prefix) for prefix in blocked)):
             continue
         env[key] = value
     return env

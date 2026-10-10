@@ -349,7 +349,7 @@ def _harden_argv(args):
 
 
 def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
-            check=False, **kwargs):
+            check=False, git_protocols=None, **kwargs):
     """Run a command that touches WORKSPACE CONTENT.
 
     Without a sandbox this is `subprocess.run`, unchanged.
@@ -379,6 +379,21 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
     stderr = kwargs.pop("stderr", None)
     if args and os.path.basename(args[0]) == "git":
         env.update(_GIT_SAFE_ENV)
+        # `_GIT_SAFE_ENV` pins GIT_ALLOW_PROTOCOL to `file`, which is right for
+        # every LOCAL git call here and fatal for a network one. Measured:
+        #
+        #   GIT_ALLOW_PROTOCOL=file git fetch --quiet origin
+        #   fatal: transport 'https' not allowed          (exit 128)
+        #
+        # so a `fetch` routed through this function was refused by git before it
+        # reached the network. The opt-in is a NAMED argument rather than letting
+        # the caller's env win, because the caller's env losing to the hardening
+        # is the behaviour that protects every other call site -- and because
+        # `git_protocols=` is grep-able, which "it works if you set the right
+        # variable" is not. `file` stays in the set regardless; `ext` is never
+        # added, since `ext::` is arbitrary command execution.
+        if git_protocols:
+            env["GIT_ALLOW_PROTOCOL"] = "file:" + git_protocols
     # The caller's own values win: this supplies a default, it does not override.
     for key, value in _ca_trust_for_exec().items():
         env.setdefault(key, value)
@@ -389,6 +404,39 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
             "Either add support in _ws_run, or -- if this command genuinely "
             "must not be confined -- call _run_unconfined(args, reason=...)."
             % (args[:2], ", ".join(sorted(kwargs))))
+    # FAIL CLOSED in the window before the supervisor has published.
+    #
+    # Everything below this point assumes "no control socket" means "no sandbox
+    # was asked for". In a workspace that DID ask for one, it can also mean "not
+    # up yet" -- and the fallback would then run workspace git unconfined, which
+    # is the single thing this function exists to prevent. All seven of today's
+    # call sites are reached either over the shell channel (which
+    # `sandbox_gate()` holds) or from automation after boot, so none of them hit
+    # this; the point is that the guarantee stops depending on that remaining
+    # true for the next call site somebody adds.
+    #
+    # `openshell_requested()` ONLY, and the wider version was tried and was
+    # wrong. Including `strict_sandbox_requested()` looked more consistent --
+    # the same condition `sandbox_gate()` uses -- but a strict-only workspace
+    # has no supervisor ROUTE to wait for: `sandbox_gate()` deliberately
+    # short-circuits its supervisor check when no filesystem policy was asked
+    # for, so `_SANDBOX` is legitimately never loaded there and confinement
+    # comes from agentd's own `confine_self`, not from the exec op. The wider
+    # condition therefore refused every `vm exec` in the two strict-only boot
+    # cases -- twelve failures, measured, in "strict only (revocation, no
+    # spec)" and "strict + network-only policy".
+    #
+    # So: refuse only when a filesystem policy was asked for, which is exactly
+    # when `_SANDBOX` is supposed to be populated and a missing control socket
+    # really does mean "not up yet".
+    if not _SANDBOX.get("control_socket") and openshell_requested():
+        raise SandboxRoutingError(
+            "cannot route %s into the sandbox: this workspace asked for one and "
+            "the supervisor has not published its control socket yet. Running "
+            "it unconfined is the failure this function exists to prevent. Wait "
+            "on sandbox_gate() first, or move the call after the supervisor is "
+            "up -- and if the command genuinely must not be confined, say so "
+            "through _run_unconfined(args, reason=...)." % (args[:2],))
     if not _SANDBOX.get("control_socket"):
         run_env = dict(os.environ)
         run_env.update(env)
@@ -4588,8 +4636,12 @@ def _resolve_run_base(cwd, base):
     if _commit_exists(cwd, base):
         return base
     try:
+        # The only network git call in this file, so the only one that needs a
+        # transport beyond `file`. ssh as well as https: a workspace's `origin`
+        # may be either, and which one is not ours to assume.
         _ws_run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
                        stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
+                       git_protocols="https:ssh",
                        env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
     except Exception as e:
         log("automation", "fetch for %s failed: %s" % (base, e))
