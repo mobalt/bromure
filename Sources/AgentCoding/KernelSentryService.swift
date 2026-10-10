@@ -548,6 +548,8 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             }
         }
         if category == "sandbox_denial" {
+            // Before folding: the steering note has its own repeat window.
+            PolicySteering.shared.noteSandboxDenial(profileID: profileID, frame: fields)
             noteDenial(frame, now: now)
             guard admitDenialRow(frame, data, now: now) else { return }
         }

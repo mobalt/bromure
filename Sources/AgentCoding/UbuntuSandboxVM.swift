@@ -123,8 +123,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     public var onDockerList: (([DockerContainer]) -> Void)?
 
     /// One JSON line from an agent's PreToolUse hook (`agent-tool-*.jsonl`):
-    /// a tool call, before it runs.
-    public var onAgentToolCall: ((Data) -> Void)?
+    /// a tool call, before it runs, and the tmux window it came from.
+    public var onAgentToolCall: ((Data, Int?) -> Void)?
 
     /// Called ~every 2s WHILE a dashboard is open with per-container CPU/mem
     /// (from `docker stats --no-stream`). Keyed by full container id.
@@ -989,13 +989,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
                         && entry.pathExtension == "jsonl" {
                         let key = entry.lastPathComponent
+                        let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
                         guard let data = try? Data(contentsOf: entry) else { continue }
                         var start = toolOffsets[key] ?? 0
                         if start > data.count { start = 0 }   // truncated under us
                         guard let lastNL = data.lastIndex(of: 0x0A), lastNL >= start else { continue }
                         let chunk = data[start...lastNL]
                         for line in chunk.split(separator: 0x0A) where line.count <= 8192 {
-                            self?.onAgentToolCall?(Data(line))
+                            self?.onAgentToolCall?(Data(line), window)
                         }
                         toolOffsets[key] = lastNL + 1
                         if lastNL + 1 == data.count, data.count > 256 * 1024 {

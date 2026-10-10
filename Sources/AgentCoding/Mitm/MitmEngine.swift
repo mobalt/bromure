@@ -548,6 +548,7 @@ public final class MitmEngine {
                         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                         "host": .string(host), "port": .int(destPort), "layer": .string("l4"),
+                                        "dst_ip": .string(destIP),
                                         "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
                                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
                                         "by_policy": .bool(true)])
@@ -606,6 +607,7 @@ public final class MitmEngine {
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                     "host": .string(label), "port": .int(destPort), "layer": .string("sni"),
+                                    "dst_ip": .string(destIP),
                                     "rule": .of(policy.firstMatch(ip: nil, hostnames: sniHost.map { [$0] } ?? [],
                                                                   proto: .tcp,
                                                                   port: UInt16(truncatingIfNeeded: destPort))?.text),

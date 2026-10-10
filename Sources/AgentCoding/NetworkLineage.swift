@@ -164,6 +164,10 @@ public final class NetworkLineage: @unchecked Sendable {
         let dport = f["dport"] as? Int ?? 0
         let leaf = ProcKey(pid: pid, startNs: Self.u64(f["start_ns"]))
         let snapshot = lineage(profileID: profileID, leaf: leaf, frame: f)
+        // Nearest first: the policy note goes to the agent whose tree this is.
+        PolicySteering.shared.noteFlow(profileID: profileID, dst: dst, dport: dport,
+                                       pids: snapshot.processes.reversed().compactMap {
+                                           if case .int(let p)? = $0["pid"] { return p }; return nil })
         let flowID = UUID().uuidString
         DispatchQueue.global().asyncAfter(deadline: .now() + decisionWait) { [weak self] in
             self?.resolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: dst,

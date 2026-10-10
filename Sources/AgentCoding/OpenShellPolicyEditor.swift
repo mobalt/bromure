@@ -28,6 +28,17 @@ struct FirewallEditor: View {
                                                logAllowed: $draft.logAllowedConnections)
             case .openShell: OpenShellPolicyEditor(draft: $draft)
             }
+
+            VStack(alignment: .leading, spacing: 2) {
+                RuleCheckbox(isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }),
+                             label: NSLocalizedString("Tell the agent when policy blocks it", comment: "firewall pane toggle"),
+                             help: NSLocalizedString("Explain each blocked action to the agent that tried it", comment: "firewall pane: Tell the agent tooltip"),
+                             title: NSLocalizedString("Tell the agent when policy blocks it", comment: "firewall pane toggle"))
+                    .fixedSize()
+                Text(NSLocalizedString("When the firewall or the sandbox blocks something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or “permission denied” and may keep trying. Claude Code reads it right after the command that hit the block; other agents get it when their turn ends. Until you choose, it's on while the workspace uses an OpenShell policy.",
+                                       comment: "firewall pane: Tell the agent explanation"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
         }
         .onAppear {
             guard !loaded else { return }

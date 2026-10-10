@@ -222,6 +222,9 @@ public final class BACEventEmitter: @unchecked Sendable {
                 profileID: profileID, proto: s("proto") ?? "tcp", dst: dst, dport: port,
                 action: s("action") ?? "allow", layer: layer, reason: s("reason"), host: s("host"))
         }
+        // Tell the agent its action was refused by policy (on by default
+        // under an OpenShell policy), so it asks instead of routing around.
+        PolicySteering.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
         // The agent watchdog judges the session as a whole (off by default).
         AgentWatchdog.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
         // OCSF JSONL export (SIEM) — local like the timeline; off by default.

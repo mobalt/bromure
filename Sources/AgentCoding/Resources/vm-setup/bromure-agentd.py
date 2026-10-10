@@ -6416,8 +6416,12 @@ def _seed_claude_settings():
         return [e for e in existing if hook not in json.dumps(e)]
 
     hooks["SessionStart"] = _hook_cmd("start") + _keep_others("SessionStart")
-    hooks["UserPromptSubmit"] = _hook_cmd("working") + _keep_others("UserPromptSubmit")
+    # `policy`: notes about actions the workspace's policy refused (host
+    # PolicySteering), handed to Claude as context (host Profile.swift twin).
+    hooks["UserPromptSubmit"] = (_hook_cmd("working") + _hook_cmd("policy")
+                                 + _keep_others("UserPromptSubmit"))
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
+    hooks["PostToolUse"] = _hook_cmd("policy") + _keep_others("PostToolUse")
     hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
     hooks["Notification"] = _hook_cmd("needsInput") + _keep_others("Notification")
     # A refused turn fires StopFailure, not Stop (host Profile.swift twin).
