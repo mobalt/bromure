@@ -144,6 +144,13 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
+                        # Most days no new kernel has shipped and every source's
+                        # catalog is complete: nothing to sign or upload, so skip
+                        # building the publisher image (and its npm install).
+                        if ! grep -L '"built": \\[\\]' sentry-ci/out-*/manifest.json | grep -q .; then
+                            echo "No new modules for any source: nothing to publish."
+                            exit 0
+                        fi
                         # The publisher image: node + the release tools (socket.dev-
                         # wrapped install, like the other pipelines) + this run's outputs.
                         rm -rf sentry-ci/pub && mkdir -p sentry-ci/pub/tools sentry-ci/pub/scripts
