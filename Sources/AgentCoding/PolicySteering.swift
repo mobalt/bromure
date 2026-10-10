@@ -30,18 +30,31 @@ public final class PolicySteering: @unchecked Sendable {
     var deliver: @Sendable (_ profileID: UUID, _ window: Int?, _ text: String, _ soleOnly: Bool) -> Void = { _, _, _, _ in }
     var now: @Sendable () -> Date = { Date() }
 
-    /// How long a connection-level denial waits for the sentry to name the
-    /// process that opened the flow (its `net_flow` arrives with the connect).
-    var attributionWait: TimeInterval = 1.0
+    /// How long a connection-level denial waits for the process that opened
+    /// the flow, when several agents could have: the sentry reports flows in
+    /// batches, measured ~10 s after the connect. With one agent there is no
+    /// question whose it was, and the note goes at once.
+    var attributionWait: TimeInterval = 15.0
     /// The same denial is told to the same tab once in this window.
     static let repeatWindow: TimeInterval = 300
     /// At most this many notes per tab a minute: a loop probing paths gets
     /// told a few times, not drowned.
     static let burst = 5
     static let notePrefix = "[Bromure policy]"
+    /// An agent process's own connection (no tool in it) counts as its
+    /// background traffic when it made no tool call for this long.
+    static let toolQuiet: TimeInterval = 30
+    /// Where agents send their own telemetry, error reports and feature
+    /// flags. A block there is nothing the agent chose: telling it to "stop
+    /// and ask the user" about its own telemetry only confuses it.
+    static let backgroundHostSuffixes = [
+        "datadoghq.com", "datadoghq.eu", "statsig.com", "statsigapi.net", "featuregates.org",
+        "featureassets.org", "prodregistryv2.org", "sentry.io", "segment.io", "posthog.com",
+        "honeycomb.io",
+    ]
 
     private struct Flow { var pids: [Int]; var at: Date }
-    private struct Pending { var profileID: UUID; var keys: [String]; var dedupe: String; var text: String }
+    private struct Pending { var profileID: UUID; var keys: [String]; var host: String?; var dedupe: String; var text: String }
 
     private let lock = NSLock()
     /// Agent pid → its tmux window, per workspace (from the PreToolUse hooks).
@@ -81,12 +94,17 @@ public final class PolicySteering: @unchecked Sendable {
             claimed = p; pending[id] = nil; break
         }
         let window = windowLocked(profileID, pids)
+        let background = claimed.map { backgroundLocked(profileID, pids, host: $0.host) } ?? false
         lock.unlock()
-        if let claimed { send(claimed.profileID, window, claimed.dedupe, claimed.text, soleOnly: false) }
+        if let claimed {
+            Self.log("\(claimed.dedupe): flow \(pids.prefix(4)) → \(background ? "agent's own traffic, not told" : "window \(window.map(String.init) ?? "none")")")
+        }
+        if let claimed, !background { send(claimed.profileID, window, claimed.dedupe, claimed.text, soleOnly: false) }
     }
 
     /// Every event the emitter sees; acts on policy denials.
     public func observe(profileID: UUID, eventType: String, eventData d: [String: AnyJSON]) {
+        if eventType == "net.flow" { noteLineage(profileID: profileID, d); return }
         guard eventType == "egress.firewall" || eventType == "guardrails.block",
               enabledProvider(profileID) else { return }
         func s(_ k: String) -> String? { if case .string(let v)? = d[k], !v.isEmpty { return v }; return nil }
@@ -132,20 +150,50 @@ public final class PolicySteering: @unchecked Sendable {
         let seen = keys.lazy.compactMap { self.flows[profileID]?[$0] }.first { t.timeIntervalSince($0.at) < 5 }
         if let seen {
             let window = windowLocked(profileID, seen.pids)
+            let background = backgroundLocked(profileID, seen.pids, host: host)
             lock.unlock()
-            send(profileID, window, dedupe, text, soleOnly: false)
+            Self.log("\(dedupe): flow \(seen.pids.prefix(4)) → \(background ? "agent's own traffic, not told" : "window \(window.map(String.init) ?? "none")")")
+            if !background { send(profileID, window, dedupe, text, soleOnly: false) }
+            return
+        }
+        // One agent (or none known): no one else it could be — don't wait.
+        let windows = Set((agents[profileID] ?? [:]).values.filter { t.timeIntervalSince($0.at) < 3600 }.map(\.window))
+        if windows.count <= 1 {
+            lock.unlock()
+            if Self.isBackgroundHost(host) { Self.log("\(dedupe): agent telemetry, not told"); return }
+            Self.log("\(dedupe): \(windows.isEmpty ? "no agent known" : "the only agent") → window \(windows.first.map(String.init) ?? "every agent")")
+            send(profileID, windows.first, dedupe, text, soleOnly: false)
             return
         }
         let id = UUID()
-        pending[id] = Pending(profileID: profileID, keys: keys, dedupe: dedupe, text: text)
+        pending[id] = Pending(profileID: profileID, keys: keys, host: host, dedupe: dedupe, text: text)
         lock.unlock()
+        Self.log("\(dedupe): waiting for its flow \(keys)")
         DispatchQueue.global().asyncAfter(deadline: .now() + attributionWait) { [weak self] in
             guard let self else { return }
             self.lock.lock()
             let p = self.pending.removeValue(forKey: id)
             self.lock.unlock()
-            if let p { self.send(p.profileID, nil, p.dedupe, p.text, soleOnly: false) }
+            if let p { Self.log("\(p.dedupe): no flow named a process\(Self.isBackgroundHost(p.host) ? "; agent telemetry, not told" : "")") }
+            // Nobody to pin it on: an agent's telemetry isn't worth telling
+            // every agent about.
+            if let p, !Self.isBackgroundHost(p.host) { self.send(p.profileID, nil, p.dedupe, p.text, soleOnly: false) }
         }
+    }
+
+    /// NetworkLineage's `net.flow`: a denied flow with its process chain
+    /// (root → leaf) and real target — through the proxy bridge too.
+    private func noteLineage(profileID: UUID, _ d: [String: AnyJSON]) {
+        guard case .string("deny")? = d["decision"], enabledProvider(profileID),
+              case .array(let procs)? = d["processes"], case .int(let port)? = d["dport"] else { return }
+        let pids: [Int] = procs.reversed().compactMap {
+            if case .object(let o) = $0, case .int(let p)? = o["pid"] { return p }; return nil }
+        guard !pids.isEmpty else { return }
+        var target = "?"
+        if case .string(let h)? = d["host"] { target = h } else if case .string(let h)? = d["dst"] { target = h }
+        Self.log("denied flow to \(target):\(port) from \(pids.prefix(4))")
+        if case .string(let dst)? = d["dst"] { noteFlow(profileID: profileID, dst: dst, dport: port, pids: pids) }
+        if case .string(let host)? = d["host"] { noteFlow(profileID: profileID, dst: "host:\(host)", dport: port, pids: pids) }
     }
 
     /// A sandbox denial from the kernel sentry (the raw frame, chain and all).
@@ -251,6 +299,33 @@ public final class PolicySteering: @unchecked Sendable {
     }
 
     // MARK: Sending
+
+    /// Tabs whose agent's hooks reported in this past hour — agents the app
+    /// may not list as sessions (one started from a shell).
+    func agentWindows(profileID: UUID) -> Set<Int> {
+        lock.lock(); defer { lock.unlock() }
+        let t = now()
+        return Set((agents[profileID] ?? [:]).values.filter { t.timeIntervalSince($0.at) < 3600 }.map(\.window))
+    }
+
+    static func log(_ s: String) {
+        let t = String(format: "%.3f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))
+        FileHandle.standardError.write(Data("[policy-steering] \(t) \(s)\n".utf8))
+    }
+
+    static func isBackgroundHost(_ host: String?) -> Bool {
+        guard let h = host?.lowercased() else { return false }
+        return backgroundHostSuffixes.contains { h == $0 || h.hasSuffix("." + $0) }
+    }
+
+    /// The agent process itself opened the flow (no tool process under it):
+    /// its telemetry, or anything while it ran no tool. A tool it runs (curl,
+    /// git) has its own pid; an in-process fetch tool (Claude's WebFetch)
+    /// right after its PreToolUse still counts.
+    private func backgroundLocked(_ profileID: UUID, _ pids: [Int], host: String?) -> Bool {
+        guard let first = pids.first, let a = agents[profileID]?[first] else { return false }
+        return Self.isBackgroundHost(host) || now().timeIntervalSince(a.at) > Self.toolQuiet
+    }
 
     private func windowLocked(_ profileID: UUID, _ pids: [Int]) -> Int? {
         guard let m = agents[profileID] else { return nil }

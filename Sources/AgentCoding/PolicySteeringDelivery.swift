@@ -37,8 +37,15 @@ extension ACAppDelegate {
             targets = [(window, live.first { $0.windowIndex == window }?.tool ?? .claude)]
         } else {
             targets = live.compactMap { s in s.windowIndex.map { ($0, s.tool) } }
+            // An agent the app doesn't list as a session still reported its
+            // tab through its hooks (Claude's are the ones that do).
+            for w in PolicySteering.shared.agentWindows(profileID: profileID).sorted()
+            where !targets.contains(where: { $0.window == w }) {
+                targets.append((w, .claude))
+            }
             if soleOnly && targets.count != 1 { return }
         }
+        PolicySteering.log("deliver to \(targets.isEmpty ? "no agent tab" : targets.map { "w\($0.window) (\($0.tool.rawValue))" }.joined(separator: ", "))")
         for t in targets {
             if t.tool == .claude {
                 writePolicyNote(profileID: profileID, window: t.window, text: text)
