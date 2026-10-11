@@ -197,13 +197,7 @@ extension CodingTaskEngine {
     /// `--upload-pack=./pwn.sh` (HEAD can point at one, and the worktree's
     /// parent is read from HEAD) ran that program from `git pull --rebase`.
     nonisolated static func isSafeBranchName(_ s: String) -> Bool {
-        guard !s.isEmpty, s.count <= 255, !s.hasPrefix("-"), s != "@",
-              !s.hasPrefix("/"), !s.hasSuffix("/"), !s.hasSuffix("."), !s.hasSuffix(".lock"),
-              !s.contains(".."), !s.contains("//"), !s.contains("@{") else { return false }
-        let banned = Set(" ~^:?*[\\")
-        guard !s.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || banned.contains(Character($0)) })
-        else { return false }
-        return !s.split(separator: "/").contains { $0.hasPrefix(".") || $0.hasSuffix(".lock") }
+        BranchMergeCommands.isSafeBranchName(s)
     }
 
     /// The first of these names that isn't a plain branch name, if any.
