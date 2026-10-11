@@ -4642,6 +4642,35 @@ final class RemoteHostWindow: NSWindow {
     private lazy var toasts = UndoToastHost(window: self)
     private var flagsMonitor: Any?
 
+    /// "Delete workspace" on the server's machine — the local window's
+    /// question, then DELETE /profiles/<id>. A running workspace is refused
+    /// there (shut it down first); the server's reason is shown.
+    private func confirmDeleteWorkspace(_ id: UUID) {
+        guard let p = controller.profile(for: id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete workspace “%@”?", comment: "delete workspace"), p.name)
+        alert.informativeText = NSLocalizedString(
+            "Removes its disk, settings, and SSH key. The mounted host folder is untouched.",
+            comment: "delete workspace")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn, let self else { return }
+            self.controller.request("DELETE", "/profiles/\(ControlClient.encodeSegment(id.uuidString))") { [weak self] status, json in
+                guard status != 200 else { return }
+                let why = (json["error"] as? String) ?? NSLocalizedString(
+                    "The server didn't answer.", comment: "delete workspace failure")
+                let fail = NSAlert()
+                fail.messageText = String(format: NSLocalizedString("Couldn't delete “%@”", comment: "delete workspace failure"), p.name)
+                fail.informativeText = why
+                guard let self else { return }
+                fail.beginSheetModal(for: self)
+            }
+        }
+        alert.beginSheetModal(for: self, completionHandler: go)
+    }
+
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
         if SessionHome.branchNeedsWord(s) { askBranchFate(s, deleting: true); return }
@@ -6501,9 +6530,11 @@ final class RemoteHostWindow: NSWindow {
             onSuspend: { [weak self] id in self?.controller.suspendWorkspace(id) },
             onRestart: { [weak self] id in self?.confirmReboot(id) },
             onEdit: { [weak self] id in self?.openWorkspaceSettings(id) },
-            onDuplicate: { _ in },
-            onReset: { _ in },
-            onDelete: { _ in },
+            // No route for these on the server: not offered, rather than a
+            // menu item that does nothing.
+            onDuplicate: nil,
+            onReset: nil,
+            onDelete: { [weak self] id in self?.confirmDeleteWorkspace(id) },
             // Option-click runs the credential wizard first, same gesture as
             // the local window's "+".
             onNewProfile: { [weak self] in

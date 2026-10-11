@@ -3835,8 +3835,8 @@ struct SessionSidebar: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
     let onNewProfile: () -> Void
     /// Scheduled automations — the third sidebar group, after the
@@ -4823,8 +4823,8 @@ private struct VMSection: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
@@ -4993,8 +4993,8 @@ private struct ControlMenu: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
@@ -5017,10 +5017,11 @@ private struct ControlMenu: View {
             }
             Divider()
             Button("Edit…") { onEdit(row.id) }
-            Button("Duplicate") { onDuplicate(row.id) }
+            // nil on a fat client: the server has no route for it.
+            if let onDuplicate { Button("Duplicate") { onDuplicate(row.id) } }
             Button(NSLocalizedString("Rewind home…", comment: "machine menu")) { onRewindHome(row.id) }
             Divider()
-            Button("Reset disk", role: .destructive) { onReset(row.id) }
+            if let onReset { Button("Reset disk", role: .destructive) { onReset(row.id) } }
             Button("Delete workspace", role: .destructive) { onDelete(row.id) }
         } label: {
             Image(systemName: "ellipsis")

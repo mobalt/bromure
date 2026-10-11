@@ -6114,11 +6114,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["ok": false, "error": "Workspace not found: \(key)"]
         }
         if runningSessions[p.id] != nil {
-            return ["ok": false, "error": "Workspace '\(p.name)' has a running VM — `vm kill` it first."]
+            // Read by the CLI and by a fat client's "Delete workspace".
+            return ["ok": false, "error": "“\(p.name)” is running — shut it down (or `vm kill` it), then delete it."]
         }
         do {
             try store.delete(p)
             profiles = store.loadAll()
+            // As the sidebar's own delete does: its cluster access goes too.
+            kubeClusterEngine.workspaceDeleted(p.id)
             refreshSidebar()
             return ["ok": true, "name": p.name]
         } catch {
