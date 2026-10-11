@@ -475,6 +475,46 @@ struct LandingRemoteNameTests {
         #expect(ok.trimmingCharacters(in: .whitespacesAndNewlines) == "pushed")
     }
 
+    /// Finding: a remote whose NAME is safe (`origin`) still ran the
+    /// programs the repository's config names — its pack helpers, hooks.
+    @Test("a safe-named remote runs none of the programs the repository's config names")
+    func repoConfigRunsNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        let dir = (r.root as NSString).deletingLastPathComponent
+        let pwn = dir + "/pwn.sh"
+        // The branch first, then the traps: the setup's own git must not trip them.
+        _ = try sh("printf '#!/bin/sh\\ntouch \(r.marker)\\nexit 1\\n' > \(pwn); chmod +x \(pwn); cd \(r.root); "
+                   + "git checkout -q -b wt/t; git -c user.name=t -c user.email=t@t commit -q --allow-empty -m t; "
+                   + "git checkout -q main; "
+                   + "git config remote.origin.uploadpack \(pwn); git config remote.origin.receivepack \(pwn); "
+                   + "git config core.sshCommand \(pwn); git config core.fsmonitor \(pwn); "
+                   + "for h in pre-push post-merge reference-transaction; do cp \(pwn) .git/hooks/$h; done")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The fast-forward (merge hooks, reference-transaction).
+        let check = try sh(CodingTaskEngine.landingCheckCommand(root: r.root, branch: "wt/t", target: "main",
+                                                                sourceDir: nil, mode: .merge))
+        #expect(CodingTaskEngine.parseLandingCheck(check) == .mergedNow)
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The push (fetch's upload-pack, push's receive-pack, pre-push).
+        let push = try sh(CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
+        #expect(push.trimmingCharacters(in: .whitespacesAndNewlines) == "pushed")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The verify (its fetch).
+        let verify = try sh(CodingTaskEngine.landingVerifyCommand(root: r.root, branch: "wt/t", target: "main",
+                                                                  sourceDir: nil, remote: "origin"))
+        #expect(verify.trimmingCharacters(in: .whitespacesAndNewlines) == "LANDED")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // A credential helper in the repository's own config: not run — the
+        // fast path leaves the push to the agent, the verify can't check it.
+        _ = try sh("git -C \(r.root) config credential.helper '!\(pwn)'")
+        #expect(try sh(CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "push-failed")
+        #expect(try sh(CodingTaskEngine.landingVerifyCommand(root: r.root, branch: "wt/t", target: "main",
+                                                             sourceDir: nil, remote: "origin"))
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "NOREMOTE")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+    }
+
     @Test("the agent's briefs quote every name and never carry an unsafe remote")
     func briefsQuoted() {
         let push = CodingTaskEngine.pushPrompt(branch: "wt/x", target: "main", remote: "origin;./pwn.sh", viaBoard: false)

@@ -124,6 +124,48 @@ extension CodingTaskEngine {
 
     // MARK: Remotes
 
+    /// `git -C <dir>` for the commands Bromure runs itself in a task's
+    /// repository: nothing the repository's own config names runs — no hook
+    /// (`.git/hooks`, `core.hooksPath`), no `core.fsmonitor` program. The
+    /// repository is the agent's work, or a copied worktree, or a zip with
+    /// its `.git`: its config is data, never a program to run here.
+    /// `dir` is already shell-quoted (or a "$var").
+    nonisolated static func pinnedGit(_ dir: String) -> String {
+        "git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C \(dir)"
+    }
+
+    /// The environment for a fetch or push Bromure runs: no prompt, and the
+    /// ssh program from the user's own git config (global, system) or plain
+    /// `ssh` — never a `core.sshCommand` the repository sets. Read outside
+    /// any repository so the local config can't answer.
+    nonisolated static let networkGitEnv =
+        "export GIT_TERMINAL_PROMPT=0; "
+        + "if [ -z \"${GIT_SSH_COMMAND:-}\" ] && [ -z \"${GIT_SSH:-}\" ]; then "
+        + "GIT_SSH_COMMAND=$(cd / && { git config --global --get core.sshCommand || git config --system --get core.sshCommand; } 2>/dev/null) "
+        + "|| GIT_SSH_COMMAND=ssh; export GIT_SSH_COMMAND; fi; "
+
+    /// Prints `local-helper` when the repository's own config (local or
+    /// worktree scope, includes too) names a credential helper — a program
+    /// a fetch or push would run. The fast path then leaves it to the agent.
+    nonisolated static func localCredentialHelperCheck(_ dir: String) -> String {
+        "\(pinnedGit(dir)) config --show-scope --get-regexp '^credential\\..*helper$' 2>/dev/null "
+            + "| grep -qE '^(local|worktree)[[:space:]]'"
+    }
+
+    /// `git fetch` from a remote with its pack program pinned: never the
+    /// `remote.<name>.uploadpack` the repository's config sets.
+    nonisolated static func pinnedFetch(_ dir: String, remote: String) -> String {
+        "\(pinnedGit(dir)) -c \(q("remote.\(remote).uploadpack=git-upload-pack")) "
+            + "fetch -q --upload-pack=git-upload-pack -- \(q(remote))"
+    }
+
+    /// `git push` with its pack program pinned (never the repository's
+    /// `remote.<name>.receivepack`) and no `pre-push` hook.
+    nonisolated static func pinnedPush(_ dir: String, remote: String, refspec: String) -> String {
+        "\(pinnedGit(dir)) -c \(q("remote.\(remote).receivepack=git-receive-pack")) "
+            + "push -q --no-verify --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
+    }
+
     /// A remote name safe to hand git and an agent: one plain token, never
     /// an option. Quoting stops the shell, not git — a remote named
     /// `--exec=./pwn.sh` (whatever `.git/config` lists first: a copied
@@ -164,13 +206,13 @@ extension CodingTaskEngine {
     nonisolated static func landingCheckCommand(root: String, branch: String, target: String,
                                                 sourceDir: String?, mode: TaskLanding.Mode) -> String {
         var cmd = "r=\(q(root)); "
-            + "git -C \"$r\" rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
-            + "git -C \"$r\" rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
+            + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
+            + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo dirty-source; exit 0; fi; "
         }
-        cmd += "a=$(git -C \"$r\" rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
-            + "b=$(git -C \"$r\" rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
+        cmd += "a=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
+            + "b=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
             + "if [ \"$a\" = 0 ]; then echo merged; exit 0; fi; "
             + "if [ \"$b\" != 0 ]; then echo diverged; exit 0; fi; "
         switch mode {
@@ -183,10 +225,10 @@ extension CodingTaskEngine {
         // refuses when they're in the way. Not checked out anywhere: move
         // the ref itself (a fetch into a branch refuses a non-ff update).
         return cmd
-            + "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
+            + "d=$(\(pinnedGit("\"$r\"")) worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); "
-            + "if [ -n \"$d\" ]; then git -C \"$d\" merge --ff-only -q \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
-            + "else git -C \"$r\" fetch -q . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
+            + "if [ -n \"$d\" ]; then \(pinnedGit("\"$d\"")) merge --ff-only -q \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
+            + "else \(pinnedGit("\"$r\"")) fetch -q . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
     }
 
     nonisolated static func parseLandingCheck(_ out: String?) -> LandingCheck {
@@ -216,8 +258,8 @@ extension CodingTaskEngine {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
         }
         func inRef(_ t: String) -> String {
-            "{ git -C \(q(root)) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
-                + "|| git -C \(q(root)) diff --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
+            "{ \(pinnedGit(q(root))) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
+                + "|| \(pinnedGit(q(root))) diff --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
         }
         let local = inRef(target)
         guard let remote, !remote.isEmpty else {
@@ -230,7 +272,11 @@ extension CodingTaskEngine {
         // still looked at — but it is never LANDED: unchecked isn't pushed.
         // Bailing out as "unknown" here let the agent's "merged" finish the
         // task, and its cleanup delete the branch.
-        cmd += "if GIT_TERMINAL_PROMPT=0 git -C \(q(root)) fetch -q -- \(q(remote)) >/dev/null 2>&1; then "
+        // The repository names a credential helper: a program the fetch
+        // would run — not checked here (NOREMOTE: the user looks).
+        cmd += networkGitEnv
+            + "if \(localCredentialHelperCheck(q(root))); then echo NOREMOTE; exit 0; fi; "
+        cmd += "if \(pinnedFetch(q(root), remote: remote)) >/dev/null 2>&1; then "
             + "if \(local) && \(inRef("refs/remotes/\(remote)/\(target)")); then echo LANDED; else echo PENDING; fi; "
             + "else echo NOREMOTE; if \(local); then echo INLOCAL; else echo PENDING; fi; fi"
         return cmd
@@ -243,12 +289,13 @@ extension CodingTaskEngine {
     nonisolated static func pushTargetCommand(root: String, target: String, remote: String) -> String {
         guard isSafeRemoteName(remote) else { return "echo push-failed" }
         let tracking = "refs/remotes/\(remote)/\(target)"
-        return "r=\(q(root)); export GIT_TERMINAL_PROMPT=0; "
-            + "git -C \"$r\" fetch -q -- \(q(remote)) >/dev/null 2>&1 || { echo fetch-failed; exit 0; }; "
-            + "if git -C \"$r\" rev-parse -q --verify \(q(tracking)) >/dev/null 2>&1 "
-            + "&& ! git -C \"$r\" merge-base --is-ancestor \(q(tracking)) \(q("refs/heads/" + target)) 2>/dev/null; "
+        return "r=\(q(root)); " + networkGitEnv
+            + "if \(localCredentialHelperCheck("\"$r\"")); then echo push-failed; exit 0; fi; "
+            + "\(pinnedFetch("\"$r\"", remote: remote)) >/dev/null 2>&1 || { echo fetch-failed; exit 0; }; "
+            + "if \(pinnedGit("\"$r\"")) rev-parse -q --verify \(q(tracking)) >/dev/null 2>&1 "
+            + "&& ! \(pinnedGit("\"$r\"")) merge-base --is-ancestor \(q(tracking)) \(q("refs/heads/" + target)) 2>/dev/null; "
             + "then echo behind; exit 0; fi; "
-            + "git -C \"$r\" push -q -- \(q(remote)) \(q("refs/heads/\(target):refs/heads/\(target)")) >/dev/null 2>&1 "
+            + "\(pinnedPush("\"$r\"", remote: remote, refspec: "refs/heads/\(target):refs/heads/\(target)")) >/dev/null 2>&1 "
             + "&& echo pushed || echo push-failed"
     }
 

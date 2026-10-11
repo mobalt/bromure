@@ -19,7 +19,7 @@ enum TaskLitter {
     /// Untracked folders are listed file by file: a folder holding only
     /// `__pycache__/` would otherwise show (and count) as one new folder.
     static func status(_ quotedDir: String) -> String {
-        "git -C \(quotedDir) status --porcelain --untracked-files=all 2>/dev/null | \(statusFilter)"
+        "git -c core.fsmonitor=false -C \(quotedDir) status --porcelain --untracked-files=all 2>/dev/null | \(statusFilter)"
     }
 }
 
