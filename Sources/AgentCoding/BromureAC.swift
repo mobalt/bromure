@@ -1694,11 +1694,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // its storage out from under a live VM.
             for _ in 0..<24 {
                 guard let self else { return }
-                if self.runningSessions[id] == nil { break }
+                if !self.diskInUse(id) { break }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             guard let self else { return }
-            guard self.runningSessions[id] == nil else {
+            guard !self.diskInUse(id) else {
                 BACDebug.log("automation",
                              "clone “\(profile.name)” still running — leaving it for manual cleanup")
                 return
@@ -1918,6 +1918,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// else it's off.
     private func runState(for profile: Profile) -> SessionListModel.RunState {
         if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
+        if bootsInFlight.contains(profile.id) { return .booting }
         if let session = runningSessions[profile.id] {
             switch session.sandbox.state {
             case .running:            return .running
@@ -2175,6 +2176,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// attached (detached / headless). The persistent-agent model — where
     /// VMs survive the GUI being closed — hangs off this split.
     var runningSessions: [Profile.ID: RunningSession] = [:]
+
+    /// Boots `launch` has started but not finished (see `BootsInFlight`).
+    let bootsInFlight = BootsInFlight()
+
+    /// A VM has (or is about to have) this workspace's disk and home open:
+    /// it is running, or its boot is under way. Deleting, resetting or
+    /// reverting them now would pull the images out from under it.
+    func diskInUse(_ id: Profile.ID) -> Bool {
+        bootsInFlight.diskInUse(id, running: runningSessions[id] != nil)
+    }
 
     /// Scheduled automations (sidebar "Automations"): recurring, unattended
     /// agent runs. The store persists next to the profiles dir; the engine
@@ -6113,7 +6124,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let p = profileByNameOrID(key) else {
             return ["ok": false, "error": "Workspace not found: \(key)"]
         }
-        if runningSessions[p.id] != nil {
+        if diskInUse(p.id) {
             // Read by the CLI and by a fat client's "Delete workspace".
             return ["ok": false, "error": "“\(p.name)” is running — shut it down (or `vm kill` it), then delete it."]
         }
@@ -6460,7 +6471,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["error": "Workspace not found: \(idOrName)"]
         }
         // The image is replaced wholesale, so the VM must not have it open.
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
         }
         do {
@@ -10030,7 +10041,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard p.homeModel == .ext4 else {
             return NSLocalizedString("This machine keeps its home on the Mac, not in an image — nothing to rewind.", comment: "rewind home")
         }
-        guard runningSessions[p.id] == nil else {
+        guard !diskInUse(p.id) else {
             return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
         }
         do {
@@ -10050,7 +10061,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func restoreHomeStorage(_ profile: Profile) {
         let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .ext4 else { return }
-        guard runningSessions[p.id] == nil else { return }   // row is disabled while running
+        guard !diskInUse(p.id) else { return }   // row is disabled while running
         let checkpoints = store.listHomeCheckpoints(for: p)
         guard !checkpoints.isEmpty else {
             let alert = NSAlert()
@@ -10088,6 +10099,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard alert.runModal() == .alertFirstButtonReturn,
               checkpoints.indices.contains(popup.indexOfSelectedItem) else { return }
         let choice = checkpoints[popup.indexOfSelectedItem]
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(p.id) else { showRunningRefusal(profile: p, what: "home folder"); return }
 
         do {
             // Safety net first: the pre-restore home becomes a checkpoint.
@@ -11190,7 +11203,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func resetProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "system disk")
             return
         }
@@ -11209,6 +11222,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Reset to base")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "system disk"); return }
 
         do {
             try store.resetDisk(for: profile)
@@ -11222,7 +11237,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `resetProfile`: system layer survives, but everything personal
     /// the user accumulated under /home/ubuntu is gone.
     private func resetHomeProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "home folder")
             return
         }
@@ -11243,6 +11258,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Erase Home")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "home folder"); return }
 
         do {
             try store.resetHome(for: profile)
@@ -11265,19 +11281,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func showRunningRefusal(profile: Profile, what: String) {
         let alert = NSAlert()
         alert.messageText = "Close “\(profile.name)” first."
-        alert.informativeText = "The \(what) is in use by the running VM. Resetting it now would corrupt the live session — close the session window and try again."
+        alert.informativeText = "The \(what) is in use by the running VM. Changing it now would corrupt the live session — close the session window and try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
     private func deleteProfile(_ profile: Profile) {
+        if diskInUse(profile.id) {
+            showRunningRefusal(profile: profile, what: "workspace")
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Delete workspace “\(profile.name)”?"
         alert.informativeText = "Removes its disk, settings, and SSH key. The mounted host folder is untouched."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "workspace"); return }
 
         do {
             try store.delete(profile)
@@ -11341,6 +11362,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
+        // Already booting (a detached boot has no pane to find above): one
+        // boot per disk.
+        if bootsInFlight.contains(profile.id) { return }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -11702,7 +11726,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
+        guard bootsInFlight.begin(profile.id) else { return }
+        refreshSidebar()
         Task { @MainActor [self] in
+            defer {
+                bootsInFlight.end(profile.id)
+                refreshSidebar()
+            }
             let sessionDisk = SessionDisk(
                 profile: profile,
                 store: store,

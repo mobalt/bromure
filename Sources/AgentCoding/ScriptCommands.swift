@@ -96,6 +96,7 @@ final class BromureACDeleteProfileCommand: NSScriptCommand {
             guard let d = NSApp.delegate as? ACAppDelegate else { return "error: app not ready" as Any }
             let key = directParameter as? String ?? ""
             guard let profile = findProfile(key) else { return "error: profile not found" as Any }
+            guard !d.diskInUse(profile.id) else { return "error: the workspace is running — stop it first" as Any }
             try? d.store.delete(profile)
             d.profiles = d.store.loadAll()
             return "ok" as Any

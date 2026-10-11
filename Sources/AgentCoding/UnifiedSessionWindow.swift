@@ -5021,8 +5021,11 @@ private struct ControlMenu: View {
             if let onDuplicate { Button("Duplicate") { onDuplicate(row.id) } }
             Button(NSLocalizedString("Rewind home…", comment: "machine menu")) { onRewindHome(row.id) }
             Divider()
-            if let onReset { Button("Reset disk", role: .destructive) { onReset(row.id) } }
-            Button("Delete workspace", role: .destructive) { onDelete(row.id) }
+            // A running or booting VM has the disk open: shut it down first
+            // (the host refuses too).
+            let inUse = row.state == .running || row.state == .booting
+            if let onReset { Button("Reset disk", role: .destructive) { onReset(row.id) }.disabled(inUse) }
+            Button("Delete workspace", role: .destructive) { onDelete(row.id) }.disabled(inUse)
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
