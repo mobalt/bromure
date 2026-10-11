@@ -77,8 +77,11 @@ enum BranchMergeCommands {
         case .conflict: reason = "Merging it straight away hit a conflict (or the target checkout has uncommitted changes)."
         }
         let b = q(branch)
+        // Both in the target's checkout: the agent's own cwd is this
+        // branch's worktree, where a bare commit would miss the squash.
+        let there = "git -C \"$(\(checkoutOf(into)))\""
         let step = squash
-            ? "`git -C \"$(\(checkoutOf(into)))\" merge --squash -- \(b)`, then commit it there: `git commit -m \(q("Squash-merge " + branch))`"
+            ? "`\(there) merge --squash -- \(b)`, then commit it there: `\(there) commit -m \(q("Squash-merge " + branch))`"
             : "`git merge --no-edit -- \(b)` in the checkout of '\(into)' (`git worktree list` shows where it is)"
         return """
             The user asked to \(squash ? "squash-merge" : "merge") this branch ('\(branch)') into '\(into)'. \(reason)

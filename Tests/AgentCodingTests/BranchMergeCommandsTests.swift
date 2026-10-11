@@ -70,4 +70,26 @@ struct BranchMergeCommandsTests {
         #expect(sh(BranchMergeCommands.checkoutOf("main"), in: root).trimmingCharacters(in: .whitespacesAndNewlines)
                 .hasSuffix("/repo"))
     }
+
+    /// Finding: the squash brief squashed in the target's checkout, then
+    /// told the agent to run a bare `git commit` — in its own worktree, so
+    /// the squash stayed staged and uncommitted on the target.
+    @Test("the squash brief, run as given from the branch's worktree, commits on the target")
+    func squashBriefCommitsOnTarget() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bms-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let root = dir + "/repo", wt = dir + "/wt"
+        _ = sh("git init -q -b main repo && cd repo && echo a > a && git add a && git commit -qm a "
+               + "&& git worktree add -q -b wt/x \(wt) && cd \(wt) && echo b > b && git add b && git commit -qm b", in: dir)
+        let brief = BranchMergeCommands.mergePrompt(branch: "wt/x", into: "main", squash: true, why: .dirty)
+        // The step's commands, in order, as the agent would run them.
+        let cmds = brief.components(separatedBy: "`").enumerated().filter { $0.offset % 2 == 1 }.map(\.element)
+            .filter { $0.contains("merge --squash") || $0.contains(" commit -m ") }
+        #expect(cmds.count == 2)
+        _ = sh(cmds.joined(separator: " && "), in: wt)
+        #expect(sh("git log -1 --format=%s main", in: root).trimmingCharacters(in: .whitespacesAndNewlines)
+                == "Squash-merge wt/x")
+        #expect(sh("git status --porcelain", in: root).isEmpty)
+    }
 }
