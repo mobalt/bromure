@@ -178,11 +178,13 @@ enum Worktrees {
     /// probe); nil when the checkout is gone.
     static func probe(dir: String, parent: String?) -> (info: [String: Any], root: String, parent: String)? {
         guard FileManager.default.fileExists(atPath: dir) else { return nil }
-        let script = "cd \(q(dir)) || exit 1; r=$(git worktree list --porcelain | head -1 | cut -c10-); "
+        // Nothing the repository's config names runs here, on the Mac
+        // (RepoGitPrograms): `git status` ran its clean filters.
+        let script = "cd \(q(dir)) || exit 1; \(RepoGitPrograms.off("."))r=$(git worktree list --porcelain | head -1 | cut -c10-); "
             + "p=\(q(parent ?? "")); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD); "
             + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
             + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-            + "c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
+            + "c=$(git status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
         guard let out = sh(script) else { return nil }
         let f = out.split(separator: "|").map(String.init)
         guard f.count == 3 else { return nil }
@@ -215,7 +217,7 @@ enum Worktrees {
         guard BranchMergeCommands.unsafeBranch(branch, target) == nil else { return false }
         let r = q(root), b = q(branch), t = q(target)
         let check = squash
-            ? "[ -z \"$(git -C \(r) diff \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
+            ? "[ -z \"$(git -C \(r) diff \(RepoGitPrograms.diffFlags) \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
             : "git -C \(r) merge-base --is-ancestor \(b) \(t) 2>/dev/null && echo merged"
         return (sh(check + "; true") ?? "").contains("merged")
     }

@@ -226,7 +226,9 @@ extension CodingTaskEngine {
     nonisolated static func landingCheckCommand(root: String, branch: String, target: String,
                                                 sourceDir: String?, mode: TaskLanding.Mode) -> String {
         guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo failed" }
-        var cmd = "r=\(q(root)); "
+        // Filters and merge drivers the repository configures never run —
+        // the dirty check's status and the fast-forward's checkout would.
+        var cmd = "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"")
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
         if let src = sourceDir, !src.isEmpty {
@@ -248,7 +250,7 @@ extension CodingTaskEngine {
         return cmd
             + "d=$(\(pinnedGit("\"$r\"")) worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); "
-            + "if [ -n \"$d\" ]; then \(pinnedGit("\"$d\"")) merge --ff-only -q -- \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
+            + "if [ -n \"$d\" ]; then \(RepoGitPrograms.off("\"$d\""))\(pinnedGit("\"$d\"")) merge --ff-only -q -- \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
             + "else \(pinnedGit("\"$r\"")) fetch -q -- . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
     }
 
@@ -276,13 +278,13 @@ extension CodingTaskEngine {
                                                  sourceDir: String?, remote: String? = nil) -> String {
         // A name git would read as an option is never looked up — nor LANDED.
         guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo PENDING" }
-        var cmd = ""
+        var cmd = RepoGitPrograms.off(q(root))
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
         }
         func inRef(_ t: String) -> String {
             "{ \(pinnedGit(q(root))) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
-                + "|| \(pinnedGit(q(root))) diff --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
+                + "|| \(pinnedGit(q(root))) diff \(RepoGitPrograms.diffFlags) --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
         }
         let local = inRef(target)
         guard let remote, !remote.isEmpty else {

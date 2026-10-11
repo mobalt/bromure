@@ -475,6 +475,57 @@ struct LandingRemoteNameTests {
         #expect(ok.trimmingCharacters(in: .whitespacesAndNewlines) == "pushed")
     }
 
+    /// Finding (CWE-78): the dirty check's `git status` ran the clean
+    /// filter, the fast-forward the smudge one, that the repository's config
+    /// names — on attributes from `.git/info/attributes` or the incoming
+    /// commit's `.gitattributes`. Hooks and fsmonitor pinned didn't cover it.
+    @Test("no clean or smudge filter, merge driver or diff program the repository names runs")
+    func repoFiltersRunNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        let dir = (r.root as NSString).deletingLastPathComponent
+        // The filter echoes its input, as a real one would: the status is
+        // still clean, so only the marker tells it ran.
+        let filt = dir + "/filt.sh", wt = dir + "/wt"
+        _ = try sh("printf '#!/bin/sh\\ntouch \(r.marker)\\ncat\\n' > \(filt); chmod +x \(filt); cd \(r.root); "
+                   + "echo a > a; git add a; git -c user.name=t -c user.email=t@t commit -qm a; "
+                   + "git worktree add -q -b wt/t \(wt); cd \(wt); "
+                   + "echo '* filter=evil diff=evil merge=evil' > .gitattributes; echo b > b; git add .gitattributes b; "
+                   + "git -c user.name=t -c user.email=t@t commit -qm b; cd \(r.root); "
+                   + "echo '* filter=evil diff=evil' > .git/info/attributes; "
+                   // An include is local config too.
+                   + "printf '[filter \"evil\"]\\n\\tclean = \(filt)\\n\\tsmudge = \(filt)\\n\\tprocess = \(filt)\\n' > \(dir)/inc; "
+                   + "git config include.path \(dir)/inc; git config merge.evil.driver \(filt); "
+                   + "git config diff.evil.textconv \(filt); git config diff.external \(filt); "
+                   + "touch a \(wt)/b")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // Without the fix, plain git runs it (the test can see it).
+        _ = try sh("cd \(r.root) && git status --porcelain >/dev/null; true")
+        #expect(FileManager.default.fileExists(atPath: r.marker))
+        try FileManager.default.removeItem(atPath: r.marker)
+
+        // The dirty checks.
+        #expect(try sh(TaskLitter.status(CodingTaskEngine.shellQuote(wt))).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The fast-forward: dirty check, then main's checkout takes the
+        // incoming .gitattributes and files.
+        let check = try sh(CodingTaskEngine.landingCheckCommand(root: r.root, branch: "wt/t", target: "main",
+                                                                sourceDir: wt, mode: .merge))
+        #expect(CodingTaskEngine.parseLandingCheck(check) == .mergedNow)
+        #expect(FileManager.default.fileExists(atPath: r.root + "/b"))
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The verify.
+        let verify = try sh(CodingTaskEngine.landingVerifyCommand(root: r.root, branch: "wt/t", target: "main",
+                                                                  sourceDir: wt))
+        #expect(verify.trimmingCharacters(in: .whitespacesAndNewlines) == "LANDED")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+        // The review: its diff, status and summary.
+        _ = try sh("echo c >> \(wt)/b")
+        let review = try sh(TaskReviewData.sessionCommand(dir: wt, base: .branch("main")))
+        #expect(review.contains("===DIFF===") && review.contains("+c"))
+        _ = try sh(TaskReviewSummary.command(root: r.root, worktreeDir: wt, branch: "wt/t", target: "main"))
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+    }
+
     /// Finding: a remote whose NAME is safe (`origin`) still ran the
     /// programs the repository's config names — its pack helpers, hooks.
     @Test("a safe-named remote runs none of the programs the repository's config names")

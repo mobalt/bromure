@@ -56,12 +56,12 @@ extension AgentSessionEngine {
         for s in sessions {
             let dir = Self.q(ScheduledAutomationEngine.guestPath(s.cwd))
             let parent = s.branchParent.map(Self.q) ?? "''"
-            script += "( printf '%s\\t' \(s.id.uuidString); cd \(dir) 2>/dev/null || { echo gone; exit; }; "
+            script += "( printf '%s\\t' \(s.id.uuidString); cd \(dir) 2>/dev/null || { echo gone; exit; }; \(RepoGitPrograms.off("."))"
                 + "r=$(git worktree list --porcelain 2>/dev/null | head -1 | cut -c10-); "
                 + "p=\(parent); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
                 + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
                 + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-                + "c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); "
+                + "c=$(git status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' '); "
                 + "echo \"$a $b $c|$r|$p\" ); "
         }
         guard let out = try? await delegate.guestExec(profileID: profileID, command: script, timeout: 20) else { return }
@@ -198,7 +198,7 @@ extension AgentSessionEngine {
                 // Merged: the branch is in the target. Squashed: the target
                 // holds everything the branch changed.
                 let check = m.squash
-                    ? "[ -z \"$(git -C \(r) diff \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
+                    ? "[ -z \"$(git -C \(r) diff \(RepoGitPrograms.diffFlags) \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
                     : "git -C \(r) merge-base --is-ancestor \(b) \(t) 2>/dev/null && echo merged"
                 let out = (try? await delegate.guestExec(profileID: s.profileID, command: check + "; true", timeout: 15)) ?? ""
                 if out.contains("merged") {
