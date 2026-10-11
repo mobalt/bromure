@@ -764,13 +764,34 @@ final class RemoteHostController {
             appliedEpoch = epoch
             appliedGeneration = gen
         }
+        // Guard against a degenerate /state. A 200 poll whose body was truncated
+        // or failed to parse arrives as an (almost) empty snapshot, and a server
+        // whose list isn't wired yet sends an empty one. Applying it wipes
+        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell,
+        // the board, the sessions stage, and a sign-in in progress (a missing
+        // `pendingRegistration` reads as "the flow ended") — and because the
+        // workspace screen unmounts its live terminals whenever `isRunning`
+        // goes false, the screen flashes to a blank "Info" view until the next
+        // good poll repaints it. So once anything was applied, a snapshot with
+        // no `workspaces` array, or one whose host says it didn't list them,
+        // keeps the last good state — even with no workspace left to keep,
+        // since that is a steady state now. A listed, empty array is real: the
+        // last workspace was deleted — skipping it froze the mirror on the
+        // deleted row for good. (keys= reveals the cause.)
+        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
+        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
+        if degenerate, revision > 0 {
+            FatClientLog.log("apply: skipped degenerate snapshot "
+                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
+                + "kept \(profilesByID.count) workspaces")
+            return
+        }
         // First: the workspace/VM updates below already consult it.
         isAgentHost = snapshot["hostKind"] as? String == "agent-host"
         if listModel.switchboardAvailable == isAgentHost { listModel.switchboardAvailable = !isAgentHost }
 #if os(macOS)
         updateDelegationRelay()
 #endif
-        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
         let workspaces = listedWorkspaces ?? []
         let attached = Set(workspaces.compactMap { w -> UUID? in
             guard w["hostKind"] as? String == "agent-host" else { return nil }
@@ -785,24 +806,6 @@ final class RemoteHostController {
         if listModel.pendingMachines != pendingMachines { listModel.pendingMachines = pendingMachines }
         let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
         if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
-        // Guard against a degenerate /state. A 200 poll whose body was truncated
-        // or failed to parse arrives as an (almost) empty snapshot, and a server
-        // whose list isn't wired yet sends an empty one. Applying it wipes
-        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
-        // — and because the workspace screen unmounts its live terminals whenever
-        // `isRunning` goes false, the screen flashes to a blank "Info" view until
-        // the next good poll repaints it. So a snapshot with no `workspaces`
-        // array, or one whose host says it didn't list them, keeps the last
-        // good state. A listed, empty array is real: the last workspace was
-        // deleted — skipping it froze the mirror on the deleted row for good.
-        // (keys= reveals the cause.)
-        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
-        if degenerate, revision > 0, !profilesByID.isEmpty {
-            FatClientLog.log("apply: skipped degenerate snapshot "
-                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
-                + "kept \(profilesByID.count) workspaces")
-            return
-        }
         let vms = (snapshot["vms"] as? [[String: Any]]) ?? []
         let grid = (snapshot["gridLayout"] as? [String: Any]) ?? ["cells": []]
         let autos = (snapshot["automations"] as? [String: Any]) ?? [:]

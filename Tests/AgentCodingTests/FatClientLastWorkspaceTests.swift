@@ -42,6 +42,24 @@ struct FatClientLastWorkspaceTests {
         #expect(c.listModel.profileRows.count == 1)
     }
 
+    /// Finding (CWE-754): with no workspace left, the guard was disarmed —
+    /// a truncated poll (`[:]`) wiped the board, the grid and the sessions
+    /// stage, and cancelled a sign-in in progress.
+    @Test("with no workspace left, a truncated snapshot still keeps the mirror")
+    func truncatedKeepsEmptyMirror() {
+        let c = controller(with: UUID())
+        c.applyPushedSnapshot(["workspaces": [] as [[String: Any]], "vms": [], "workspacesListed": true,
+                               "agentSessions": [] as [[String: Any]]])
+        #expect(c.listModel.profileRows.isEmpty)
+        #expect(c.supportsSessions)
+        let rev = c.revision
+        c.applyPushedSnapshot([:])
+        c.applyPushedSnapshot(["vms": []])
+        c.applyPushedSnapshot(["workspaces": [] as [[String: Any]], "workspacesListed": false])
+        #expect(c.supportsSessions)
+        #expect(c.revision == rev)
+    }
+
     @Test("a successful delete drops the row at once")
     func deleteDropsRow() {
         let id = UUID()
