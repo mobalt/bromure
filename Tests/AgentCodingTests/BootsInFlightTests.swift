@@ -74,4 +74,29 @@ import Testing
         second()
         #expect(delegate.diskInUse(id))
     }
+
+    /// Finding (CWE-362): a failed clone-first run deletes its workspace
+    /// after a shutdown — but a stop during the boot found no session and
+    /// did nothing, so the VM that registered afterwards stayed up for good.
+    @Test("a stop asked for during a boot is kept for its registration, and dropped with the boot")
+    func stopDuringBootIsDeferred() async {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boots-\(UUID().uuidString)", isDirectory: true)
+        let delegate = ACAppDelegate(
+            imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
+        let id = UUID()
+        // No boot: nothing to remember.
+        await delegate.stopSession(id, action: .shutdown)
+        #expect(delegate.bootsInFlight.takeStop(id) == nil)
+        // Booting: the stop waits for the registration.
+        #expect(delegate.bootsInFlight.begin(id))
+        await delegate.stopSession(id, action: .shutdown)
+        #expect(delegate.bootsInFlight.takeStop(id) == .shutdown)
+        #expect(delegate.bootsInFlight.takeStop(id) == nil)
+        // A boot that fails takes its pending stop with it (the next one
+        // must not be stopped on arrival).
+        await delegate.stopSession(id, action: .suspend)
+        delegate.bootsInFlight.end(id)
+        #expect(delegate.bootsInFlight.takeStop(id) == nil)
+    }
 }

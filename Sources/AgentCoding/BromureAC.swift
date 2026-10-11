@@ -1691,10 +1691,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         requestStopSession(id, action: .shutdown)
         Task { [weak self] in
             // Wait for the session to wind down (bounded) before deleting
-            // its storage out from under a live VM.
-            for _ in 0..<24 {
+            // its storage out from under a live VM. A boot still under way
+            // is stopped when it registers (the stop above is deferred), so
+            // its time doesn't count — up to a hard cap.
+            var waited = 0
+            for _ in 0..<120 {
                 guard let self else { return }
                 if !self.diskInUse(id) { break }
+                if self.runningSessions[id] != nil { waited += 1 }
+                if waited >= 24 { break }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             guard let self else { return }
@@ -2478,6 +2483,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is the strong owner that keeps the VM alive independent of any window.
     @discardableResult
     func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        // A stop asked for during the boot (it had no session to stop then):
+        // honored now that there is one.
+        if let action = bootsInFlight.takeStop(profile.id) {
+            requestStopSession(profile.id, action: action)
+        }
         if let existing = runningSessions[profile.id] {
             existing.sandbox = sandbox
             existing.profile = profile
@@ -14583,6 +14593,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// guest "all shells exited" signal.
     @MainActor
     func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+        // Still booting: no session yet, so nothing to stop — and the VM that
+        // registers after would stay up. Stopped when it registers instead.
+        if runningSessions[profileID] == nil, bootsInFlight.deferStop(profileID, action: action) {
+            return
+        }
         guard let session = runningSessions[profileID], !session.stopping,
               let vm = session.sandbox.vm else { return }
         let sandbox = session.sandbox
