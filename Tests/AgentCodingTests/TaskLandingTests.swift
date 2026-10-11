@@ -269,6 +269,7 @@ struct TaskLandingTests {
             var env = ProcessInfo.processInfo.environment
             env["GIT_AUTHOR_NAME"] = "t"; env["GIT_AUTHOR_EMAIL"] = "t@t"
             env["GIT_COMMITTER_NAME"] = "t"; env["GIT_COMMITTER_EMAIL"] = "t@t"
+            env.merge(LoopbackSSH.environment) { $1 }
             p.environment = env
             let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
             try? p.run(); p.waitUntilExit()
@@ -276,6 +277,7 @@ struct TaskLandingTests {
         }
         let r = dir.appendingPathComponent("work").path
         _ = sh("git init -q --bare -b main remote.git && git clone -q remote.git work 2>/dev/null; cd work "
+               + "&& git remote set-url origin \(LoopbackSSH.url(dir.appendingPathComponent("remote.git").path)) "
                + "&& git checkout -q -b main && echo a > a && git add a && git commit -qm a && git push -q origin main "
                + "&& git branch wt/x && git checkout -q wt/x && echo b > b && git add b && git commit -qm b "
                + "&& git checkout -q main && git merge -q --ff-only wt/x")
@@ -466,6 +468,7 @@ struct LandingRemoteNameTests {
         let p = Process(), out = Pipe()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", cmd]
+        p.environment = ProcessInfo.processInfo.environment.merging(LoopbackSSH.environment) { $1 }
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         try p.run(); p.waitUntilExit()
@@ -480,7 +483,7 @@ struct LandingRemoteNameTests {
         var cmd = "set -e; mkdir -p \(dir); git init -q --bare \(dir)/bare.git; git init -q -b main \(dir)/w; cd \(dir)/w; "
             + "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init; "
             + "printf '#!/bin/sh\\ntouch \(marker)\\n' > pwn.sh; chmod +x pwn.sh; "
-        for r in remotes { cmd += "git remote add -- \(CodingTaskEngine.shellQuote(r)) \(dir)/bare.git; " }
+        for r in remotes { cmd += "git remote add -- \(CodingTaskEngine.shellQuote(r)) \(LoopbackSSH.url(dir + "/bare.git")); " }
         _ = try sh(cmd)
         return (dir + "/w", marker)
     }
@@ -576,6 +579,29 @@ struct LandingRemoteNameTests {
         #expect(review.contains("===DIFF===") && review.contains("+c"))
         _ = try sh(TaskReviewSummary.command(root: r.root, worktreeDir: wt, branch: "wt/t", target: "main"))
         #expect(!FileManager.default.fileExists(atPath: r.marker))
+    }
+
+    /// Finding (CWE-78): `file` was on the transport allowlist, which beats
+    /// a global `protocol.file.allow=never` — a local URL started a local
+    /// receive-pack that ran the target repository's `pre-receive` hook.
+    @Test("a local-path or file:// remote runs none of its hooks: the push is left to the agent")
+    func fileRemoteRunsNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        let dir = (r.root as NSString).deletingLastPathComponent
+        _ = try sh("cd \(r.root) && git init -q --bare evil.git && cp pwn.sh evil.git/hooks/pre-receive "
+                   + "&& cp pwn.sh evil.git/hooks/pre-upload-pack 2>/dev/null; git config remote.origin.url ./evil.git")
+        for url in ["./evil.git", "\(r.root)/evil.git", "file://\(r.root)/evil.git", "file://\(dir)/bare.git"] {
+            _ = try sh("git -C \(r.root) config remote.origin.url \(CodingTaskEngine.shellQuote(url))")
+            let push = try sh("cd \(r.root) && " + CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
+            #expect(push.trimmingCharacters(in: .whitespacesAndNewlines) == "fetch-failed", "\(url)")
+            let verify = try sh("cd \(r.root) && " + CodingTaskEngine.landingVerifyCommand(
+                root: r.root, branch: "main", target: "main", sourceDir: nil, remote: "origin"))
+            #expect(verify.contains("NOREMOTE"), "\(url)")
+            #expect(!FileManager.default.fileExists(atPath: r.marker), "\(url)")
+        }
+        // The setup is live: a plain push to that URL runs the hook.
+        _ = try sh("cd \(r.root) && git push -q ./evil.git main; true")
+        #expect(FileManager.default.fileExists(atPath: r.marker))
     }
 
     /// Finding (CWE-78): with the remote named `origin`, the repository's
@@ -785,6 +811,7 @@ struct LandingRemoteUncheckedTests {
         let p = Process(), out = Pipe()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", cmd]
+        p.environment = ProcessInfo.processInfo.environment.merging(LoopbackSSH.environment) { $1 }
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         try p.run(); p.waitUntilExit()
@@ -795,7 +822,7 @@ struct LandingRemoteUncheckedTests {
     /// repo next to it, or an unreachable URL.
     private func repo(reachable: Bool) throws -> String {
         let dir = "/tmp/bac-verify-\(UUID().uuidString.prefix(8))"
-        let origin = reachable ? "\(dir)/bare.git" : "file:///nonexistent/\(UUID().uuidString).git"
+        let origin = reachable ? LoopbackSSH.url("\(dir)/bare.git") : "file:///nonexistent/\(UUID().uuidString).git"
         _ = try sh("set -e; mkdir -p \(dir); git init -q --bare \(dir)/bare.git; git init -q -b main \(dir)/w; cd \(dir)/w; "
                    + "g='git -c user.name=t -c user.email=t@t'; $g commit -q --allow-empty -m init; "
                    + "git remote add origin \(origin); "
@@ -829,4 +856,18 @@ struct LandingRemoteUncheckedTests {
         #expect(LandingVerification.parse(try verify(root, remote: nil)) == .landed)
         #expect(LandingVerification.parse(nil) == .unknown)
     }
+}
+
+/// An ssh remote for the landing tests with no ssh server: git's "simple"
+/// ssh variant passes the host and the remote command, and this stand-in
+/// runs the command here. (`file` remotes are off Bromure's allowlist.)
+enum LoopbackSSH {
+    static let path: String = {
+        let p = FileManager.default.temporaryDirectory.appendingPathComponent("loopback-ssh-\(UUID().uuidString.prefix(8))").path
+        try? "#!/bin/sh\nexec /bin/sh -c \"$2\"\n".write(toFile: p, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: p)
+        return p
+    }()
+    static var environment: [String: String] { ["GIT_SSH_COMMAND": path, "GIT_SSH_VARIANT": "simple"] }
+    static func url(_ repoPath: String) -> String { "ssh://loopback" + repoPath }
 }

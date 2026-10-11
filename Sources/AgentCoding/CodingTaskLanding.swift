@@ -138,13 +138,16 @@ extension CodingTaskEngine {
     /// ssh program from the user's own git config (global, system) or plain
     /// `ssh` — never a `core.sshCommand` the repository sets. Read outside
     /// any repository so the local config can't answer.
-    /// Transports: https, http, ssh, file only (`GIT_ALLOW_PROTOCOL`
-    /// overrides any `protocol.*.allow` the repository sets) — never `ext::`
-    /// (a remote URL that is a command) nor `git://` (its `core.gitProxy`
-    /// program), nor a remote helper the config names. No `core.askPass`:
+    /// Transports: https, http, ssh only (`GIT_ALLOW_PROTOCOL` overrides
+    /// any `protocol.*.allow`) — never `ext::` (a remote URL that is a
+    /// command), `git://` (its `core.gitProxy` program), a remote helper the
+    /// config names, nor `file` (a local path or file:// URL): its
+    /// receive-pack runs in this machine, under the target repository's own
+    /// config and hooks — `pre-receive` in a repository the URL can name.
+    /// A local remote's push and check are left to the agent. No `core.askPass`:
     /// an asked-for password gets nothing (`GIT_ASKPASS` beats the config).
     nonisolated static let networkGitEnv =
-        "export GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:http:ssh:file; "
+        "export GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:http:ssh; "
         + "[ -n \"${GIT_ASKPASS:-}\" ] || export GIT_ASKPASS=/bin/false; "
         + "if [ -z \"${GIT_SSH_COMMAND:-}\" ] && [ -z \"${GIT_SSH:-}\" ]; then "
         + "GIT_SSH_COMMAND=$(cd / && { git config --global --get core.sshCommand || git config --system --get core.sshCommand; } 2>/dev/null) "
