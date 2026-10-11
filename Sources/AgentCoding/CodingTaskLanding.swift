@@ -290,8 +290,11 @@ extension CodingTaskEngine {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
         }
         func inRef(_ t: String) -> String {
-            "{ \(pinnedGit(q(root))) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
-                + "|| \(pinnedGit(q(root))) diff \(RepoGitPrograms.diffFlags) --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
+            // Revisions after --end-of-options: never an option, whatever
+            // the name (a diff that exits 0 because it parsed the target as
+            // `--diff-filter=A` read as LANDED).
+            "{ \(pinnedGit(q(root))) merge-base --is-ancestor --end-of-options \(q(branch)) \(q(t)) 2>/dev/null "
+                + "|| \(pinnedGit(q(root))) diff \(RepoGitPrograms.diffFlags) --quiet --end-of-options \(q(t)) \(q(branch)) -- 2>/dev/null; }"
         }
         let local = inRef(target)
         guard let remote, !remote.isEmpty else {
@@ -442,6 +445,7 @@ extension CodingTaskEngine {
             $0.landing = TaskLanding(mode: mode, target: wanted, phase: .checking,
                                      startedAt: Date(), keepBranch: keepBranch,
                                      push: push && mode != .pr ? true : nil)
+            $0.approvedTarget = wanted.isEmpty ? nil : wanted
             $0.lastError = nil
         }
         BACDebug.log("tasks", "“\(task.title)”: landing \(branch) → \(wanted.isEmpty ? "parent" : wanted) (\(mode.rawValue))")
@@ -480,6 +484,7 @@ extension CodingTaskEngine {
                     $0.landing = TaskLanding(mode: .merge, target: $0.parentBranch ?? "", phase: .checking,
                                              startedAt: Date(), keepBranch: keepBranch,
                                              push: push ? true : nil)
+                    $0.approvedTarget = $0.parentBranch
                     $0.lastError = nil
                 }
             }
@@ -1130,10 +1135,17 @@ extension CodingTaskEngine {
             return (false, "This task isn't waiting to land.")
         }
         if task.landing == nil {
-            // The agent landed it on its own: record it as a merge into the parent.
+            // No landing under way: only one the user approved (and then
+            // cancelled — its brief may have been out) is recorded, into the
+            // target they approved. Without that, an agent's "merged" is its
+            // word, not the user's: the card stays in Review with it.
+            guard let approved = task.approvedTarget, Self.isSafeBranchName(approved) else {
+                store.mutate(taskID) { $0.mergeReport = summary }
+                return (false, "Nobody approved landing this task yet — it stays in Review, and the user lands it from the board.")
+            }
             store.mutate(taskID) {
                 $0.landing = TaskLanding(mode: status == "pr_opened" ? .pr : .merge,
-                                         target: $0.parentBranch ?? "", phase: .agentLanding,
+                                         target: approved, phase: .agentLanding,
                                          startedAt: Date())
             }
         }

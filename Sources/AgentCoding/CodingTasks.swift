@@ -130,6 +130,12 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// The landing under way (or stuck) — set from the moment the user
     /// approves a merge or a pull request until the card goes Done.
     var landing: TaskLanding?
+    /// Where the user last approved landing this round of work — kept when
+    /// they cancel the landing (its brief may be out already), cleared when
+    /// the work goes back to the agent. Only a landing into it, seen in git,
+    /// finishes the card with no landing under way: the parent branch is
+    /// read from the machine the agent works on, so it's never the approval.
+    var approvedTarget: String?
     /// How a Done card got there (nil on cards finished by older builds —
     /// `effectiveCompletion` derives one from `merged`/`prOpened`).
     var completion: TaskCompletion?
@@ -290,8 +296,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
 
     /// The branch this task lands in: the landing's own target while one
     /// runs, else where the work forked from.
+    /// A parent that isn't a plain branch name (it's read from the agent's
+    /// machine) is no target.
     var landingTarget: String? {
-        landing?.target ?? parentBranch
+        landing?.target ?? parentBranch.flatMap { CodingTaskEngine.isSafeBranchName($0) ? $0 : nil }
     }
 
     /// How the card got to Done — recorded, or derived for cards an older
@@ -2629,6 +2637,7 @@ final class CodingTaskEngine {
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
@@ -2726,6 +2735,7 @@ final class CodingTaskEngine {
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
@@ -2782,6 +2792,7 @@ final class CodingTaskEngine {
                 $0.stage = .inProgress
                 $0.lastError = nil
                 $0.landing = nil
+                $0.approvedTarget = nil
                 $0.deliverySummary = nil
             }
             markCommentsSent(taskID, ids)
@@ -2793,6 +2804,7 @@ final class CodingTaskEngine {
             $0.stage = .inProgress
             $0.lastError = nil
             $0.landing = nil   // cancels a landing under way
+            $0.approvedTarget = nil
             $0.sessionParkedAt = nil
             $0.startedAt = Date()   // restart the session-gone clock
         }
@@ -3242,6 +3254,7 @@ final class CodingTaskEngine {
             $0.parentBranch = nil; $0.rootRepo = nil
             $0.startedAt = nil; $0.testingAt = nil; $0.completedAt = nil
             $0.landing = nil; $0.merged = false; $0.prOpened = nil
+            $0.approvedTarget = nil
             $0.completion = nil; $0.codeChanges = nil; $0.sessionParkedAt = nil
             $0.lastError = nil; $0.restartNeeded = nil; $0.resumeBranch = nil
         }
@@ -3290,6 +3303,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()   // restart the session-gone clock
                 // A finished task picked back up is active again.
                 $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.landing = nil
+                $0.approvedTarget = nil
                 $0.completion = nil; $0.sessionParkedAt = nil
                 $0.restartNeeded = nil
             }
@@ -4427,6 +4441,7 @@ final class CodingTaskEngine {
             if $0.stage == .testing || $0.stage == .planning {
                 $0.stage = .inProgress
                 $0.landing = nil   // cancels a landing under way
+                $0.approvedTarget = nil
             }
         }
     }

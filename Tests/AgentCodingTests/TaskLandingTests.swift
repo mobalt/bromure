@@ -343,6 +343,58 @@ struct TaskLandingTests {
         #expect(TaskLandingText.done(done!) == "PR #9 opened")
     }
 
+    /// Finding (CWE-807): with no landing under way, an assignee's
+    /// "merged" closed the card as a verified merge into the parent its own
+    /// machine reported — no approval, and a parent like `--diff-filter=A`
+    /// made the verify's diff exit 0.
+    @Test("with no landing under way, only the target the user approved can finish the card")
+    func unapprovedMergeStaysInReview() async {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let t = reviewTask(s)
+        let r = await engine.reportLanding(t.id, status: "merged", summary: "merged it myself", prURL: nil)
+        #expect(!r.ok)
+        #expect(s.task(t.id)?.stage == .testing && s.task(t.id)?.landing == nil)
+        #expect(s.task(t.id)?.mergeReport == "merged it myself")
+
+        // Approved, then cancelled while the brief was out: the reply lands
+        // it — into the target the user approved, not the parent.
+        s.mutate(t.id) { $0.approvedTarget = "release"; $0.parentBranch = "elsewhere" }
+        let ok = await engine.reportLanding(t.id, status: "merged", summary: "in", prURL: nil)
+        #expect(ok.ok)
+        #expect(s.task(t.id)?.completion == .merged(target: "release", verified: false, by: "Claude Code"))
+
+        // Back to work: the approval is spent.
+        let u = reviewTask(s, branch: "wt/again")
+        s.mutate(u.id) { $0.approvedTarget = "main" }
+        engine.moveToInProgress(u.id)
+        #expect(s.task(u.id)?.approvedTarget == nil)
+    }
+
+    @Test("a parent that isn't a plain branch name is no target, and the verify reads names after --end-of-options")
+    func optionShapedParentIsNoTarget() throws {
+        let s = store()
+        let t = reviewTask(s)
+        s.mutate(t.id) { $0.parentBranch = "--diff-filter=A" }
+        #expect(s.task(t.id)?.landingTarget == nil)
+        let cmd = CodingTaskEngine.landingVerifyCommand(root: "/r", branch: "wt/x", target: "main", sourceDir: nil)
+        #expect(cmd.contains("merge-base --is-ancestor --end-of-options 'wt/x' 'main'"))
+        #expect(cmd.contains("--quiet --end-of-options 'main' 'wt/x' --"))
+        // In a real repository: a modify-only branch ahead of main is PENDING.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("verify-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", "set -e; git init -q -b main \(dir); cd \(dir); echo a > a; git add a; "
+                       + "git -c user.name=t -c user.email=t@t commit -qm a; git checkout -qb wt/x; echo b > a; "
+                       + "git -c user.name=t -c user.email=t@t commit -qam b; "
+                       + CodingTaskEngine.landingVerifyCommand(root: dir, branch: "wt/x", target: "main", sourceDir: nil)]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        try p.run(); p.waitUntilExit()
+        #expect(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "PENDING")
+    }
+
     // MARK: Housekeeping
 
     @Test("Review sessions idle for over two hours are put away — not while landing or touched")
