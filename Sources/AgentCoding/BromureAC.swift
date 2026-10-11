@@ -9831,6 +9831,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             hostAgentSockets: HostAgentClient.candidateHostSockets(),
             onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
+            consentGrants: editing.flatMap { p in
+                mitmEngine.map { Self.consentGrantControls($0.consent, profileID: p.id) }
+            },
             claudeAccountSavedAt: (editing ?? initialDraft).map { p in
                 { [weak self] in
                     self?.mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
@@ -15480,6 +15483,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             filename: basename,
             publicKeyText: pubText,
             hasPassphrase: hasPass)
+    }
+
+    /// The Guardrails pane's view of one workspace's consent grants.
+    nonisolated static func consentGrantControls(_ broker: ConsentBroker,
+                                                 profileID: UUID) -> ProfileEditorView.ConsentGrantControls {
+        ProfileEditorView.ConsentGrantControls(
+            status: {
+                var out: [String: ProfileEditorView.ConsentGrantStatus] = [:]
+                for e in await broker.snapshot() where e.profileID == profileID {
+                    out[e.credentialID] = .init(denied: e.kind == .deny, expiration: e.expiration,
+                                                sessionScoped: e.isSessionScoped)
+                }
+                return out
+            },
+            allow: { id, name, minutes in
+                let decision: ConsentBroker.Decision = switch minutes {
+                case nil: .allowSession
+                case 5: .allow5min
+                default: .allow1hr
+                }
+                await broker.grant(profileID: profileID, credentialID: id, decision,
+                                   credentialDisplayName: name)
+            },
+            revoke: { id in await broker.revoke(profileID: profileID, credentialID: id) })
     }
 
     /// The keys a host ssh-agent holds, as `ImportedSSHKey`s ready to

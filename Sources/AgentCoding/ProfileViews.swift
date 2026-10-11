@@ -531,6 +531,9 @@ struct ProfileEditorView: View {
     @State private var importError: String?
     /// Sheet state for "Add from host agent…".
     @State private var hostAgentSheet: HostAgentSheetState?
+    /// This workspace's live consent decisions (Guardrails badges), polled
+    /// from `consentGrants` while the pane is open.
+    @State private var liveGrants: [String: ConsentGrantStatus] = [:]
     @State private var confirmBrowserRedownload = false
     /// Keys of the disclosure groups the user has expanded in the
     /// Credentials pane. All sections start collapsed — the user
@@ -572,6 +575,24 @@ struct ProfileEditorView: View {
         var passphrase: String
     }
 
+    /// A live consent decision for one credential, as the Guardrails pane
+    /// shows it next to "Require approval to use".
+    struct ConsentGrantStatus: Equatable {
+        var denied: Bool
+        var expiration: Date
+        var sessionScoped: Bool
+    }
+
+    /// The host's consent broker, seen from the editor: this workspace's live
+    /// grants by consent id, and the right-click actions on them. nil = no
+    /// broker here (a new workspace, a remote editor) → no badges.
+    struct ConsentGrantControls {
+        var status: () async -> [String: ConsentGrantStatus]
+        /// minutes nil = the rest of the session.
+        var allow: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var revoke: (_ credentialID: String) async -> Void
+    }
+
     struct HostAgentSheetState: Identifiable {
         let id = UUID()
         /// A `hostAgentSocket` value: "" = bromure's SSH_AUTH_SOCK.
@@ -603,6 +624,7 @@ struct ProfileEditorView: View {
     /// Lists the keys a host agent holds, ready to add. nil = not on the
     /// host (remote clients) → the button is disabled.
     let onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])?
+    let consentGrants: ConsentGrantControls?
     /// Returns the date this profile/preferences' Claude subscription was
     /// captured (nil = not registered). A closure (not a value) so it's
     /// re-read live after a register/forget. nil = no proxy engine → hide.
@@ -659,6 +681,7 @@ struct ProfileEditorView: View {
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
         hostAgentSockets: [String] = [],
         onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])? = nil,
+        consentGrants: ConsentGrantControls? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
         claudeReauthRequiredAt: (() -> Date?)? = nil,
         codexReauthRequiredAt: (() -> Date?)? = nil,
@@ -684,6 +707,7 @@ struct ProfileEditorView: View {
         self.onRemoveSSHKey = onRemoveSSHKey
         self.hostAgentSockets = hostAgentSockets
         self.onListHostAgentKeys = onListHostAgentKeys
+        self.consentGrants = consentGrants
         self.claudeAccountSavedAt = claudeAccountSavedAt
         self.claudeReauthRequiredAt = claudeReauthRequiredAt
         self.codexReauthRequiredAt = codexReauthRequiredAt
@@ -4296,6 +4320,13 @@ struct ProfileEditorView: View {
             }
             .padding(.bottom, 8)
         }
+        .task {
+            guard let controls = consentGrants else { return }
+            while !Task.isCancelled {
+                liveGrants = await controls.status()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     /// The Firewall pane: the workspace's outbound-connection rules (pf-style
@@ -4371,7 +4402,7 @@ struct ProfileEditorView: View {
                     .labelsHidden().pickerStyle(.menu).frame(width: 176)
                 }
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 3)
@@ -4405,11 +4436,91 @@ struct ProfileEditorView: View {
                 }
                 .padding(.leading, 26)
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 4)
         #endif
+    }
+
+    /// "Require approval to use", plus — while the credential has a live
+    /// grant or remembered deny — a badge counting it down. Right-click to
+    /// allow for a fresh 5 min / 1 hr / the session, or revoke so the next
+    /// use asks again. Acts on the running session at once (grants aren't
+    /// profile settings, so nothing waits for Save).
+    @ViewBuilder
+    private func approvalLine(_ ref: CredentialRef) -> some View {
+        let isOn = approvalBinding(for: ref)
+        let line = HStack(spacing: 6) {
+            requireApprovalToggle(isOn: isOn)
+            if isOn.wrappedValue, let status = liveGrants[draft.consentCredentialID(ref)] {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    grantBadge(status, now: ctx.date)
+                }
+            }
+        }
+        if let controls = consentGrants, isOn.wrappedValue {
+            line.contextMenu { grantMenu(ref, controls: controls) }
+        } else {
+            line
+        }
+    }
+
+    @ViewBuilder
+    private func grantBadge(_ status: ConsentGrantStatus, now: Date) -> some View {
+        if status.sessionScoped {
+            Text(NSLocalizedString("allowed this session", comment: "guardrails grant badge"))
+                .font(.caption2).foregroundStyle(.blue).lineLimit(1)
+                .help(NSLocalizedString("Allowed until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if now < status.expiration {
+            let left = Self.grantRemaining(status.expiration.timeIntervalSince(now))
+            let until = status.expiration.formatted(date: .omitted, time: .shortened)
+            if status.denied {
+                Text(String(format: NSLocalizedString("denied · %@", comment: "guardrails deny badge; %@ = time left"), left))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.red).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Refused without asking until %@. Right-click to allow or to ask again.", comment: ""), until))
+            } else {
+                Label(left, systemImage: "clock")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.orange).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Allowed without asking until %@. Right-click to extend or revoke.", comment: ""), until))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func grantMenu(_ ref: CredentialRef, controls: ConsentGrantControls) -> some View {
+        let id = draft.consentCredentialID(ref)
+        let name = draft.credentialTitle(ref)
+        let act: (@escaping () async -> Void) -> Void = { action in
+            Task { @MainActor in
+                await action()
+                liveGrants = await controls.status()
+            }
+        }
+        Button(NSLocalizedString("Allow for 5 minutes", comment: "")) {
+            act { await controls.allow(id, name, 5) }
+        }
+        Button(NSLocalizedString("Allow for 1 hour", comment: "")) {
+            act { await controls.allow(id, name, 60) }
+        }
+        Button(NSLocalizedString("Allow for the rest of the session", comment: "")) {
+            act { await controls.allow(id, name, nil) }
+        }
+        if liveGrants[id] != nil {
+            Divider()
+            Button(NSLocalizedString("Revoke — ask next time", comment: ""), role: .destructive) {
+                act { await controls.revoke(id) }
+            }
+        }
+    }
+
+    /// "4m" / "1h 05m" / "45s" — rounded up, so a grant never reads 0 early.
+    static func grantRemaining(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds.rounded(.up)))
+        if s < 60 { return "\(s)s" }
+        let m = (s + 59) / 60
+        if m < 60 { return "\(m)m" }
+        return String(format: "%dh %02dm", m / 60, m % 60)
     }
 
     /// A `Binding<Bool>` into a configured credential's `requireApproval` flag,

@@ -6290,6 +6290,26 @@ public extension Profile {
         }
     }
 
+    /// The id the consent broker keeps this credential's grants under — the
+    /// same one each gated call site passes to `ConsentBroker.consent`.
+    func consentCredentialID(_ ref: CredentialRef) -> String {
+        switch ref {
+        case .primaryToolKey:        return ConsentCredentialID.primaryToolAPIKey(tool: tool.rawValue)
+        case .additionalTool(let t): return ConsentCredentialID.primaryToolAPIKey(tool: t.rawValue)
+        case .git(let u):            return ConsentCredentialID.gitHTTPS(u)
+        case .manual(let u):         return ConsentCredentialID.manualToken(u)
+        case .docker(let u):         return ConsentCredentialID.dockerRegistry(u)
+        case .database(let u):       return ConsentCredentialID.httpDatabase(u)
+        case .kube(let u):           return ConsentCredentialID.kubeconfig(u)
+        case .aws:                   return ConsentCredentialID.aws()
+        case .digitalOcean:          return ConsentCredentialID.digitalOcean()
+        case .linear:                return ConsentCredentialID.linear()
+        case .twilio:                return ConsentCredentialID.twilio()
+        case .managedSSHKey:         return ConsentCredentialID.bromureSSHKey()
+        case .importedSSHKey(let u): return ConsentCredentialID.sshKey(u.uuidString)
+        }
+    }
+
     /// A short human title for a credential row.
     func credentialTitle(_ ref: CredentialRef) -> String {
         switch ref {

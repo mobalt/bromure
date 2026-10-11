@@ -298,6 +298,35 @@ public actor ConsentBroker {
         return out.sorted { $0.credentialDisplayName < $1.credentialDisplayName }
     }
 
+    /// Grant (or re-grant) without a prompt — the Guardrails pane's "Allow
+    /// for …" menu. A timed grant runs from now, so re-granting a nearly
+    /// spent 5 minutes gives a fresh 5. Clears a remembered deny. Keeps the
+    /// display name a prompt already gave this credential.
+    public func grant(profileID: UUID, credentialID: CredentialID,
+                      _ decision: Decision, credentialDisplayName: String) {
+        let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
+        let name = grants[key]?.credentialDisplayName ?? denies[key]?.credentialDisplayName
+            ?? credentialDisplayName
+        let now = Date()
+        switch decision {
+        case .deny:
+            return
+        case .allow5min:
+            grants[key] = Grant(expiration: now.addingTimeInterval(5 * 60),
+                                credentialDisplayName: name, isSessionScoped: false)
+        case .allow1hr:
+            grants[key] = Grant(expiration: now.addingTimeInterval(60 * 60),
+                                credentialDisplayName: name, isSessionScoped: false)
+        case .allowSession:
+            grants[key] = Grant(expiration: .distantFuture,
+                                credentialDisplayName: name, isSessionScoped: true)
+        }
+        denies.removeValue(forKey: key)
+        Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                            credential: name, scope: "granted from the Guardrails pane",
+                            outcome: Outcome(decision))
+    }
+
     public func revoke(profileID: UUID, credentialID: CredentialID) {
         let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
         grants.removeValue(forKey: key)
