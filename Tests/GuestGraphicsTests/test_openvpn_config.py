@@ -270,5 +270,33 @@ remote vpn.example 1194
                     "pkcs11-id", "pkcs11-id-management"]:
             self.assertIn(bad, dropped, bad)
 
+    # CWE-94: OpenVPN runs `setenv opt <directive>` as the directive itself.
+    def test_setenv_opt_is_read_as_the_directive_it_wraps(self):
+        text = """client
+setenv opt log /mnt/share/profile.img
+"setenv" opt plugin /tmp/evil.so
+setenv opt pkcs11-providers /tmp/evil.so
+setenv 'opt' config /tmp/extra.ovpn
+setenv opt --providers /tmp/evil.so
+setenv opt setenv opt log-append /mnt/share/profile.img
+setenv opt block-outside-dns
+setenv CLIENT_CERT 0
+remote vpn.example 1194
+"""
+        lines, dropped = config.sanitize_ovpn(text)
+        kept = "\n".join(lines)
+        for bad in ["profile.img", "evil.so", "extra.ovpn"]:
+            self.assertNotIn(bad, kept, bad)
+        for name in ["log", "plugin", "pkcs11-providers", "config", "providers", "log-append"]:
+            self.assertIn(name, dropped, name)
+        # Harmless uses stay: an unknown-tolerant option, a plain variable.
+        self.assertIn("setenv opt block-outside-dns", kept)
+        self.assertIn("setenv CLIENT_CERT 0", kept)
+        self.assertIn("remote vpn.example 1194", kept)
+        # A wrapped tag opens no block for OpenVPN: what follows is options.
+        lines, dropped = config.sanitize_ovpn("setenv opt <ca>\nlog /mnt/share/profile.img\n</ca>\nclient\n")
+        self.assertNotIn("log /mnt/share/profile.img", lines)
+        self.assertIn("log", dropped)
+
 if __name__ == "__main__":
     unittest.main()

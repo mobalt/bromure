@@ -1280,7 +1280,19 @@ def sanitize_ovpn(text):
         name = tokens[0]
         if len(name) >= 3 and name.startswith("--"):
             name = name[2:]
-        inline = len(tokens) == 1 and len(name) >= 2 and name[0] == "<" and name[-1] == ">"
+        # Whether the line opens an inline block is decided BEFORE the
+        # unwrap below (check_inline_file runs first): `setenv opt <ca>`
+        # opens none, and the lines after it are options.
+        opens_block = len(tokens) == 1
+        # OpenVPN runs `setenv opt <directive> …` as `<directive> …` (only
+        # an unknown name is then forgiven): the directive is what's checked.
+        # Repeated, and with `--` stripped, past what OpenVPN itself does.
+        while name.lower() == "setenv" and len(tokens) >= 3 and tokens[1].lower() == "opt":
+            tokens = tokens[2:]
+            name = tokens[0]
+            if len(name) >= 3 and name.startswith("--"):
+                name = name[2:]
+        inline = opens_block and len(name) >= 2 and name[0] == "<" and name[-1] == ">"
         if inline:
             name = name[1:-1]
             close = "</%s>" % name
