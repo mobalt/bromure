@@ -339,5 +339,31 @@ remote vpn.example 1194
         lines, _ = config.sanitize_ovpn("remote " + "a" * 300 + "\n")
         self.assertEqual(lines, [])
 
+    # OpenVPN reparses a <connection> body with buf_parse into 256 bytes: a
+    # 255-byte line is one line there (not split), a longer one is split.
+    def test_a_255_byte_line_inside_connection_is_kept(self):
+        remote = "remote vpn.example 1194 tcp"
+        remote = remote + " " * (255 - len(remote) - 2) + "#x"
+        cert = "A" * 255
+        self.assertEqual(len(remote.encode()), 255)
+        text = "client\n<connection>\n%s\n<ca>\n%s\n</ca>\n</connection>\n" % (remote, cert)
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertIn(remote, lines)
+        self.assertIn(cert, lines)
+        self.assertNotIn("(an overlong line)", dropped)
+        # 256 bytes: buf_parse splits it (and loses a byte) — still dropped,
+        # in the body and in a block nested in it.
+        long_remote = remote + "y"
+        lines, dropped = config.sanitize_ovpn(
+            "<connection>\n%s\n<ca>\n%s\n</ca>\n</connection>\n" % (long_remote, cert + "B"))
+        self.assertNotIn(long_remote, lines)
+        self.assertNotIn(cert + "B", lines)
+        self.assertEqual(dropped.count("(an overlong line)"), 2)
+        # A 255-byte line in the body is still sanitized like any other.
+        evil = "plugin /tmp/evil.so" + " " * (255 - 19 - 2) + "#x"
+        lines, dropped = config.sanitize_ovpn("<connection>\n%s\n</connection>\n" % evil)
+        self.assertNotIn(evil, lines)
+        self.assertIn("plugin", dropped)
+
 if __name__ == "__main__":
     unittest.main()

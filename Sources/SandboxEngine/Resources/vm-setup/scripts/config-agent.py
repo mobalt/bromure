@@ -1175,7 +1175,9 @@ def _sends_a_file(name, tokens):
 
 # OpenVPN reads its config with fgets() into a 257-byte buffer (an inline
 # block's lines into 256): a longer line is read as several, the part past
-# the cut parsed as a line of its own. Kept lines stay below both.
+# the cut parsed as a line of its own. Kept lines stay below both. A
+# <connection> body is reparsed with buf_parse() into 256 bytes, which keeps
+# a 255-byte line whole and splits (and loses a byte of) a longer one.
 OPENVPN_LINE_MAX = 255
 
 _C_SPACE = " \t\n\v\f\r"
@@ -1252,12 +1254,14 @@ def _inline_piece_ends_block(line, close):
     return False
 
 
-def sanitize_ovpn(text):
+def sanitize_ovpn(text, connection_body=False):
     """``text`` without the forbidden directives, read the way OpenVPN 2.6
     reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
     blocks (<ca>…</ca>) kept as they are and ended where OpenVPN ends them.
     Lines OpenVPN would split or ignore are dropped, so every line written
-    is parsed by OpenVPN exactly as here. Returns (lines, dropped names)."""
+    is parsed by OpenVPN exactly as here. Returns (lines, dropped names).
+    ``connection_body``: ``text`` is a <connection> block's body, which
+    OpenVPN reads with buf_parse (see OPENVPN_LINE_MAX)."""
     out, dropped = [], []
     close, keep = None, True        # inside an inline block: its close tag
     block = None                    # a <connection> block's lines, sanitized on close
@@ -1267,12 +1271,18 @@ def sanitize_ovpn(text):
         if "\0" in line:
             dropped.append("(a binary line)")
             continue
-        if len(line.encode("utf-8")) >= OPENVPN_LINE_MAX:
+        size = len(line.encode("utf-8"))
+        if connection_body or block is not None:
+            # buf_parse: up to 255 bytes is one line, longer is split.
+            if size > OPENVPN_LINE_MAX:
+                dropped.append("(an overlong line)")
+                continue
+        elif size >= OPENVPN_LINE_MAX:
             # Inside a certificate or key block OpenVPN reads a long line in
             # pieces and joins them again: kept — unless one of the pieces
             # would end the block, and the rest of the line be read as
             # options. Anywhere else, the cut-off part would be an option.
-            if close is None or block is not None or not keep \
+            if close is None or not keep \
                     or _inline_piece_ends_block(line, close):
                 dropped.append("(an overlong line)")
                 continue
@@ -1288,7 +1298,7 @@ def sanitize_ovpn(text):
             if block is not None:
                 # A <connection> block holds options too (OpenVPN parses it
                 # like a config: proxies, remotes) — sanitized the same way.
-                inner, more = sanitize_ovpn("\n".join(block))
+                inner, more = sanitize_ovpn("\n".join(block), connection_body=True)
                 out.extend(inner)
                 dropped.extend(more)
                 block = None
