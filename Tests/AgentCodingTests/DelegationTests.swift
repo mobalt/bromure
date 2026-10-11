@@ -1037,6 +1037,36 @@ struct DelegationTests {
         _ = child
     }
 
+    /// Finding: an agent that acted on an approval and delivered — without
+    /// a read_inbox — was re-told it twice more, even after the board closed
+    /// the task.
+    @Test("no repeat notice once the recipient has replied, or the delegation is over")
+    func noRepeatAfterReplyOrClose() async {
+        let f = fixture()
+        let (d, child) = await delegated(f)
+        _ = try? await f.engine.post(d.id, from: .parent, kind: .steer, text: "land it")
+        let owed = f.store.unnoticed(for: child).filter { $0.1.kind == .steer }
+        #expect(owed.count == 1)
+        let t1 = Date()
+        f.store.markNoticed(owed.map { $0.1.id }, now: t1)
+        let later = t1.addingTimeInterval(DelegationStore.renoticeAfter + 1)
+        #expect(f.store.unnoticed(for: child, now: later).contains { $0.1.kind == .steer })
+        // It replied: it heard.
+        _ = try? await f.engine.post(d.id, from: .child, kind: .deliver, text: "landed")
+        #expect(!f.store.unnoticed(for: child, now: later).contains { $0.1.kind == .steer })
+
+        // Not replied, but the delegation is over: no repeat either…
+        let (e, child2) = await delegated(f)
+        _ = try? await f.engine.post(e.id, from: .parent, kind: .steer, text: "land it")
+        let owed2 = f.store.unnoticed(for: child2).filter { $0.1.kind == .steer }
+        f.store.markNoticed(owed2.map { $0.1.id }, now: t1)
+        f.store.mutate(e.id) { $0.status = .done }
+        #expect(!f.store.unnoticed(for: child2, now: later).contains { $0.1.kind == .steer })
+        // …while a first notice (the closing word itself) is still typed once.
+        let closing = DelegationMessage(kind: .note, from: .parent, to: .child, text: "closed", at: later)
+        #expect(DelegationStore.owesNotice(closing, in: f.store.delegation(e.id)!, interrupts: true, now: later))
+    }
+
     @Test("a wait woken with nothing to take keeps waiting for the rest of its budget")
     func waitSurvivesSpuriousWake() async {
         let f = fixture()
