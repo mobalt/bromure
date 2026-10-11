@@ -15506,6 +15506,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 await broker.grant(profileID: profileID, credentialID: id, decision,
                                    credentialDisplayName: name)
             },
+            deny: { id, name, minutes in
+                await broker.deny(profileID: profileID, credentialID: id,
+                                  for: minutes.map { TimeInterval($0 * 60) },
+                                  credentialDisplayName: name)
+            },
             revoke: { id in await broker.revoke(profileID: profileID, credentialID: id) })
     }
 

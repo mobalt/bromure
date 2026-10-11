@@ -62,8 +62,9 @@ public actor ConsentBroker {
         public let kind: DecisionKind
         public let expiration: Date
         public let credentialDisplayName: String
-        /// Only meaningful when `kind == .allow`. Always false for
-        /// denies (deny memory is hard-capped at `denyTTL`).
+        /// Until the session ends (`expiration` is `.distantFuture`). A
+        /// prompt's "Don't allow" is capped at `denyTTL`; only a deny set
+        /// from the Guardrails pane can be session-scoped.
         public let isSessionScoped: Bool
     }
 
@@ -73,6 +74,7 @@ public actor ConsentBroker {
     private struct DenyMemory: Sendable {
         let expiration: Date
         let credentialDisplayName: String
+        var isSessionScoped = false
     }
 
     private static func storeKey(profileID: UUID, credentialID: CredentialID) -> String {
@@ -293,7 +295,7 @@ public actor ConsentBroker {
                 kind: .deny,
                 expiration: d.expiration,
                 credentialDisplayName: d.credentialDisplayName,
-                isSessionScoped: false))
+                isSessionScoped: d.isSessionScoped))
         }
         return out.sorted { $0.credentialDisplayName < $1.credentialDisplayName }
     }
@@ -325,6 +327,24 @@ public actor ConsentBroker {
         Self.recordDecision(profileID: profileID, credentialID: credentialID,
                             credential: name, scope: "granted from the Guardrails pane",
                             outcome: Outcome(decision))
+    }
+
+    /// Refuse without a prompt — the Guardrails pane's "Deny for …" menu.
+    /// `duration` nil = until the session ends. Replaces a live grant, and
+    /// runs from now like `grant`.
+    public func deny(profileID: UUID, credentialID: CredentialID,
+                     for duration: TimeInterval?, credentialDisplayName: String) {
+        let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
+        let name = grants[key]?.credentialDisplayName ?? denies[key]?.credentialDisplayName
+            ?? credentialDisplayName
+        denies[key] = DenyMemory(
+            expiration: duration.map { Date().addingTimeInterval($0) } ?? .distantFuture,
+            credentialDisplayName: name,
+            isSessionScoped: duration == nil)
+        grants.removeValue(forKey: key)
+        Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                            credential: name, scope: "denied from the Guardrails pane",
+                            outcome: .deny)
     }
 
     public func revoke(profileID: UUID, credentialID: CredentialID) {

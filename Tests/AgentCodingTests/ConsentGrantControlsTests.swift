@@ -66,3 +66,40 @@ struct ConsentGrantControlsTests {
         #expect(p.consentCredentialID(.aws) == "aws")
     }
 }
+
+@Suite("Guardrails deny controls")
+struct ConsentDenyControlsTests {
+
+    @Test("Deny for 5 minutes replaces a grant and refuses without a prompt")
+    func denyReplacesGrant() async {
+        let broker = ConsentBroker()
+        let profile = UUID()
+        let controls = ACAppDelegate.consentGrantControls(broker, profileID: profile)
+        await controls.allow("aws", "AWS", 60)
+        await controls.deny("aws", "AWS", 5)
+
+        let status = try! #require(await controls.status()["aws"])
+        #expect(status.denied && !status.sessionScoped)
+        #expect(abs(status.expiration.timeIntervalSinceNow - 300) < 5)
+        #expect(await broker.consent(profileID: profile, credentialID: "aws",
+                                     credentialDisplayName: "AWS", scopeHint: "") == false)
+    }
+
+    @Test("Deny for the session lasts until the session ends; allow replaces it")
+    func sessionDeny() async {
+        let broker = ConsentBroker()
+        let profile = UUID()
+        let controls = ACAppDelegate.consentGrantControls(broker, profileID: profile)
+        await controls.deny("ssh:x", "key", nil)
+        let status = try! #require(await controls.status()["ssh:x"])
+        #expect(status.denied && status.sessionScoped)
+        #expect(status.expiration == .distantFuture)
+
+        await controls.allow("ssh:x", "key", 5)
+        #expect(await controls.status()["ssh:x"]?.denied == false)
+
+        await controls.deny("ssh:x", "key", nil)
+        await broker.revokeAll(profileID: profile)   // session teardown
+        #expect(await controls.status().isEmpty)
+    }
+}

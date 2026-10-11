@@ -590,6 +590,7 @@ struct ProfileEditorView: View {
         var status: () async -> [String: ConsentGrantStatus]
         /// minutes nil = the rest of the session.
         var allow: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var deny: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
         var revoke: (_ credentialID: String) async -> Void
     }
 
@@ -4445,7 +4446,7 @@ struct ProfileEditorView: View {
 
     /// "Require approval to use", plus — while the credential has a live
     /// grant or remembered deny — a badge counting it down. Right-click to
-    /// allow for a fresh 5 min / 1 hr / the session, or revoke so the next
+    /// allow or deny for a fresh 5 min / 1 hr / the session, or revoke so the next
     /// use asks again. Acts on the running session at once (grants aren't
     /// profile settings, so nothing waits for Save).
     @ViewBuilder
@@ -4468,7 +4469,11 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private func grantBadge(_ status: ConsentGrantStatus, now: Date) -> some View {
-        if status.sessionScoped {
+        if status.sessionScoped && status.denied {
+            Text(NSLocalizedString("denied this session", comment: "guardrails deny badge"))
+                .font(.caption2).foregroundStyle(.red).lineLimit(1)
+                .help(NSLocalizedString("Refused without asking until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if status.sessionScoped {
             Text(NSLocalizedString("allowed this session", comment: "guardrails grant badge"))
                 .font(.caption2).foregroundStyle(.blue).lineLimit(1)
                 .help(NSLocalizedString("Allowed until the workspace stops. Right-click to change or revoke.", comment: ""))
@@ -4505,6 +4510,16 @@ struct ProfileEditorView: View {
         }
         Button(NSLocalizedString("Allow for the rest of the session", comment: "")) {
             act { await controls.allow(id, name, nil) }
+        }
+        Divider()
+        Button(NSLocalizedString("Deny for 5 minutes", comment: "")) {
+            act { await controls.deny(id, name, 5) }
+        }
+        Button(NSLocalizedString("Deny for 1 hour", comment: "")) {
+            act { await controls.deny(id, name, 60) }
+        }
+        Button(NSLocalizedString("Deny for the rest of the session", comment: "")) {
+            act { await controls.deny(id, name, nil) }
         }
         if liveGrants[id] != nil {
             Divider()
