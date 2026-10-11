@@ -23,4 +23,38 @@ struct BootBudgetTests {
         let b = BootBudget(seconds: 60, reason: "test")
         #expect(b.remains)
     }
+
+    /// Finding (CWE-400): the keep-awake lived as long as the budget object,
+    /// which a checkout automation held through its clone (up to 15 min), and
+    /// a guest exec that never answered held it for the life of the app.
+    @Test("the keep-awake ends when the time is up, checked or not, or on release")
+    func keepAwakeEnds() async throws {
+        let c = Clock()
+        let b = BootBudget(seconds: 180, reason: "test", clock: { c.now })
+        #expect(b.holdsAwake)
+        c.now += 180
+        #expect(!b.remains)
+        #expect(!b.holdsAwake)
+        // Released early: the workspace answered.
+        let r = BootBudget(seconds: 180, reason: "test")
+        r.release()
+        #expect(!r.holdsAwake)
+        r.release()   // idempotent
+        // Never checked again (a caller stuck in a call): it still ends.
+        let stuck = BootBudget(seconds: 0.2, reason: "test")
+        try await Task.sleep(nanoseconds: 600_000_000)
+        #expect(!stuck.holdsAwake)
+    }
+
+    @Test("a guest that takes the request and never answers can't hold the exchange")
+    func exchangeHasADeadline() {
+        var fds: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        defer { close(fds[0]); close(fds[1]) }
+        let start = ProcessInfo.processInfo.systemUptime
+        let out = ACAutomationServer.exchangeJSON(fd: fds[0], request: ["cmd": "true"], replyWithin: 0.3)
+        let took = ProcessInfo.processInfo.systemUptime - start
+        if case .protocolFailure = out {} else { Issue.record("expected a protocol failure, got \(out)") }
+        #expect(took < 3)
+    }
 }

@@ -1738,11 +1738,14 @@ final class ScheduledAutomationEngine {
     /// Clone the automation's repository into place if needed, then queue
     /// the run. Unreachable = try again later (boot in progress).
     private func launchWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
-                                    args: [String]) async -> CheckoutLaunch {
+                                    args: [String], booted: BootBudget? = nil) async -> CheckoutLaunch {
         guard let delegate else { return .unreachable }
         guard (try? await delegate.guestExec(profileID: a.profileID,
                                               command: "true", timeout: 5)) != nil
         else { return .unreachable }
+        // The workspace is up: the clone (up to 15 min) isn't its boot, and
+        // doesn't keep the Mac awake.
+        booted?.release()
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let path = Self.guestPath(a.repoPath)
         do {
@@ -1807,7 +1810,7 @@ final class ScheduledAutomationEngine {
             let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
             while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args) {
+                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args, booted: budget) {
                 case .launched: launched(); return
                 case .failed(let why): failed(why); return
                 case .unreachable: break
