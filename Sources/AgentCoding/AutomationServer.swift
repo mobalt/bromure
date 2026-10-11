@@ -2337,6 +2337,9 @@ final class ACAutomationServer {
                 "build": BuildInfo.dictionary,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
+                // Not yet wired: the empty list above isn't the host's — a
+                // client keeps the rows it has (an empty listed one is real).
+                "workspacesListed": self.onListWorkspaces != nil,
                 "vms": self.onListVMs?() ?? [],
                 "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
                 "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],

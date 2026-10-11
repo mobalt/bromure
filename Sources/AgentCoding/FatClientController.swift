@@ -770,7 +770,8 @@ final class RemoteHostController {
 #if os(macOS)
         updateDelegationRelay()
 #endif
-        let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
+        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
+        let workspaces = listedWorkspaces ?? []
         let attached = Set(workspaces.compactMap { w -> UUID? in
             guard w["hostKind"] as? String == "agent-host" else { return nil }
             return (w["id"] as? String).flatMap(UUID.init(uuidString:))
@@ -785,18 +786,18 @@ final class RemoteHostController {
         let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
         if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
         // Guard against a degenerate /state. A 200 poll whose body was truncated
-        // or failed to parse arrives as an (almost) empty snapshot, and a partial
-        // server snapshot can momentarily carry no workspaces. Applying it wipes
+        // or failed to parse arrives as an (almost) empty snapshot, and a server
+        // whose list isn't wired yet sends an empty one. Applying it wipes
         // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
         // — and because the workspace screen unmounts its live terminals whenever
         // `isRunning` goes false, the screen flashes to a blank "Info" view until
-        // the next good poll repaints it (and a just-created tab is wiped, so "+"
-        // looks slow to appear). Once we hold a populated mirror, an empty
-        // workspaces list is far likelier a bad read than a genuine "all
-        // workspaces removed", so keep the last good state instead of flashing.
-        // (keys= reveals the cause: empty ⇒ truncated/parse-fail whole body;
-        // vms/grid/… present but no workspaces ⇒ a partial server snapshot.)
-        if workspaces.isEmpty, revision > 0, !profilesByID.isEmpty {
+        // the next good poll repaints it. So a snapshot with no `workspaces`
+        // array, or one whose host says it didn't list them, keeps the last
+        // good state. A listed, empty array is real: the last workspace was
+        // deleted — skipping it froze the mirror on the deleted row for good.
+        // (keys= reveals the cause.)
+        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
+        if degenerate, revision > 0, !profilesByID.isEmpty {
             FatClientLog.log("apply: skipped degenerate snapshot "
                 + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
                 + "kept \(profilesByID.count) workspaces")
@@ -1550,6 +1551,15 @@ final class RemoteHostController {
     var hasSnapshot: Bool { revision > 0 }
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
+
+    /// The host deleted this workspace (DELETE /profiles answered 200): its
+    /// row goes now, not at the next snapshot.
+    func workspaceDeleted(_ id: Profile.ID) {
+        profilesByID[id] = nil
+        specs[id] = nil
+        credentialsByID[id] = nil
+        listModel.profileRows.removeAll { $0.id == id }
+    }
 
     /// Which credentials a workspace holds on the host (the mirrored profile
     /// carries none). nil: an older host that doesn't say.
@@ -4658,7 +4668,7 @@ final class RemoteHostWindow: NSWindow {
         let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
             guard r == .alertFirstButtonReturn, let self else { return }
             self.controller.request("DELETE", "/profiles/\(ControlClient.encodeSegment(id.uuidString))") { [weak self] status, json in
-                guard status != 200 else { return }
+                guard status != 200 else { self?.controller.workspaceDeleted(id); return }
                 let why = (json["error"] as? String) ?? NSLocalizedString(
                     "The server didn't answer.", comment: "delete workspace failure")
                 let fail = NSAlert()
