@@ -25,4 +25,27 @@ import Testing
         #expect(!boots.diskInUse(id, running: false))
         #expect(boots.begin(id))
     }
+
+    /// Finding (CWE-362): the base-image upgrade and compromise-wipe prompts
+    /// are modals, and a boot (an automation's timer) can begin inside one.
+    /// "Yes, upgrade" then deleted the disk that boot had just opened.
+    @Test("a reset or wipe answered after a boot began does nothing")
+    func promptAnsweredAfterBootBegan() {
+        // A fresh id: the store's paths for it don't exist, so nothing real
+        // is touched either way.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boots-\(UUID().uuidString)", isDirectory: true)
+        let delegate = ACAppDelegate(
+            imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
+        var p = Profile(name: "w", tool: .claude, authMode: .token)
+        #expect(delegate.bootsInFlight.begin(p.id))
+        #expect(!delegate.applyBaseImageUpgradeAnswer(0, profile: &p, current: "999"))
+        #expect(!delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999"))
+        #expect(p.baseImageUpgradeDeclinedFor == nil)
+        #expect(!delegate.wipeCompromised(profile: p))
+        // Once that boot is over, the answer applies.
+        delegate.bootsInFlight.end(p.id)
+        #expect(delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999"))
+        #expect(p.baseImageUpgradeDeclinedFor == "999")
+    }
 }

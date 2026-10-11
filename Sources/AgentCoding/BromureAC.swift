@@ -11180,7 +11180,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The launch-time copy is updated too (`inout`): `launch` saves that
     /// copy right after (`store.touch`), which would otherwise put the old
     /// answer back over the stored record.
-    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) {
+    ///
+    /// The offer is a modal (or, remote, a suspended wait): a boot that began
+    /// meanwhile — an automation's timer fires inside the modal run loop —
+    /// has the disk open, and "Yes" must not delete it from under that VM.
+    /// False: nothing was done, the disk is in use.
+    @discardableResult
+    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) -> Bool {
+        if diskInUse(profile.id) { return false }
         switch index {
         case 0:
             try? store.resetDisk(for: profile)
@@ -11195,6 +11202,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profile.baseImageUpgradeRemindAfter = until
             recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: nil, remindAfter: until)
         }
+        return true
     }
 
     private func recordBaseImageUpgradeAnswer(profileID: UUID, declinedFor: String?, remindAfter: Date?) {
@@ -11488,7 +11496,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case .alertSecondButtonReturn: index = 1
                 default: index = 2
                 }
-                applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+                // Another boot began during the modal: it owns the disk now.
+                guard applyBaseImageUpgradeAnswer(index, profile: &profile, current: current) else { return }
             }
         }
 
@@ -11696,6 +11705,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // is a detached login-boot — then it boots window-less and the session
         // lives on detached. Promote to a regular app first in case we're
         // launching from a headless/background agent.
+        // One boot per disk — claimed before the pane exists: a boot that
+        // began during a prompt above keeps the disk, and this launch leaves
+        // no pane behind.
+        guard bootsInFlight.begin(profile.id) else { return }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -11737,7 +11750,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
-        guard bootsInFlight.begin(profile.id) else { return }
         refreshSidebar()
         Task { @MainActor [self] in
             defer {
@@ -13775,7 +13787,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
-            applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+            guard applyBaseImageUpgradeAnswer(index, profile: &profile, current: current) else { return }
         }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true, quiet: quiet)
@@ -13815,7 +13827,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The wipe a confirmed compromise prompt performs (disk + home, keep
     /// tokens/settings), plus the bookkeeping that goes with it.
-    @MainActor private func wipeCompromised(profile: Profile) {
+    /// False: a boot began while the prompt was up (it has the disk open),
+    /// so nothing is wiped and this launch stops.
+    @MainActor func wipeCompromised(profile: Profile) -> Bool {
+        if diskInUse(profile.id) { return false }
         let session = SessionDisk(
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
@@ -13825,6 +13840,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
         refreshSidebar()
+        return true
     }
 
     private func confirmWipeAndProceed(profile: Profile) -> Bool {
@@ -13850,8 +13866,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
         }
-        wipeCompromised(profile: profile)
-        return true
+        return wipeCompromised(profile: profile)
     }
 
     /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
@@ -13866,8 +13881,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
                       NSLocalizedString("Cancel", comment: "")],
             fallback: 1) == 0 else { return false }
-        wipeCompromised(profile: profile)
-        return true
+        return wipeCompromised(profile: profile)
     }
 
     /// True while a compromise alert is up on screen. The swap-time
