@@ -58,16 +58,24 @@ enum RepoGitPrograms {
     /// submodule, under its own `off`; one that fails (a truncated index, an
     /// unknown repository extension) counts as dirty, as `statusFailed` does
     /// for the parent — never the empty output of a clean submodule. Paths
-    /// are relative to `dir`.
+    /// are relative to `dir`; a path git C-quotes is decoded before it is
+    /// looked for on disk, and printed quoted (as git's own status does) —
+    /// raw with `nul`.
     static func dirtySubmodules(_ dir: String, nul: Bool = false) -> String {
         let end = nul ? "\\0" : "\\n"
         return "_bsl() { git -c core.quotePath=false -C \"$1\" ls-files --stage 2>/dev/null "
             + "| awk -F'\\t' '$1 ~ /^160000 /{print $2}'; }; "
+            + "_bsp() { case \"$1\" in (\\\"*) _p=$(printf '%s\\n' \"$1\" | LC_ALL=C awk '\(unquote)'; printf x); _p=${_p%x} ;; (*) _p=$1 ;; esac; }; "
             + "_bsd() { [ -n \"$( ( cd \"$1\" || { echo '!!'; exit; }; \(off("."))git status --porcelain --ignore-submodules=dirty\(statusFailed) ) 2>/dev/null | head -c1)\" ] "
-            + "&& return 0; _bsl \"$1\" | { while IFS= read -r _s; do [ -e \"$1/$_s/.git\" ] && _bsd \"$1/$_s\" && exit 0; done; exit 1; }; }; "
-            + "_bsl \(dir) | while IFS= read -r _s; do [ -e \(dir)/\"$_s/.git\" ] && _bsd \(dir)/\"$_s\" "
-            + "&& printf ' M %s\(end)' \"$_s\"; done; "
+            + "&& return 0; _bsl \"$1\" | { while IFS= read -r _s; do _bsp \"$_s\"; [ -e \"$1/$_p/.git\" ] && _bsd \"$1/$_p\" && exit 0; done; exit 1; }; }; "
+            + "_bsl \(dir) | while IFS= read -r _s; do _bsp \"$_s\"; _q=$_p; [ -e \(dir)/\"$_q/.git\" ] && _bsd \(dir)/\"$_q\" "
+            + "&& printf ' M %s\(end)' \"\(nul ? "$_q" : "$_s")\"; done; "
     }
+
+    /// awk turning one C-quoted path git printed (`"a\"b\\c\n"`) back into
+    /// its bytes: `core.quotePath=false` still quotes a path holding `"`,
+    /// `\`, or a control character. (No single quote: it sits in '…'.)
+    private static let unquote = #"{ s = substr($0, 2, length($0) - 2); o = ""; for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c != "\\") { o = o c; continue }; c = substr(s, ++i, 1); if (c ~ /[0-7]/) { o = o sprintf("%c", c * 64 + substr(s, i + 1, 1) * 8 + substr(s, i + 2, 1)); i += 2 } else if (c == "n") o = o "\n"; else if (c == "t") o = o "\t"; else if (c == "r") o = o "\r"; else if (c == "a") o = o "\007"; else if (c == "b") o = o "\b"; else if (c == "f") o = o "\f"; else if (c == "v") o = o "\v"; else o = o c }; printf "%s", o }"#
 
     /// The flags a diff Bromure runs itself carries: no external diff, no
     /// textconv program, no recursion into a submodule (its own config).

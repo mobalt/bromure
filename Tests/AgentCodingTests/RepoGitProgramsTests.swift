@@ -137,6 +137,35 @@ struct RepoGitProgramsTests {
                                                    squash: false)).contains("dirty"))
     }
 
+    /// Finding (CWE-116): `core.quotePath=false` still C-quotes a path
+    /// holding `"`, `\\`, a tab or a newline, and the quoted text was looked
+    /// for on disk — an edit in such a submodule read as no change at all.
+    @Test("an edited submodule whose path git quotes still reads as a change")
+    @MainActor func quotedSubmodulePath() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgq-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/.bromure/worktrees/repo/x"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a")
+        let names = ["quote\"name", "back\\slash", "new\nline", "tab\tbed", "$(touch PWN)"]
+        for (i, name) in names.enumerated() {
+            let q = BranchMergeCommands.q(name)
+            _ = sh("set -e; cd \(root); git clone -q \(home)/sub \(q); "
+                   + "git update-index --add --cacheinfo 160000,$(git -C \(q) rev-parse HEAD),\(q); git commit -qm s\(i)")
+        }
+        #expect(sh(TaskLitter.status("'\(root)'")).isEmpty)
+        for name in names {
+            let q = BranchMergeCommands.q(name)
+            _ = sh("cd \(root)/\(q) && echo SECRET-EDIT >> f")
+            let out = sh(TaskLitter.status("'\(root)'"))
+            #expect(out.hasPrefix(" M "), "\(name)")
+            #expect(sh("cd \(root); " + RepoGitPrograms.dirtySubmodules(".", nul: true)) == " M \(name)\0", "\(name)")
+            _ = sh("cd \(root)/\(q) && git checkout -q f")
+        }
+        #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
+    }
+
     /// Finding: the same hidden submodule edit passed the checks that gate
     /// `git worktree remove --force` — the landing's dirty-source check
     /// (a merged branch's worktree is removed) and Mark done's empty branch.
