@@ -248,5 +248,27 @@ remote vpn.example 1194
         names, _ = self.kept_names("<ca> extra\nplugin /x.so\nclient\n")
         self.assertNotIn("plugin", names)
 
+    # CWE-94: an OpenSSL provider or a PKCS#11 module is a shared library
+    # openvpn dlopens as root at startup, whatever --script-security says.
+    def test_pkcs11_and_openssl_library_loads_are_dropped(self):
+        text = """client
+pkcs11-providers /tmp/evil.so
+"pkcs11-providers" /tmp/evil.so
+providers /tmp/evil.so
+--providers legacy /tmp/evil.so
+engine dynamic
+show-pkcs11-ids /tmp/evil.so
+pkcs11-id 'x'
+pkcs11-id-management
+PKCS11-Providers /tmp/evil.so
+remote vpn.example 1194
+"""
+        names, dropped = self.kept_names(text)
+        self.assertEqual(names, ["client", "remote"])
+        self.assertNotIn("evil.so", "\n".join(config.sanitize_ovpn(text)[0]))
+        for bad in ["pkcs11-providers", "providers", "engine", "show-pkcs11-ids",
+                    "pkcs11-id", "pkcs11-id-management"]:
+            self.assertIn(bad, dropped, bad)
+
 if __name__ == "__main__":
     unittest.main()

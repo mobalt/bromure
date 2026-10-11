@@ -1143,8 +1143,10 @@ OPENVPN_FORBIDDEN = frozenset({
     "tls-verify", "tls-crypt-v2-verify", "auth-user-pass-verify",
     "client-connect", "client-disconnect", "learn-address",
     "plugin", "iproute", "ifconfig-noexec-cmd", "dns-updown",
-    # Load a shared library, by path, into the root process.
-    "engine", "providers", "pkcs11-providers",
+    # Load a shared library, by path, into the root process (an OpenSSL
+    # engine or provider, a PKCS#11 module) — `--script-security` doesn't
+    # cover these. The other pkcs11-* options only serve such a module.
+    "engine", "providers", "pkcs11-providers", "show-pkcs11-ids",
     "management", "management-client", "management-client-auth",
     "management-hold", "management-query-passwords", "management-forget-disconnect",
     "management-external-key", "management-external-cert",
@@ -1282,7 +1284,7 @@ def sanitize_ovpn(text):
         if inline:
             name = name[1:-1]
             close = "</%s>" % name
-        keep = name.lower() not in OPENVPN_FORBIDDEN
+        keep = name.lower() not in OPENVPN_FORBIDDEN and not name.lower().startswith("pkcs11-")
         if keep and not inline and _sends_a_file(name.lower(), tokens):
             keep = False
         if keep:
