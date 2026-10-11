@@ -4142,3 +4142,15 @@
 "that finding is gone" = "ese hallazgo ya no existe";
 "couldn't start the fix" = "no se pudo iniciar la corrección";
 "no Switchboard could be started" = "no se pudo iniciar ninguna Centralita";
+
+/* Automations: runs at a time */
+"Runs at a time" = "Ejecuciones a la vez";
+"No limit" = "Sin límite";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "Una ráfaga de eventos espera su turno, del más antiguo al más reciente: el siguiente empieza cuando termina una ejecución.";
+"Reviews at a time" = "Revisiones a la vez";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "Los commits y pull requests que llegan juntos esperan su turno, del más antiguo al más reciente, en lugar de revisarse todos a la vez.";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "¿Eliminar el espacio de trabajo «%@»?";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Elimina su disco, su configuración y su clave SSH. La carpeta del host montada no se modifica.";
+"Couldn't delete “%@”" = "No se pudo eliminar «%@»";

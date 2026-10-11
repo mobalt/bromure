@@ -330,6 +330,18 @@ final class DelegationStore {
         return (m.noticeCount ?? 1) < maxNotices && now.timeIntervalSince(last) >= renoticeAfter
     }
 
+    /// …and within its delegation: a repeat is only for a recipient that
+    /// hasn't acted. Once the delegation is over, or the recipient has
+    /// posted anything since (a delivery, an answer, a report), it heard —
+    /// an agent that replied without a read_inbox was otherwise re-told an
+    /// approval it had already carried out, up to `maxNotices` times, even
+    /// after the board closed the task.
+    static func owesNotice(_ m: DelegationMessage, in d: Delegation, interrupts: Bool, now: Date = Date()) -> Bool {
+        guard owesNotice(m, interrupts: interrupts, now: now) else { return false }
+        guard m.noticedAt != nil else { return true }
+        return d.status.isOpen && !d.messages.contains { $0.from == m.to && $0.at > m.at }
+    }
+
     /// Delivered messages for a session the host owes a notice of, oldest
     /// first: never noticed, or noticed but still unread long enough for a
     /// repeat (see `owesNotice`). `interrupts` says which kinds a fresh
@@ -341,7 +353,7 @@ final class DelegationStore {
         for d in delegations(involving: sessionID) {
             guard let party = d.party(of: sessionID) else { continue }
             for m in d.messages
-            where m.to == party && Self.owesNotice(m, interrupts: interrupts(m.kind, d.isRequest), now: now) {
+            where m.to == party && Self.owesNotice(m, in: d, interrupts: interrupts(m.kind, d.isRequest), now: now) {
                 out.append((d, m))
             }
         }

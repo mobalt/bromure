@@ -137,6 +137,10 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
     /// branch) → how far the scheduled review has got. Written by the
     /// engine when a review finishes, never by the editor.
     var reviewedThrough: [String: ReviewMark]
+    /// Commit and pull-request scans: how many review at once (0 = no
+    /// limit). 20 commits pushed together are reviewed one after the other
+    /// by default, not by 20 agents side by side.
+    var maxParallelScans: Int
 
     init(id: UUID = UUID(), repo: String, profileID: UUID,
          repoPath: String = "", tool: Profile.Tool = .claude,
@@ -150,7 +154,8 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
          createdAt: Date = Date(),
          scheduledScope: ReviewScope = .newCommits,
          firstRunBaseline: Bool = false,
-         reviewedThrough: [String: ReviewMark] = [:]) {
+         reviewedThrough: [String: ReviewMark] = [:],
+         maxParallelScans: Int = 1) {
         self.id = id
         self.repo = repo
         self.profileID = profileID
@@ -169,13 +174,14 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         self.scheduledScope = scheduledScope
         self.firstRunBaseline = firstRunBaseline
         self.reviewedThrough = reviewedThrough
+        self.maxParallelScans = max(0, maxParallelScans)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, repo, profileID, repoPath, tool, enabled, scans, focus
         case fullScanWeekday, fullScanHour, commitBranch, instructions
         case autoFixMinSeverity, automationIDs, createdAt
-        case scheduledScope, firstRunBaseline, reviewedThrough
+        case scheduledScope, firstRunBaseline, reviewedThrough, maxParallelScans
     }
 
     init(from decoder: Decoder) throws {
@@ -203,6 +209,7 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         scheduledScope  = (try? c.decodeIfPresent(ReviewScope.self, forKey: .scheduledScope)) ?? .baseline
         firstRunBaseline = try c.decodeIfPresent(Bool.self, forKey: .firstRunBaseline) ?? false
         reviewedThrough = try c.decodeIfPresent([String: ReviewMark].self, forKey: .reviewedThrough) ?? [:]
+        maxParallelScans = max(0, try c.decodeIfPresent(Int.self, forKey: .maxParallelScans) ?? 1)
         if repoPath.isEmpty { repoPath = Self.defaultRepoPath(for: repo) }
     }
 

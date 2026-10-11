@@ -130,6 +130,12 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// The landing under way (or stuck) — set from the moment the user
     /// approves a merge or a pull request until the card goes Done.
     var landing: TaskLanding?
+    /// Where the user last approved landing this round of work — kept when
+    /// they cancel the landing (its brief may be out already), cleared when
+    /// the work goes back to the agent. Only a landing into it, seen in git,
+    /// finishes the card with no landing under way: the parent branch is
+    /// read from the machine the agent works on, so it's never the approval.
+    var approvedTarget: String?
     /// How a Done card got there (nil on cards finished by older builds —
     /// `effectiveCompletion` derives one from `merged`/`prOpened`).
     var completion: TaskCompletion?
@@ -290,8 +296,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
 
     /// The branch this task lands in: the landing's own target while one
     /// runs, else where the work forked from.
+    /// A parent that isn't a plain branch name (it's read from the agent's
+    /// machine) is no target.
     var landingTarget: String? {
-        landing?.target ?? parentBranch
+        landing?.target ?? parentBranch.flatMap { CodingTaskEngine.isSafeBranchName($0) ? $0 : nil }
     }
 
     /// How the card got to Done — recorded, or derived for cards an older
@@ -357,6 +365,11 @@ struct TaskLanding: Codable, Equatable, Sendable {
     /// The landing brief is on its way to the agent (typed in, or its
     /// conversation being resumed): not landing yet. nil once delivered.
     var handingOver: Bool?
+    /// A batch landing — several Review cards merged into one target by
+    /// one agent: on the card whose agent does it, the other cards; on
+    /// each of those, that card. Its report and its turn's end settle all.
+    var batch: [UUID]?
+    var batchLead: UUID?
 }
 
 /// How a Done card got there — what its card says.
@@ -2007,8 +2020,8 @@ final class CodingTaskEngine {
             delegate.startProfileForAutomation(profileID, detached: detached)
         }
         defer { pendingBoots.remove(profileID) }
-        let deadline = Date().addingTimeInterval(Self.bootTimeout)
-        while Date() < deadline {
+        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting a workspace for a task")
+        while budget.remains {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if let why = delegate.unattendedLaunchRefusal(profileID) { return why }
             if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
@@ -2624,6 +2637,7 @@ final class CodingTaskEngine {
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
@@ -2673,21 +2687,24 @@ final class CodingTaskEngine {
     /// one on a tie. The folder's HEAD alone named whatever that checkout
     /// happened to be on, not where the work came from.
     nonisolated static func worktreeMetadataCommand(repoPath: String, branch: String) -> String {
-        let q = "'" + repoPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
+        func quoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        // The branch is a name git accepts — `'`, `;`, `$(` and all: quoted
+        // like every other value, never spliced into a quoted string.
+        let q = quoted(repoPath)
+        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); tb=\(quoted(branch)); "
             + "[ -n \"$root\" ] || exit 0; "
             + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
-            + "| awk -v b='refs/heads/\(branch)' "
+            + "| awk -v b=\(quoted("refs/heads/" + branch)) "
             + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
             + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
-            + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
+            + "parent=$(awk -F'\\x1f' -v b=\(quoted(branch)) '$1==b {print $2; exit}' "
             + "\"$reg\" 2>/dev/null); "
             + "if [ -z \"$parent\" ]; then "
             + "best=999999; "
             + "head=$(git -C \"$root\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
             + "for b in \"$head\" $(git -C \"$root\" for-each-ref --count=300 --format='%(refname:short)' refs/heads/); do "
-            + "case \"$b\" in ''|HEAD|wt/*|\"\(branch)\") continue;; esac; "
-            + "n=$(git -C \"$root\" rev-list --count \"$b..\(branch)\" 2>/dev/null) || continue; "
+            + "case \"$b\" in ''|HEAD|wt/*|\"$tb\") continue;; esac; "
+            + "n=$(git -C \"$root\" rev-list --count \"$b..$tb\" 2>/dev/null) || continue; "
             + "if [ \"$n\" -lt \"$best\" ]; then best=$n; parent=$b; fi; "
             + "done; fi; "
             + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
@@ -2718,6 +2735,7 @@ final class CodingTaskEngine {
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
@@ -2774,6 +2792,7 @@ final class CodingTaskEngine {
                 $0.stage = .inProgress
                 $0.lastError = nil
                 $0.landing = nil
+                $0.approvedTarget = nil
                 $0.deliverySummary = nil
             }
             markCommentsSent(taskID, ids)
@@ -2785,6 +2804,7 @@ final class CodingTaskEngine {
             $0.stage = .inProgress
             $0.lastError = nil
             $0.landing = nil   // cancels a landing under way
+            $0.approvedTarget = nil
             $0.sessionParkedAt = nil
             $0.startedAt = Date()   // restart the session-gone clock
         }
@@ -3234,6 +3254,7 @@ final class CodingTaskEngine {
             $0.parentBranch = nil; $0.rootRepo = nil
             $0.startedAt = nil; $0.testingAt = nil; $0.completedAt = nil
             $0.landing = nil; $0.merged = false; $0.prOpened = nil
+            $0.approvedTarget = nil
             $0.completion = nil; $0.codeChanges = nil; $0.sessionParkedAt = nil
             $0.lastError = nil; $0.restartNeeded = nil; $0.resumeBranch = nil
         }
@@ -3282,6 +3303,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()   // restart the session-gone clock
                 // A finished task picked back up is active again.
                 $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.landing = nil
+                $0.approvedTarget = nil
                 $0.completion = nil; $0.sessionParkedAt = nil
                 $0.restartNeeded = nil
             }
@@ -4419,6 +4441,7 @@ final class CodingTaskEngine {
             if $0.stage == .testing || $0.stage == .planning {
                 $0.stage = .inProgress
                 $0.landing = nil   // cancels a landing under way
+                $0.approvedTarget = nil
             }
         }
     }

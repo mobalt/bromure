@@ -770,7 +770,8 @@ final class RemoteHostController {
 #if os(macOS)
         updateDelegationRelay()
 #endif
-        let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
+        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
+        let workspaces = listedWorkspaces ?? []
         let attached = Set(workspaces.compactMap { w -> UUID? in
             guard w["hostKind"] as? String == "agent-host" else { return nil }
             return (w["id"] as? String).flatMap(UUID.init(uuidString:))
@@ -785,18 +786,18 @@ final class RemoteHostController {
         let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
         if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
         // Guard against a degenerate /state. A 200 poll whose body was truncated
-        // or failed to parse arrives as an (almost) empty snapshot, and a partial
-        // server snapshot can momentarily carry no workspaces. Applying it wipes
+        // or failed to parse arrives as an (almost) empty snapshot, and a server
+        // whose list isn't wired yet sends an empty one. Applying it wipes
         // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
         // — and because the workspace screen unmounts its live terminals whenever
         // `isRunning` goes false, the screen flashes to a blank "Info" view until
-        // the next good poll repaints it (and a just-created tab is wiped, so "+"
-        // looks slow to appear). Once we hold a populated mirror, an empty
-        // workspaces list is far likelier a bad read than a genuine "all
-        // workspaces removed", so keep the last good state instead of flashing.
-        // (keys= reveals the cause: empty ⇒ truncated/parse-fail whole body;
-        // vms/grid/… present but no workspaces ⇒ a partial server snapshot.)
-        if workspaces.isEmpty, revision > 0, !profilesByID.isEmpty {
+        // the next good poll repaints it. So a snapshot with no `workspaces`
+        // array, or one whose host says it didn't list them, keeps the last
+        // good state. A listed, empty array is real: the last workspace was
+        // deleted — skipping it froze the mirror on the deleted row for good.
+        // (keys= reveals the cause.)
+        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
+        if degenerate, revision > 0, !profilesByID.isEmpty {
             FatClientLog.log("apply: skipped degenerate snapshot "
                 + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
                 + "kept \(profilesByID.count) workspaces")
@@ -1550,6 +1551,15 @@ final class RemoteHostController {
     var hasSnapshot: Bool { revision > 0 }
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
+
+    /// The host deleted this workspace (DELETE /profiles answered 200): its
+    /// row goes now, not at the next snapshot.
+    func workspaceDeleted(_ id: Profile.ID) {
+        profilesByID[id] = nil
+        specs[id] = nil
+        credentialsByID[id] = nil
+        listModel.profileRows.removeAll { $0.id == id }
+    }
 
     /// Which credentials a workspace holds on the host (the mirrored profile
     /// carries none). nil: an older host that doesn't say.
@@ -4179,17 +4189,17 @@ final class RemoteHostWindow: NSWindow {
                             done(.fromServer(status: status, json: json))
                         }
                     },
-                    askSession: { [weak self] id, sid, confirmed, done in
+                    askSession: { id, sid, confirmed, done in
                         // Wait for the server's answer: an older server
-                        // doesn't know the route, and switching to the
-                        // session then read as sent while nothing was.
+                        // doesn't know the route. The user stays in the
+                        // code review, as on the local window: the
+                        // finding's row says it's in progress and opens
+                        // the task.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
                                   body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
-                            let reply = HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
+                            done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",
-                                comment: "finding → session failure"))
-                            if reply == .done { self?.selectSession(sid) }
-                            done(reply)
+                                comment: "finding → session failure")))
                         }
                     },
                     sessionChoices: {
@@ -4544,6 +4554,11 @@ final class RemoteHostWindow: NSWindow {
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
+                    mergeBatch: { ids, push in
+                        guard let first = ids.first else { return }
+                        c.taskCommand(first, "merge-batch",
+                                      body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
+                    },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
                     stop: { c.taskCommand($0, "stop") },
@@ -4636,6 +4651,35 @@ final class RemoteHostWindow: NSWindow {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     private var flagsMonitor: Any?
+
+    /// "Delete workspace" on the server's machine — the local window's
+    /// question, then DELETE /profiles/<id>. A running workspace is refused
+    /// there (shut it down first); the server's reason is shown.
+    private func confirmDeleteWorkspace(_ id: UUID) {
+        guard let p = controller.profile(for: id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete workspace “%@”?", comment: "delete workspace"), p.name)
+        alert.informativeText = NSLocalizedString(
+            "Removes its disk, settings, and SSH key. The mounted host folder is untouched.",
+            comment: "delete workspace")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn, let self else { return }
+            self.controller.request("DELETE", "/profiles/\(ControlClient.encodeSegment(id.uuidString))") { [weak self] status, json in
+                guard status != 200 else { self?.controller.workspaceDeleted(id); return }
+                let why = (json["error"] as? String) ?? NSLocalizedString(
+                    "The server didn't answer.", comment: "delete workspace failure")
+                let fail = NSAlert()
+                fail.messageText = String(format: NSLocalizedString("Couldn't delete “%@”", comment: "delete workspace failure"), p.name)
+                fail.informativeText = why
+                guard let self else { return }
+                fail.beginSheetModal(for: self)
+            }
+        }
+        alert.beginSheetModal(for: self, completionHandler: go)
+    }
 
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
@@ -6496,9 +6540,11 @@ final class RemoteHostWindow: NSWindow {
             onSuspend: { [weak self] id in self?.controller.suspendWorkspace(id) },
             onRestart: { [weak self] id in self?.confirmReboot(id) },
             onEdit: { [weak self] id in self?.openWorkspaceSettings(id) },
-            onDuplicate: { _ in },
-            onReset: { _ in },
-            onDelete: { _ in },
+            // No route for these on the server: not offered, rather than a
+            // menu item that does nothing.
+            onDuplicate: nil,
+            onReset: nil,
+            onDelete: { [weak self] id in self?.confirmDeleteWorkspace(id) },
             // Option-click runs the credential wizard first, same gesture as
             // the local window's "+".
             onNewProfile: { [weak self] in

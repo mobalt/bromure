@@ -1555,7 +1555,7 @@ final class DelegationEngine {
         let now = Date()
         for d in store.delegations {
             for m in d.messages
-            where DelegationStore.owesNotice(m, interrupts: DelegationNotice.interrupts(m.kind, request: d.isRequest), now: now) {
+            where DelegationStore.owesNotice(m, in: d, interrupts: DelegationNotice.interrupts(m.kind, request: d.isRequest), now: now) {
                 out.insert(m.to == .parent ? d.parentSessionID : d.childSessionID)
             }
         }

@@ -37,6 +37,39 @@ enum LandingCheck: Equatable, Sendable {
     case failed
 }
 
+/// What a landing leaves for an agent: its branch, target and repository.
+struct LandingHandOff: Sendable {
+    let taskID: UUID
+    let branch: String
+    let target: String
+    let root: String
+    /// Merged here already; only the push is left.
+    let pushedLocally: Bool
+}
+
+/// What a look at the repository found for a landing.
+enum LandingVerification: Equatable, Sendable {
+    /// In the target (and in `<remote>/<target>` for a pushing one).
+    case landed
+    /// Looked: not there (yet), or its checkout still has changes.
+    case pending
+    /// A pushing landing whose remote couldn't be fetched (offline, bad
+    /// credentials, a dead URL): whether it's pushed is unknown, whatever
+    /// the local merge says.
+    case remoteUnreachable
+    /// The machine couldn't be asked.
+    case unknown
+
+    /// The verify command's output.
+    static func parse(_ out: String?) -> LandingVerification {
+        guard let out else { return .unknown }
+        if out.contains("NOREMOTE") { return .remoteUnreachable }
+        if out.contains("LANDED") { return .landed }
+        if out.contains("PENDING") { return .pending }
+        return .unknown
+    }
+}
+
 /// What a `board_report_landing` (or a delegated delivery) leads to.
 enum LandingReportOutcome: Equatable, Sendable {
     /// Bromure saw it in the target: Done, verified.
@@ -45,6 +78,10 @@ enum LandingReportOutcome: Equatable, Sendable {
     case finishUnverified
     /// Bromure looked and it isn't there: the agent is told to finish.
     case notYet
+    /// A pushing landing whose remote couldn't be fetched: the push can't
+    /// be checked — the user looks (the branch is kept), never Done on
+    /// the agent's word.
+    case remoteUnchecked
     case prOpened(String?)
     case blocked(String)
     case invalid(String)
@@ -53,12 +90,19 @@ enum LandingReportOutcome: Equatable, Sendable {
     /// nil = couldn't look.
     static func decide(status: String, summary: String, prURL: String?,
                        verified: Bool?) -> LandingReportOutcome {
+        decide(status: status, summary: summary, prURL: prURL,
+               verification: verified.map { $0 ? .landed : .pending } ?? .unknown)
+    }
+
+    static func decide(status: String, summary: String, prURL: String?,
+                       verification: LandingVerification) -> LandingReportOutcome {
         switch status {
         case "merged":
-            switch verified {
-            case true?: return .finishVerified
-            case false?: return .notYet
-            case nil: return .finishUnverified
+            switch verification {
+            case .landed: return .finishVerified
+            case .pending: return .notYet
+            case .remoteUnreachable: return .remoteUnchecked
+            case .unknown: return .finishUnverified
             }
         case "pr_opened":
             return .prOpened(prURL ?? CodingTask.pullRequestURL(in: summary))
@@ -78,6 +122,115 @@ extension CodingTaskEngine {
 
     private nonisolated static func q(_ s: String) -> String { shellQuote(s) }
 
+    // MARK: Remotes
+
+    /// `git -C <dir>` for the commands Bromure runs itself in a task's
+    /// repository: nothing the repository's own config names runs — no hook
+    /// (`.git/hooks`, `core.hooksPath`), no `core.fsmonitor` program. The
+    /// repository is the agent's work, or a copied worktree, or a zip with
+    /// its `.git`: its config is data, never a program to run here.
+    /// `dir` is already shell-quoted (or a "$var").
+    nonisolated static func pinnedGit(_ dir: String) -> String {
+        "git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C \(dir)"
+    }
+
+    /// The environment for a fetch or push Bromure runs: no prompt, and the
+    /// ssh program from the user's own git config (global, system) or plain
+    /// `ssh` — never a `core.sshCommand` the repository sets. Read outside
+    /// any repository so the local config can't answer.
+    /// Transports: https, http, ssh only (`GIT_ALLOW_PROTOCOL` overrides
+    /// any `protocol.*.allow`) — never `ext::` (a remote URL that is a
+    /// command), `git://` (its `core.gitProxy` program), a remote helper the
+    /// config names, nor `file` (a local path or file:// URL): its
+    /// receive-pack runs in this machine, under the target repository's own
+    /// config and hooks — `pre-receive` in a repository the URL can name.
+    /// A local remote's push and check are left to the agent. No `core.askPass`:
+    /// an asked-for password gets nothing (`GIT_ASKPASS` beats the config).
+    nonisolated static let networkGitEnv =
+        "export GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:http:ssh; "
+        + "[ -n \"${GIT_ASKPASS:-}\" ] || export GIT_ASKPASS=/bin/false; "
+        + "if [ -z \"${GIT_SSH_COMMAND:-}\" ] && [ -z \"${GIT_SSH:-}\" ]; then "
+        + "GIT_SSH_COMMAND=$(cd / && { git config --global --get core.sshCommand || git config --system --get core.sshCommand; } 2>/dev/null) "
+        + "|| GIT_SSH_COMMAND=ssh; export GIT_SSH_COMMAND; fi; "
+
+    /// Prints `local-helper` when the repository's own config (local or
+    /// worktree scope, includes too) names a credential helper — a program
+    /// a fetch or push would run. The fast path then leaves it to the agent.
+    nonisolated static func localCredentialHelperCheck(_ dir: String) -> String {
+        "\(pinnedGit(dir)) config --show-scope --get-regexp '^credential\\..*helper$' 2>/dev/null "
+            + "| grep -qE '^(local|worktree)[[:space:]]'"
+    }
+
+    /// `git fetch` from a remote with its pack program pinned: never the
+    /// `remote.<name>.uploadpack` the repository's config sets. Never into
+    /// submodules either (their own config). Runs under `networkGitEnv`.
+    nonisolated static func pinnedFetch(_ dir: String, remote: String) -> String {
+        "\(pinnedGit(dir)) -c \(q("remote.\(remote).uploadpack=git-upload-pack")) "
+            + "fetch -q --no-recurse-submodules --upload-pack=git-upload-pack -- \(q(remote))"
+    }
+
+    /// `git push` with its pack program pinned (never the repository's
+    /// `remote.<name>.receivepack`), no `pre-push` hook, and never signed:
+    /// a `push.gpgSign` the repository sets would run its `gpg.program` to
+    /// sign the push certificate once the remote asks for one. Runs under
+    /// `RepoGitPrograms.off` too, which blanks a local `gpg.program`.
+    nonisolated static func pinnedPush(_ dir: String, remote: String, refspec: String) -> String {
+        "\(pinnedGit(dir)) -c push.gpgSign=false -c \(q("remote.\(remote).receivepack=git-receive-pack")) "
+            + "push -q --no-verify --no-signed --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
+    }
+
+    /// A remote name safe to hand git and an agent: one plain token, never
+    /// an option. Quoting stops the shell, not git — a remote named
+    /// `--exec=./pwn.sh` (whatever `.git/config` lists first: a copied
+    /// worktree, a zip with its .git, the agent itself) ran that program
+    /// on Merge & Push.
+    nonisolated static func isSafeRemoteName(_ s: String) -> Bool {
+        s.range(of: #"^[A-Za-z0-9][A-Za-z0-9._/-]*$"#, options: .regularExpression) != nil
+            && !s.contains("..") && !s.hasSuffix("/")
+    }
+
+    /// `remote` when it is safe, else nil.
+    nonisolated static func safeRemote(_ remote: String?) -> String? {
+        remote.flatMap { isSafeRemoteName($0) ? $0 : nil }
+    }
+
+    /// The shell that prints the remote a landing pushes to: "origin" when
+    /// the repo has one, else its first remote with a safe name — nothing
+    /// when none (an unsafe name is never picked). `repo`: shell-quoted.
+    /// The Swift twin is `pickRemote`.
+    nonisolated static func pickRemoteShell(repo: String) -> String {
+        "git -C \(repo) remote 2>/dev/null | awk "
+            + #"'/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/ && !/\.\./ && !/\/$/ { if ($0 == "origin") o = 1; else if (f == "") f = $0 } "#
+            + #"END { if (o) print "origin"; else if (f != "") print f }'"#
+    }
+
+    /// A branch name safe to hand git — Bromure's commands and an agent's
+    /// brief alike: what `git check-ref-format --branch` accepts, and never
+    /// an option. Quoting stops the shell, not git: a parent branch named
+    /// `--upload-pack=./pwn.sh` (HEAD can point at one, and the worktree's
+    /// parent is read from HEAD) ran that program from `git pull --rebase`.
+    nonisolated static func isSafeBranchName(_ s: String) -> Bool {
+        BranchMergeCommands.isSafeBranchName(s)
+    }
+
+    /// The first of these names that isn't a plain branch name, if any.
+    nonisolated static func unsafeBranch(_ names: String?...) -> String? {
+        names.compactMap { $0 }.first { !isSafeBranchName($0) }
+    }
+
+    nonisolated static func unsafeBranchWhy(_ name: String) -> String {
+        String(format: NSLocalizedString(
+            "“%@” isn't a plain branch name — git would read it as an option. Rename the branch, then retry.",
+            comment: "task landing: an option-shaped branch name"), name)
+    }
+
+    /// `git remote`'s listing → the remote a landing pushes to.
+    nonisolated static func pickRemote(_ listing: String) -> String? {
+        let names = listing.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter(isSafeRemoteName)
+        return names.contains("origin") ? "origin" : names.first
+    }
+
     /// The fast-path probe — and, when the branch is strictly ahead of the
     /// target with a clean checkout, the fast-forward itself. Prints one
     /// word (see `parseLandingCheck`). Squash and pull-request landings
@@ -85,14 +238,17 @@ extension CodingTaskEngine {
     /// agent's) — except a squash of a single commit, which IS a ff.
     nonisolated static func landingCheckCommand(root: String, branch: String, target: String,
                                                 sourceDir: String?, mode: TaskLanding.Mode) -> String {
-        var cmd = "r=\(q(root)); "
-            + "git -C \"$r\" rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
-            + "git -C \"$r\" rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
+        guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo failed" }
+        // Filters and merge drivers the repository configures never run —
+        // the dirty check's status and the fast-forward's checkout would.
+        var cmd = "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"")
+            + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
+            + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo dirty-source; exit 0; fi; "
         }
-        cmd += "a=$(git -C \"$r\" rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
-            + "b=$(git -C \"$r\" rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
+        cmd += "a=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
+            + "b=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
             + "if [ \"$a\" = 0 ]; then echo merged; exit 0; fi; "
             + "if [ \"$b\" != 0 ]; then echo diverged; exit 0; fi; "
         switch mode {
@@ -105,10 +261,10 @@ extension CodingTaskEngine {
         // refuses when they're in the way. Not checked out anywhere: move
         // the ref itself (a fetch into a branch refuses a non-ff update).
         return cmd
-            + "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
+            + "d=$(\(pinnedGit("\"$r\"")) worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); "
-            + "if [ -n \"$d\" ]; then git -C \"$d\" merge --ff-only -q \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
-            + "else git -C \"$r\" fetch -q . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
+            + "if [ -n \"$d\" ]; then \(RepoGitPrograms.off("\"$d\""))\(pinnedGit("\"$d\"")) merge --ff-only -q -- \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
+            + "else \(pinnedGit("\"$r\"")) fetch -q -- . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
     }
 
     nonisolated static func parseLandingCheck(_ out: String?) -> LandingCheck {
@@ -133,20 +289,38 @@ extension CodingTaskEngine {
     /// too (fetched first).
     nonisolated static func landingVerifyCommand(root: String, branch: String, target: String,
                                                  sourceDir: String?, remote: String? = nil) -> String {
-        var cmd = ""
+        // A name git would read as an option is never looked up — nor LANDED.
+        guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo PENDING" }
+        var cmd = RepoGitPrograms.off(q(root))
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
         }
-        var into = [target]
-        if let remote, !remote.isEmpty {
-            cmd += "GIT_TERMINAL_PROMPT=0 git -C \(q(root)) fetch -q \(q(remote)) >/dev/null 2>&1 || { echo UNKNOWN; exit 0; }; "
-            into.append("refs/remotes/\(remote)/\(target)")
+        func inRef(_ t: String) -> String {
+            // Revisions after --end-of-options: never an option, whatever
+            // the name (a diff that exits 0 because it parsed the target as
+            // `--diff-filter=A` read as LANDED).
+            "{ \(pinnedGit(q(root))) merge-base --is-ancestor --end-of-options \(q(branch)) \(q(t)) 2>/dev/null "
+                + "|| \(pinnedGit(q(root))) diff \(RepoGitPrograms.diffFlags) --quiet --end-of-options \(q(t)) \(q(branch)) -- 2>/dev/null; }"
         }
-        let tests = into.map { t in
-            "{ git -C \(q(root)) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
-                + "|| git -C \(q(root)) diff --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
+        let local = inRef(target)
+        guard let remote, !remote.isEmpty else {
+            return cmd + "if \(local); then echo LANDED; else echo PENDING; fi"
         }
-        return cmd + "if " + tests.joined(separator: " && ") + "; then echo LANDED; else echo PENDING; fi"
+        // A remote that isn't a plain name is never fetched — and the push
+        // can't be checked, so it's never LANDED either.
+        guard isSafeRemoteName(remote) else { return "echo NOREMOTE" }
+        // A fetch that fails says so (NOREMOTE) and the local merge is
+        // still looked at — but it is never LANDED: unchecked isn't pushed.
+        // Bailing out as "unknown" here let the agent's "merged" finish the
+        // task, and its cleanup delete the branch.
+        // The repository names a credential helper: a program the fetch
+        // would run — not checked here (NOREMOTE: the user looks).
+        cmd += networkGitEnv
+            + "if \(localCredentialHelperCheck(q(root))); then echo NOREMOTE; exit 0; fi; "
+        cmd += "if \(pinnedFetch(q(root), remote: remote)) >/dev/null 2>&1; then "
+            + "if \(local) && \(inRef("refs/remotes/\(remote)/\(target)")); then echo LANDED; else echo PENDING; fi; "
+            + "else echo NOREMOTE; if \(local); then echo INLOCAL; else echo PENDING; fi; fi"
+        return cmd
     }
 
     /// After a local merge: push `target` to `remote` when that's a plain
@@ -154,13 +328,15 @@ extension CodingTaskEngine {
     /// `behind` (the remote moved on: the agent pulls and merges first),
     /// `push-failed` or `fetch-failed` (the agent looks into it).
     nonisolated static func pushTargetCommand(root: String, target: String, remote: String) -> String {
+        guard isSafeRemoteName(remote), isSafeBranchName(target) else { return "echo push-failed" }
         let tracking = "refs/remotes/\(remote)/\(target)"
-        return "r=\(q(root)); export GIT_TERMINAL_PROMPT=0; "
-            + "git -C \"$r\" fetch -q \(q(remote)) >/dev/null 2>&1 || { echo fetch-failed; exit 0; }; "
-            + "if git -C \"$r\" rev-parse -q --verify \(q(tracking)) >/dev/null 2>&1 "
-            + "&& ! git -C \"$r\" merge-base --is-ancestor \(q(tracking)) \(q("refs/heads/" + target)) 2>/dev/null; "
+        return "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"") + networkGitEnv
+            + "if \(localCredentialHelperCheck("\"$r\"")); then echo push-failed; exit 0; fi; "
+            + "\(pinnedFetch("\"$r\"", remote: remote)) >/dev/null 2>&1 || { echo fetch-failed; exit 0; }; "
+            + "if \(pinnedGit("\"$r\"")) rev-parse -q --verify \(q(tracking)) >/dev/null 2>&1 "
+            + "&& ! \(pinnedGit("\"$r\"")) merge-base --is-ancestor \(q(tracking)) \(q("refs/heads/" + target)) 2>/dev/null; "
             + "then echo behind; exit 0; fi; "
-            + "git -C \"$r\" push -q \(q(remote)) \(q("refs/heads/\(target):refs/heads/\(target)")) >/dev/null 2>&1 "
+            + "\(pinnedPush("\"$r\"", remote: remote, refspec: "refs/heads/\(target):refs/heads/\(target)")) >/dev/null 2>&1 "
             + "&& echo pushed || echo push-failed"
     }
 
@@ -169,15 +345,21 @@ extension CodingTaskEngine {
     /// git refused.
     nonisolated static func pushPrompt(branch: String, target: String, remote: String,
                                        viaBoard: Bool) -> String {
+        // The names go into commands the agent runs: quoted, and only a
+        // safe remote (finding: an unchecked one was a command line).
+        let rm = safeRemote(remote) ?? "origin"
+        // Pull and push re-read what follows `--` as options (pull hands it
+        // to fetch): the target goes as a full ref, which never parses as one.
+        let (qr, qtRef) = (q(rm), q("refs/heads/" + target))
         let report = viaBoard
-            ? "Call the board_report_landing tool with status \"merged\" and a one-line summary once '\(remote)/\(target)' has it. If you can't push it, don't force anything: call board_report_landing with status \"blocked\" and the reason."
-            : "Call `deliver` with one line saying it's pushed to '\(remote)/\(target)'. If you can't push it, don't force anything: `ask`, saying what's in the way."
+            ? "Call the board_report_landing tool with status \"merged\" and a one-line summary once '\(rm)/\(target)' has it. If you can't push it, don't force anything: call board_report_landing with status \"blocked\" and the reason."
+            : "Call `deliver` with one line saying it's pushed to '\(rm)/\(target)'. If you can't push it, don't force anything: `ask`, saying what's in the way."
         return """
-            The user approved this task and '\(branch)' is merged into '\(target)' locally — now push '\(target)' to '\(remote)'. Do it yourself, in this session:
-            1. `git fetch \(remote)`.
-            2. In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't checked out anywhere, check it out in a scratch worktree), bring in what '\(remote)/\(target)' has: `git pull --rebase \(remote) \(target)`. Resolve every conflict keeping both sides' intent — never drop the other side's changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.
+            The user approved this task and '\(branch)' is merged into '\(target)' locally — now push '\(target)' to '\(rm)'. Do it yourself, in this session:
+            1. `git fetch \(qr)`.
+            2. In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't checked out anywhere, check it out in a scratch worktree), bring in what '\(rm)/\(target)' has: `git pull --rebase -- \(qr) \(qtRef)`. Resolve every conflict keeping both sides' intent — never drop the other side's changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.
             3. If the project has quick checks (tests, a build, a linter), run them and fix what the merge broke. Don't go fixing unrelated failures.
-            4. Push: `git push \(remote) \(target)`. Never force-push '\(target)'. If it's rejected because '\(remote)' moved again, repeat from step 1.
+            4. Push: `git push -- \(qr) \(qtRef)`. Never force-push '\(target)'. If it's rejected because '\(rm)' moved again, repeat from step 1.
             5. \(report)
             If git has no identity configured, commit with `git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask.
             """
@@ -190,51 +372,58 @@ extension CodingTaskEngine {
     nonisolated static func landingPrompt(mode: TaskLanding.Mode, branch: String, target: String,
                                           rootRepo: String, title: String, remote: String?,
                                           viaBoard: Bool, push: Bool = false) -> String {
+        // Every name the agent's commands carry is quoted; the remote is
+        // a safe one or the default.
+        let rm = safeRemote(remote)
+        // `--` ends git's options before each name; pull and push get the
+        // target as a full ref (pull hands its arguments on to fetch, which
+        // reads them as options again).
+        let (qb, qt, qtRef) = (q(branch), q(target), q("refs/heads/" + target))
         let identity = "If git has no identity configured, commit with "
             + "`git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask."
         let commit = "Commit anything still uncommitted on '\(branch)' with clear messages "
             + "(leave out build artifacts and scratch files)."
-        let rebase = "Rebase onto the latest '\(target)': `git rebase \(target)`. Resolve every conflict "
+        let rebase = "Rebase onto the latest '\(target)': `git rebase -- \(qt)`. Resolve every conflict "
             + "keeping both sides' intent — never drop the other side's changes."
         let checks = "If the project has quick checks (tests, a build, a linter), run them and fix "
             + "what your change broke. Don't go fixing unrelated failures."
         if mode == .pr {
-            let r = remote ?? "origin"
+            let r = rm ?? "origin"
             let report = viaBoard
                 ? "Call the board_report_landing tool with status \"pr_opened\", the pull request's URL as prURL and a one-line summary. If you can't open it, call board_report_landing with status \"blocked\" and the reason."
                 : "Call `deliver` with the pull request's URL and a one-line summary. If you can't open it, `ask`, saying what's in the way."
             return """
                 The user approved this task — open a pull request for '\(branch)' into '\(target)'. Do it yourself, in this session:
                 1. \(commit)
-                2. \(rebase) (If '\(target)' tracks '\(r)', `git fetch \(r)` first and rebase onto '\(r)/\(target)'.)
+                2. \(rebase) (If '\(target)' tracks '\(r)', `git fetch \(q(r))` first and rebase onto '\(r)/\(target)'.)
                 3. \(checks)
-                4. Push: `git push -u \(r) \(branch)` (after a rebase, `--force-with-lease` is fine: the branch is yours).
-                5. Create it with `gh pr create --base \(target)`: a concise imperative title, and a body with a '## Summary' (what changed and why) and a '## Test plan' (how it was verified).
+                4. Push: `git push -u -- \(q(r)) \(qb)` (after a rebase, `--force-with-lease` is fine: the branch is yours).
+                5. Create it with `gh pr create --base \(qt)`: a concise imperative title, and a body with a '## Summary' (what changed and why) and a '## Test plan' (how it was verified).
                 6. \(report)
                 \(identity)
                 """
         }
-        let pushTo = push ? (remote ?? "origin") : nil
+        let pushTo = push ? (rm ?? "origin") : nil
         let landedIn = pushTo.map { "'\($0)/\(target)'" } ?? "'\(target)'"
         let report = viaBoard
             ? "Call the board_report_landing tool with status \"merged\" and a one-line summary of what landed\(pushTo == nil ? "" : " once \(landedIn) has it"). If you can't land it, don't force anything: call board_report_landing with status \"blocked\" and the reason."
             : "Call `deliver` with one line saying it landed in \(landedIn). If you can't land it, don't force anything: `ask`, saying what's in the way."
         var steps = [commit]
         if let r = pushTo {
-            steps.append("`git fetch \(r)`. If '\(r)/\(target)' has commits '\(target)' lacks, bring them into '\(target)' "
-                + "first, in its checkout: `git pull --rebase \(r) \(target)` (resolve conflicts keeping both sides' intent).")
+            steps.append("`git fetch \(q(r))`. If '\(r)/\(target)' has commits '\(target)' lacks, bring them into '\(target)' "
+                + "first, in its checkout: `git pull --rebase -- \(q(r)) \(qtRef)` (resolve conflicts keeping both sides' intent).")
         }
         steps += [rebase, checks]
         if mode == .squash {
-            steps.append("Squash your work into one commit: `git reset --soft \(target) && git commit -m \"\(title.replacingOccurrences(of: "\"", with: "'"))\"`.")
+            steps.append("Squash your work into one commit: `git reset --soft \(qt) -- && git commit -m \(q(title))`.")
         }
         steps.append("Fast-forward '\(target)' to your branch: in the checkout where '\(target)' is checked out "
-            + "(`git worktree list` shows it), run `git merge --ff-only \(branch)`. If '\(target)' isn't checked out "
-            + "anywhere, run `git -C '\(rootRepo)' fetch . \(branch):\(target)` instead. Never touch, stash or discard "
+            + "(`git worktree list` shows it), run `git merge --ff-only -- \(qb)`. If '\(target)' isn't checked out "
+            + "anywhere, run `git -C \(q(rootRepo)) fetch -- . \(q(branch + ":" + target))` instead. Never touch, stash or discard "
             + "uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.")
         if let r = pushTo {
-            steps.append("Push it: `git push \(r) \(target)`. Never force-push '\(target)'. If it's rejected because "
-                + "'\(r)' moved on, `git pull --rebase \(r) \(target)` in the '\(target)' checkout, resolve any "
+            steps.append("Push it: `git push -- \(q(r)) \(qtRef)`. Never force-push '\(target)'. If it's rejected because "
+                + "'\(r)' moved on, `git pull --rebase -- \(q(r)) \(qtRef)` in the '\(target)' checkout, resolve any "
                 + "conflicts, re-run the checks and push again.")
         }
         steps.append(report)
@@ -262,10 +451,158 @@ extension CodingTaskEngine {
             $0.landing = TaskLanding(mode: mode, target: wanted, phase: .checking,
                                      startedAt: Date(), keepBranch: keepBranch,
                                      push: push && mode != .pr ? true : nil)
+            $0.approvedTarget = wanted.isEmpty ? nil : wanted
             $0.lastError = nil
         }
         BACDebug.log("tasks", "“\(task.title)”: landing \(branch) → \(wanted.isEmpty ? "parent" : wanted) (\(mode.rawValue))")
         Task { [weak self] in await self?.runLanding(taskID, branch: branch, targetOverride: targetOverride) }
+    }
+
+    /// Land several approved tasks into their targets at once — merges
+    /// only (a squash or a pull request stays one at a time). Each clean
+    /// one Bromure merges itself, one after the other; what's left — the
+    /// ones whose branches conflict or moved on — goes to ONE agent (the
+    /// first such card's), with one brief: merge them all, fix conflicts,
+    /// run the checks once, push once. A delegated task lands its own.
+    func landBatch(_ ids: [UUID], keepBranch: Bool = false, push: Bool = false) {
+        let tasks = ids.compactMap { store.task($0) }.filter {
+            $0.stage == .testing && ($0.landing == nil || $0.landing?.phase == .needsYou)
+        }
+        var grouped: [String: [UUID]] = [:]
+        var order: [String] = []
+        for t in tasks {
+            guard t.delegationID == nil, t.branch != nil else {
+                land(t.id, mode: .merge, keepBranch: keepBranch, push: push)
+                continue
+            }
+            let key = t.profileID.uuidString + "\u{0}" + (t.rootRepo ?? t.repoPath)
+            if grouped[key] == nil { order.append(key) }
+            grouped[key, default: []].append(t.id)
+        }
+        for key in order {
+            let group = grouped[key] ?? []
+            if group.count == 1 {
+                land(group[0], mode: .merge, keepBranch: keepBranch, push: push)
+                continue
+            }
+            for id in group {
+                store.mutate(id) {
+                    $0.landing = TaskLanding(mode: .merge, target: $0.parentBranch ?? "", phase: .checking,
+                                             startedAt: Date(), keepBranch: keepBranch,
+                                             push: push ? true : nil)
+                    $0.approvedTarget = $0.parentBranch
+                    $0.lastError = nil
+                }
+            }
+            BACDebug.log("tasks", "batch landing of \(group.count) tasks")
+            Task { [weak self] in await self?.runBatch(group) }
+        }
+    }
+
+    /// One after the other through the fast path, then the rest to one agent.
+    private func runBatch(_ ids: [UUID]) async {
+        var left: [LandingHandOff] = []
+        for id in ids {
+            guard let branch = store.task(id)?.branch else { continue }
+            if let h = await runLanding(id, branch: branch, targetOverride: nil, batched: true) { left.append(h) }
+        }
+        // One agent per target (cards of one batch may start from different branches).
+        var byTarget: [String: [LandingHandOff]] = [:]
+        var targets: [String] = []
+        for h in left {
+            if byTarget[h.target] == nil { targets.append(h.target) }
+            byTarget[h.target, default: []].append(h)
+        }
+        for target in targets {
+            let hs = byTarget[target] ?? []
+            guard let lead = hs.first else { continue }
+            guard hs.count > 1, let leadTask = store.task(lead.taskID) else {
+                await handLandingToAgent(lead.taskID, branch: lead.branch, target: lead.target,
+                                         root: lead.root, pushedLocally: lead.pushedLocally)
+                continue
+            }
+            let followers = hs.dropFirst().map(\.taskID)
+            for f in followers {
+                store.mutate(f) {
+                    $0.landing?.phase = .agentLanding
+                    $0.landing?.batchLead = lead.taskID
+                    $0.landing?.startedAt = Date()
+                    $0.landing?.handingOver = nil
+                    $0.landing?.detail = String(format: NSLocalizedString(
+                        "Merged with others by %@", comment: "task landing: a card landed in a batch"),
+                        leadTask.workerName)
+                }
+                watchLanding(f)
+            }
+            store.mutate(lead.taskID) { $0.landing?.batch = Array(followers) }
+            let pushes = leadTask.landing?.pushes == true
+            let prompt = Self.batchLandingPrompt(
+                branches: hs.map(\.branch),
+                target: target, rootRepo: lead.root,
+                remote: pushes ? leadTask.landing?.remote : nil)
+            await handLandingToAgent(lead.taskID, branch: lead.branch, target: target, root: lead.root,
+                                     promptOverride: prompt)
+        }
+    }
+
+    /// The batch brief: merge each branch into `target` in order, in its
+    /// checkout; conflicts resolved keeping both sides; checks once; push
+    /// once (`remote`); one report for all.
+    /// Branch names only, never the cards' titles: this brief goes to ONE
+    /// agent (often another task's session, running unattended) as the
+    /// user's word, and a title can be anything a planner filed
+    /// (`board_create_subtasks`) — text read from a repository or an issue
+    /// would become the user's instructions to an agent that pushes.
+    nonisolated static func batchLandingPrompt(branches: [String], target: String,
+                                               rootRepo: String, remote: String?) -> String {
+        let rm = safeRemote(remote)
+        let (qtRef, list) = (q("refs/heads/" + target), branches.enumerated().map { i, b in
+            "   \(i + 1). `\(q(b))`"
+        }.joined(separator: "\n"))
+        var steps: [String] = [
+            "For each branch below, commit anything still uncommitted in its checkout (`git worktree list` "
+                + "shows them) with clear messages (leave out build artifacts and scratch files).",
+        ]
+        if let r = rm {
+            steps.append("In the checkout where '\(target)' is checked out, bring in what '\(r)/\(target)' has "
+                + "first: `git fetch \(q(r))` then `git pull --rebase -- \(q(r)) \(qtRef)`.")
+        }
+        steps.append("In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't "
+            + "checked out anywhere, check it out in a scratch worktree of \(q(rootRepo))), merge the branches one "
+            + "after the other, in this order — `git merge --no-edit -- <branch>` for each, committing each merge "
+            + "before the next. Resolve every conflict keeping both sides' intent — never drop the other side's "
+            + "changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses "
+            + "because of them, stop and report blocked.\n" + list)
+        steps.append("Once they're all in, run the project's quick checks (tests, a build, a linter) once and fix "
+            + "what the merges broke. Don't go fixing unrelated failures.")
+        if let r = rm {
+            steps.append("Push it: `git push -- \(q(r)) \(qtRef)`. Never force-push '\(target)'. If it's rejected "
+                + "because '\(r)' moved on, pull --rebase again, re-run the checks and push again.")
+        }
+        steps.append("Call the board_report_landing tool once, with status \"merged\" and a one-line summary, when "
+            + "every branch is in '\(target)'\(rm.map { " and '\($0)/\(target)'" } ?? "") — Bromure checks each. "
+            + "If some can't be merged, merge the others, then call board_report_landing with status \"blocked\" "
+            + "naming the ones that aren't in and why. Don't force anything.")
+        let numbered = steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        return "The user approved \(branches.count) tasks — merge them all into '\(target)', in one go. "
+            + "Do it yourself, in this session:\n" + numbered + "\n"
+            + "If git has no identity configured, commit with "
+            + "`git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask."
+    }
+
+    /// Where a batch's other cards stand once its agent reports or stops:
+    /// each one Bromure sees in its target goes Done; the rest need you.
+    private func settleBatchFollowers(of leadID: UUID, why: @escaping (CodingTask) -> String) async {
+        guard let ids = store.task(leadID)?.landing?.batch else { return }
+        for id in ids {
+            guard let t = store.task(id), t.stage == .testing, t.landing?.phase == .agentLanding,
+                  t.landing?.batchLead == leadID else { continue }
+            if await landingVerified(t) == true {
+                finishLanding(id, verified: true, by: nil)
+            } else {
+                needsYou(id, why(t))
+            }
+        }
     }
 
     private func needsYou(_ taskID: UUID, _ why: String) {
@@ -278,14 +615,18 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "landing needs you: \(why)")
     }
 
-    private func runLanding(_ taskID: UUID, branch: String, targetOverride: String?) async {
-        guard let delegate, var task = store.task(taskID), let mode = task.landing?.mode else { return }
+    /// `batched`: part of a batch landing — what needs an agent comes back
+    /// (to go, with the others, to one agent) instead of being handed over.
+    @discardableResult
+    private func runLanding(_ taskID: UUID, branch: String, targetOverride: String?,
+                            batched: Bool = false) async -> LandingHandOff? {
+        guard let delegate, var task = store.task(taskID), let mode = task.landing?.mode else { return nil }
         let delegated = task.delegationID != nil
         // A workspace that's off is booted (a delegated assignee may sit on
         // a machine this host can't exec into — it lands its own work).
         if !delegated, let why = await ensureWorkspaceUp(task.profileID, delegate: delegate) {
             needsYou(taskID, why)
-            return
+            return nil
         }
         // Metadata a detached finish never captured.
         if task.rootRepo == nil || task.parentBranch == nil || task.worktreeDir == nil {
@@ -299,15 +640,19 @@ extension CodingTaskEngine {
             task = store.task(taskID) ?? task
         }
         let target = targetOverride ?? task.parentBranch
+        if let bad = Self.unsafeBranch(branch, target.flatMap { $0.isEmpty ? nil : $0 }) {
+            needsYou(taskID, Self.unsafeBranchWhy(bad))
+            return nil
+        }
         guard let target, !target.isEmpty, let root = task.rootRepo, !root.isEmpty else {
             if delegated {
-                await handLandingToAgent(taskID, branch: branch, target: target ?? "", root: fallbackRoot(task))
-                return
+                return await handOff(.init(taskID: taskID, branch: branch, target: target ?? "",
+                                           root: fallbackRoot(task), pushedLocally: false), batched: batched)
             }
             needsYou(taskID, NSLocalizedString(
                 "Couldn't read the branch's repository or where it started — is the workspace running?",
                 comment: "task landing"))
-            return
+            return nil
         }
         store.mutate(taskID) { $0.landing?.target = target }
         if task.landing?.pushes == true, task.landing?.remote == nil {
@@ -315,7 +660,7 @@ extension CodingTaskEngine {
                 needsYou(taskID, NSLocalizedString(
                     "The repository has no remote to push to — merge it without pushing.",
                     comment: "task landing"))
-                return
+                return nil
             }
             store.mutate(taskID) { $0.landing?.remote = r }
         }
@@ -329,42 +674,43 @@ extension CodingTaskEngine {
             switch Self.parseLandingCheck(out) {
             case .merged, .mergedNow:
                 if let remote = store.task(taskID)?.landing.flatMap({ $0.pushes ? $0.remote : nil }) {
-                    await pushAfterMerge(taskID, branch: branch, target: target, root: root, remote: remote)
-                    return
+                    return await pushAfterMerge(taskID, branch: branch, target: target, root: root,
+                                                remote: remote, batched: batched)
                 }
                 finishLanding(taskID, verified: true, by: nil)
-                return
+                return nil
             case .noTarget:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The branch %@ doesn't exist in the repository any more — merge into another branch.",
                     comment: "task landing"), target))
-                return
+                return nil
             case .noBranch:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The task's branch %@ is gone from the repository.", comment: "task landing"), branch))
-                return
+                return nil
             case .dirtyTarget:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry.",
                     comment: "task landing"), target))
-                return
+                return nil
             case .failed where out == nil && !delegated:
                 needsYou(taskID, NSLocalizedString("Couldn't reach the workspace — is it running?",
                                                    comment: "task landing"))
-                return
+                return nil
             case .dirtySource, .diverged, .failed:
                 break
             }
         }
-        await handLandingToAgent(taskID, branch: branch, target: target, root: root)
+        return await handOff(.init(taskID: taskID, branch: branch, target: target, root: root,
+                                   pushedLocally: false), batched: batched)
     }
 
     /// Merged locally on the fast path: push the target when that's a clean
     /// fast-forward of the remote; anything else (the remote moved on, git
     /// refused) goes to the agent — pull, fix conflicts, push.
     private func pushAfterMerge(_ taskID: UUID, branch: String, target: String, root: String,
-                                remote: String) async {
-        guard let delegate, let task = store.task(taskID) else { return }
+                                remote: String, batched: Bool = false) async -> LandingHandOff? {
+        guard let delegate, let task = store.task(taskID) else { return nil }
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.pushTargetCommand(root: root, target: target, remote: remote), timeout: 90)
@@ -373,15 +719,24 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: push \(target) → \(remote): \(word.isEmpty ? "no answer" : word)")
         if word == "pushed" {
             finishLanding(taskID, verified: true, by: nil)
-            return
+            return nil
         }
         if out == nil && task.delegationID == nil {
             needsYou(taskID, String(format: NSLocalizedString(
                 "Merged into %@, but couldn't reach the workspace to push it — is it running?",
                 comment: "task landing"), target))
-            return
+            return nil
         }
-        await handLandingToAgent(taskID, branch: branch, target: target, root: root, pushedLocally: true)
+        return await handOff(.init(taskID: taskID, branch: branch, target: target, root: root,
+                                   pushedLocally: true), batched: batched)
+    }
+
+    /// Where a landing's agent part would start (a batch collects these).
+    private func handOff(_ h: LandingHandOff, batched: Bool) async -> LandingHandOff? {
+        if batched { return h }
+        await handLandingToAgent(h.taskID, branch: h.branch, target: h.target, root: h.root,
+                                 pushedLocally: h.pushedLocally)
+        return nil
     }
 
     private func fallbackRoot(_ t: CodingTask) -> String { t.rootRepo ?? ScheduledAutomationEngine.guestPath(t.repoPath) }
@@ -391,8 +746,13 @@ extension CodingTaskEngine {
     /// `pushedLocally`: merged here already — the agent only syncs with the
     /// remote and pushes.
     private func handLandingToAgent(_ taskID: UUID, branch: String, target: String, root: String,
-                                    pushedLocally: Bool = false) async {
+                                    pushedLocally: Bool = false, promptOverride: String? = nil) async {
         guard let delegate, let task = store.task(taskID), let mode = task.landing?.mode else { return }
+        // Every name the brief carries reaches git as typed by the agent.
+        if let bad = Self.unsafeBranch(branch, target.isEmpty ? nil : target) {
+            needsYou(taskID, Self.unsafeBranchWhy(bad))
+            return
+        }
         var remote: String?
         if mode == .pr {
             remote = await remoteName(task)
@@ -405,12 +765,12 @@ extension CodingTaskEngine {
         }
         let pushes = task.landing?.pushes == true
         if pushes { remote = task.landing?.remote }
-        let prompt = pushedLocally
+        let prompt = promptOverride ?? (pushedLocally
             ? Self.pushPrompt(branch: branch, target: target, remote: remote ?? "origin",
                               viaBoard: task.delegationID == nil)
             : Self.landingPrompt(mode: mode, branch: branch, target: target, rootRepo: root,
                                  title: task.title, remote: remote,
-                                 viaBoard: task.delegationID == nil, push: pushes)
+                                 viaBoard: task.delegationID == nil, push: pushes))
         store.mutate(taskID) {
             $0.landing?.phase = .agentLanding
             $0.landing?.startedAt = Date()
@@ -452,33 +812,45 @@ extension CodingTaskEngine {
         watchLanding(taskID)
     }
 
-    /// The repository's first remote ("origin" usually), nil when none.
+    /// The remote a landing pushes to: "origin", else the repository's
+    /// first remote with a safe name (`pickRemote`); nil when none.
     func remoteName(_ task: CodingTask) async -> String? {
         guard let delegate, let root = task.rootRepo ?? task.worktreeDir else { return nil }
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
-            command: "git -C \(Self.shellQuote(root)) remote 2>/dev/null | head -1", timeout: 10)
-        let r = (out ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return r.isEmpty ? nil : r
+            command: "git -C \(Self.shellQuote(root)) remote 2>/dev/null", timeout: 10)
+        return Self.pickRemote(out ?? "")
     }
 
     /// Is the branch in the target? nil when the machine can't be asked.
     func landingVerified(_ task: CodingTask) async -> Bool? {
+        switch await landingVerification(task) {
+        case .landed: return true
+        case .pending, .remoteUnreachable: return false
+        case .unknown: return nil
+        }
+    }
+
+    /// What the repository says about the landing — "couldn't reach the
+    /// remote" kept apart from "couldn't ask the machine".
+    func landingVerification(_ task: CodingTask) async -> LandingVerification {
         guard let delegate, let branch = task.branch, let root = task.rootRepo,
-              let target = task.landingTarget, !target.isEmpty else { return nil }
-        guard let out = try? await delegate.guestExec(
+              let target = task.landingTarget, !target.isEmpty else { return .unknown }
+        let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.landingVerifyCommand(root: root, branch: branch, target: target,
                                                sourceDir: task.worktreeDir,
                                                remote: task.landing.flatMap { $0.pushes ? $0.remote : nil }),
-            timeout: 30) else { return nil }
-        if out.contains("LANDED") { return true }
-        if out.contains("PENDING") { return false }
-        return nil
+            timeout: 30)
+        return LandingVerification.parse(out)
     }
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
     private static let landingPollInterval: UInt64 = 10_000_000_000
+    /// A landing flagged "Needs you" is still looked at, less often, for
+    /// this long after it started.
+    private static let stalledPollInterval: UInt64 = 60_000_000_000
+    nonisolated static let landingWatchLimit: TimeInterval = 24 * 3600
 
     /// Follow an agent landing until it's in (verified in git), reported,
     /// or stalled. PR landings finish on the agent's report (or a PR link
@@ -488,10 +860,18 @@ extension CodingTaskEngine {
         landingWatches.insert(taskID)
         Task { [weak self] in
             defer { self?.landingWatches.remove(taskID); self?.landingBaselineLine[taskID] = nil }
+            // "Needs you" (stalled, or the agent's word not seen in git yet)
+            // keeps git looked at, less often: an agent that lands it late,
+            // or whose report never reaches the board, still makes it Done.
+            var slow = false
             while true {
-                try? await Task.sleep(nanoseconds: Self.landingPollInterval)
+                try? await Task.sleep(nanoseconds: slow ? Self.stalledPollInterval : Self.landingPollInterval)
                 guard let self, let task = self.store.task(taskID), task.stage == .testing,
-                      let l = task.landing, l.phase == .agentLanding else { return }
+                      let l = task.landing,
+                      l.phase == .agentLanding || (l.phase == .needsYou && l.mode != .pr
+                                                   && Date().timeIntervalSince(l.startedAt) < Self.landingWatchLimit)
+                else { return }
+                slow = l.phase == .needsYou
                 if l.mode != .pr, await self.landingVerified(task) == true {
                     // Seen in git while the agent may still be wrapping up
                     // (its report is seconds away): keep its session bound.
@@ -506,11 +886,10 @@ extension CodingTaskEngine {
                     self.landingBaselineLine[taskID] = nil
                     self.store.mutate(taskID) { if $0.landing?.agentLine != line { $0.landing?.agentLine = line } }
                 }
-                if Date().timeIntervalSince(l.startedAt) > Self.landingStallTimeout {
+                if l.phase == .agentLanding, Date().timeIntervalSince(l.startedAt) > Self.landingStallTimeout {
                     self.needsYou(taskID, NSLocalizedString(
                         "Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel.",
                         comment: "task landing"))
-                    return
                 }
             }
         }
@@ -571,14 +950,22 @@ extension CodingTaskEngine {
     /// The landing agent ended its turn (Stop hook): look now; when it's not
     /// in and nothing was reported, the user is asked to look.
     func landingAgentStopped(_ taskID: UUID) {
+        // A batch's other card: the agent that merges them all settles it.
+        if store.task(taskID)?.landing?.batchLead != nil { return }
+        let stoppedWhy: (CodingTask) -> String = { t in String(format: NSLocalizedString(
+            "%@ stopped before it merged this one — open its session to see why, then retry.",
+            comment: "task landing: batch"), t.landing?.batchLead.flatMap { self.store.task($0)?.workerName } ?? "") }
         // Its turn is over: nothing more will be reported — end the grace.
         if landingGrace.contains(taskID) {
             landingGraceEnded.insert(taskID)
+            Task { [weak self] in await self?.settleBatchFollowers(of: taskID, why: stoppedWhy) }
             return
         }
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, let task = self.store.task(taskID), task.stage == .testing,
+            guard let self else { return }
+            defer { Task { await self.settleBatchFollowers(of: taskID, why: stoppedWhy) } }
+            guard let task = self.store.task(taskID), task.stage == .testing,
                   let l = task.landing, l.phase == .agentLanding,
                   l.handingOver != true else { return }   // the stop of a turn before the brief
             if l.mode == .pr {
@@ -648,7 +1035,10 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: landed (\(l.mode.rawValue) → \(target), verified: \(verified))")
         rollUpBrief(afterPhaseDone: taskID)
         pumpQueue()
-        let removeWorktree = l.mode != .pr && !l.keepBranch && task.delegationID == nil
+        // Only a landing seen in git removes the branch: one finished on
+        // the agent's word (Bromure couldn't look) may not be in the
+        // target at all, and the branch would be its only copy.
+        let removeWorktree = l.mode != .pr && !l.keepBranch && task.delegationID == nil && verified
         guard grace > 0 else {
             putSessionAway(task, afterSeconds: 8)
             archiveTranscriptThenCleanup(taskID, removeWorktree: removeWorktree)
@@ -718,6 +1108,25 @@ extension CodingTaskEngine {
     /// delivery while it lands). Returns what the agent is told.
     func reportLanding(_ taskID: UUID, status: String, summary: String,
                        prURL: String?) async -> (ok: Bool, message: String) {
+        let batch = store.task(taskID)?.landing?.batch ?? []
+        let own = await reportLandingOne(taskID, status: status, summary: summary, prURL: prURL)
+        guard !batch.isEmpty, status == "merged" || status == "blocked" else { return own }
+        // One report for the whole batch: each card Bromure sees in its
+        // target goes Done; the others need the user, with the agent's word.
+        await settleBatchFollowers(of: taskID) { _ in
+            let why = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return status == "blocked" && !why.isEmpty ? why : NSLocalizedString(
+                "The batch's agent reported it done, but this branch isn't in the target — retry, or merge it on its own.",
+                comment: "task landing: batch")
+        }
+        let left = batch.filter { self.store.task($0)?.stage == .testing }.count
+        return (own.ok, own.message + (left == 0
+            ? " Every other task of the batch is Done too."
+            : " \(left) other task(s) of the batch aren't in yet — the user will look at them."))
+    }
+
+    private func reportLandingOne(_ taskID: UUID, status: String, summary: String,
+                                  prURL: String?) async -> (ok: Bool, message: String) {
         // Bromure already saw it land (verified in git) a moment ago: the
         // agent's own report is a no-op success, and its session can go.
         if let task = store.task(taskID), task.stage == .done, landingGrace.contains(taskID) {
@@ -732,22 +1141,36 @@ extension CodingTaskEngine {
             return (false, "This task isn't waiting to land.")
         }
         if task.landing == nil {
-            // The agent landed it on its own: record it as a merge into the parent.
+            // No landing under way: only one the user approved (and then
+            // cancelled — its brief may have been out) is recorded, into the
+            // target they approved. Without that, an agent's "merged" is its
+            // word, not the user's: the card stays in Review with it.
+            guard let approved = task.approvedTarget, Self.isSafeBranchName(approved) else {
+                store.mutate(taskID) { $0.mergeReport = summary }
+                return (false, "Nobody approved landing this task yet — it stays in Review, and the user lands it from the board.")
+            }
             store.mutate(taskID) {
                 $0.landing = TaskLanding(mode: status == "pr_opened" ? .pr : .merge,
-                                         target: $0.parentBranch ?? "", phase: .agentLanding,
+                                         target: approved, phase: .agentLanding,
                                          startedAt: Date())
             }
         }
         guard let fresh = store.task(taskID), let l = fresh.landing else { return (false, "no landing") }
-        let verified: Bool? = status == "merged" ? await landingVerified(fresh) : nil
-        switch LandingReportOutcome.decide(status: status, summary: summary, prURL: prURL, verified: verified) {
+        let verification: LandingVerification = status == "merged" ? await landingVerification(fresh) : .unknown
+        switch LandingReportOutcome.decide(status: status, summary: summary, prURL: prURL,
+                                           verification: verification) {
         case .finishVerified:
             finishLanding(taskID, verified: true, by: nil)
             return (true, "Recorded: verified in '\(l.target)'. The task is Done.")
         case .finishUnverified:
             finishLanding(taskID, verified: false, by: Self.landingAgentName(fresh))
             return (true, "Recorded as merged into '\(l.target)' (Bromure couldn't verify it). The task is Done.")
+        case .remoteUnchecked:
+            let remote = l.remote ?? "the remote"
+            needsYou(taskID, String(format: NSLocalizedString(
+                "Couldn't reach %@ to check the push — the branch is kept. Check it's pushed, then mark it done or retry.",
+                comment: "task landing: the remote couldn't be fetched to verify a push"), remote))
+            return (true, "Recorded, but Bromure couldn't fetch '\(remote)' to check the push — the user will look. Stop here.")
         case .notYet:
             return (false, "'\(fresh.branch ?? "")' isn't in '\(l.target)' yet (or its checkout still has uncommitted changes) — finish landing it, then report again.")
         case .prOpened(let url):
@@ -798,6 +1221,14 @@ extension CodingTaskEngine {
 
     func sweepIdleReview() {
         let now = Date()
+        // A landing nothing is watching any more (its watch ended, a report
+        // that never came): look at git again — in, it goes Done.
+        for t in store.tasks where t.stage == .testing && !landingWatches.contains(t.id) {
+            guard let l = t.landing, l.mode != .pr, l.handingOver != true,
+                  l.phase == .agentLanding || l.phase == .needsYou,
+                  now.timeIntervalSince(l.startedAt) < Self.landingWatchLimit else { continue }
+            watchLanding(t.id)
+        }
         for t in Self.idleReviewTasks(store.tasks, now: now) {
             BACDebug.log("tasks", "“\(t.title)”: idle in Review — putting its session away")
             putSessionAway(t, afterSeconds: 0)

@@ -321,6 +321,36 @@ final class TaskDispatcher {
                             comment: "task landing"),
                             task.assignment?.label ?? "", target, m.text)
                     }
+                    // Git is still looked at: once it's in, the card goes Done.
+                    delegate.codingTaskEngine.watchLanding(task.id)
+                }
+                self.pump()
+            }
+        case .deliver where task.stage == .testing && task.branch != nil && task.rootRepo != nil:
+            // Already in Review, with no landing under way (the user
+            // cancelled it while the brief was out): a reply to that brief
+            // still lands the card when git shows it in the target the USER
+            // approved — never just the parent the agent's machine reports,
+            // with no approval at all. Else it's a fresh hand-in, as below.
+            Task {
+                let engine = delegate.codingTaskEngine
+                if let now = store.task(task.id), now.stage == .testing, now.landing == nil,
+                   let approved = now.approvedTarget, CodingTaskEngine.isSafeBranchName(approved),
+                   await engine.landingVerified(Self.landing(now, into: approved)) == true {
+                    store.mutate(task.id) {
+                        $0.mergeReport = m.text
+                        $0.pendingQuestion = nil
+                        $0.pendingAskID = nil
+                    }
+                    _ = await engine.reportLanding(task.id, status: "merged", summary: m.text, prURL: nil)
+                } else {
+                    store.mutate(task.id) {
+                        $0.deliverySummary = m.text
+                        $0.pullRequestURL = CodingTask.pullRequestURL(in: m.text) ?? $0.pullRequestURL
+                        $0.pendingQuestion = nil
+                        $0.pendingAskID = nil
+                    }
+                    await self.toReview(task.id, delegation: d)
                 }
                 self.pump()
             }
@@ -347,6 +377,13 @@ final class TaskDispatcher {
     }
 
     /// Delivered: find the worktree the brief named, then Review.
+    /// `t` as if landing into `target` (what the verify looks at).
+    static func landing(_ t: CodingTask, into target: String) -> CodingTask {
+        var t = t
+        t.landing = TaskLanding(mode: .merge, target: target, phase: .agentLanding, startedAt: Date())
+        return t
+    }
+
     private func toReview(_ taskID: UUID, delegation d: Delegation) async {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               let slug = task.branchSlug else { return }
@@ -386,7 +423,8 @@ final class TaskDispatcher {
                 $0.branch = branch
                 $0.worktreeDir = dir
                 $0.rootRepo = root
-                if let p = m.parent, p != branch { $0.parentBranch = p }
+                // Read from the assignee's machine: a plain branch name only.
+                if let p = m.parent, p != branch, CodingTaskEngine.isSafeBranchName(p) { $0.parentBranch = p }
                 $0.stage = .testing
                 $0.testingAt = Date()
                 $0.lastError = nil

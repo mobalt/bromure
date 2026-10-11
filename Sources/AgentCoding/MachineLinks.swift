@@ -241,6 +241,12 @@ final class MachineLinkHub: @unchecked Sendable {
             }
             guard names[id] != nil, let fd = parked[id]?.popLast() else { cond.unlock(); return nil }
             cond.unlock()
+            // A parked link says nothing until it's given a verb: one with
+            // something to read was closed (or half-closed) by the machine
+            // while it waited. Its write would still succeed and the call
+            // read an empty reply — the review's "can't reach the machine"
+            // that a second click didn't hit. Next.
+            guard Self.quietWhileParked(fd) else { close(fd); continue }
             // A link the machine dropped while parked fails the write: next.
             var one: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -248,6 +254,13 @@ final class MachineLinkHub: @unchecked Sendable {
             if write(fd, line, line.count) == line.count { return fd }
             close(fd)
         }
+    }
+
+    /// No hangup, no pending EOF and no stray bytes on a parked link.
+    static func quietWhileParked(_ fd: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, 0) >= 0 else { return false }
+        return p.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) == 0
     }
 
     // MARK: Requests down a link
@@ -320,17 +333,35 @@ final class MachineLinkHub: @unchecked Sendable {
             + (gzip ? "X-Bromure-Gzip: 1\r\n" : "")
             + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
         guard Self.writeAll(fd, Data(head.utf8) + payload) else { close(fd); close(clientFD); return }
-        Self.relay(clientFD, fd)
+        // The reply's head is due once the machine has done the work (an
+        // exec runs up to its own timeout; a guarded type ~75 s): past that,
+        // the link is a dead end and holding it would pin this thread.
+        let work = TimeInterval(max(0, (body["timeout"] as? Int) ?? 0))
+        Self.relay(clientFD, fd, headWithin: work + Self.replyHeadGrace)
         close(fd)
         close(clientFD)
     }
+
+    /// How long a proxied request's reply head may take beyond the work the
+    /// request itself asked for.
+    static let replyHeadGrace: TimeInterval = 90
 
     /// Like splice, but a reply that states its Content-Length ends there:
     /// over an SSH link the machine's close never arrives, so waiting for it
     /// held every proxied call (a folder listing, an exec) until the
     /// client's receive timeout. Streams without one (the framed PTY) run to
     /// EOF as before.
-    static func relay(_ client: Int32, _ machine: Int32) {
+    ///
+    /// `headWithin`: the most the machine may take to start its reply — a
+    /// link whose far end is gone (a relayed path that never saw it close)
+    /// otherwise holds the call, and this thread, forever. Once the head is
+    /// in, the reply may take as long as it needs (a terminal stream).
+    static func relay(_ client: Int32, _ machine: Int32, headWithin: TimeInterval? = nil) {
+        func receiveTimeout(_ secs: TimeInterval) {
+            var tv = timeval(tv_sec: Int(secs), tv_usec: Int32((secs - secs.rounded(.down)) * 1_000_000))
+            setsockopt(machine, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
+        if let headWithin { receiveTimeout(headWithin) }
         let done = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
             var buf = [UInt8](repeating: 0, count: 65536)
@@ -353,7 +384,11 @@ final class MachineLinkHub: @unchecked Sendable {
             if remaining == nil && !streaming {
                 head.append(chunk)
                 guard let sep = head.range(of: Data("\r\n\r\n".utf8)) else {
-                    if head.count > 1 << 20 { streaming = true; if !writeAll(client, head) { break loop } }
+                    if head.count > 1 << 20 {
+                        streaming = true
+                        if headWithin != nil { receiveTimeout(0) }
+                        if !writeAll(client, head) { break loop }
+                    }
                     continue
                 }
                 let header = String(decoding: head[..<sep.lowerBound], as: UTF8.self)
@@ -365,6 +400,7 @@ final class MachineLinkHub: @unchecked Sendable {
                 }.first
                 let body = head.count - sep.upperBound
                 if let length { remaining = length - body } else { streaming = true }
+                if headWithin != nil { receiveTimeout(0) }
                 chunk = head
                 head = Data()
             } else if let r = remaining {

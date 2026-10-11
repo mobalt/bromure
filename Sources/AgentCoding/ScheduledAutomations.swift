@@ -214,6 +214,13 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
     /// `git clone` this into `repoPath` before a run when the folder isn't a
     /// repository yet (watch-owned automations — the checkout is theirs).
     var cloneURL: String?
+    /// Event triggers: at most this many runs at once (0 = no limit). A
+    /// burst — 20 commits pushed at once — is taken oldest first, the next
+    /// one when a run finishes, instead of 20 agents side by side.
+    var maxParallelRuns: Int
+
+    /// The choices the editors offer (0 = no limit).
+    static let parallelRunChoices = [1, 2, 3, 5, 10, 0]
 
     var createdAt: Date
 
@@ -242,6 +249,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
          chainedAutomationID: UUID? = nil,
          watchID: UUID? = nil,
          cloneURL: String? = nil,
+         maxParallelRuns: Int = 1,
          createdAt: Date = Date()) {
         self.id = id
         self.name = name
@@ -268,6 +276,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         self.chainedAutomationID = chainedAutomationID
         self.watchID = watchID
         self.cloneURL = cloneURL
+        self.maxParallelRuns = max(0, maxParallelRuns)
         self.createdAt = createdAt
     }
 
@@ -277,7 +286,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         case frequency, weekday, hour, minute, intervalMinutes
         case missedRunPolicy, tool, prompt, repoPath, closeWhenDone, createdAt
         case startWorkspaceIfNeeded, cloneWorkspaceFirst, chainedAutomationID
-        case watchID, cloneURL
+        case watchID, cloneURL, maxParallelRuns
     }
 
     init(from decoder: Decoder) throws {
@@ -311,6 +320,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         chainedAutomationID = try c.decodeIfPresent(UUID.self, forKey: .chainedAutomationID)
         watchID         = try c.decodeIfPresent(UUID.self, forKey: .watchID)
         cloneURL        = try c.decodeIfPresent(String.self, forKey: .cloneURL)
+        // One at a time unless the user chose otherwise — also for event
+        // automations saved before the choice existed.
+        maxParallelRuns = max(0, try c.decodeIfPresent(Int.self, forKey: .maxParallelRuns) ?? 1)
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 
@@ -371,6 +383,9 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var tool: Profile.Tool?
     /// A repository watch's scheduled review: what it covered.
     var review: ReviewInfo?
+    /// When the run was queued in the guest, if later than `firedAt` (a
+    /// clone or a boot came first): its tab's grace starts here.
+    var queuedAt: Date?
 
     /// What a repository-watch review run covered, kept on the run so its
     /// completion can move the watch's "reviewed through" mark.
@@ -391,7 +406,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
          outcome: Outcome, detail: String, branchSlug: String? = nil,
          itemKey: String? = nil, runProfileID: UUID? = nil,
          completedAt: Date? = nil, acknowledgedAt: Date? = nil,
-         tool: Profile.Tool? = nil, review: ReviewInfo? = nil) {
+         tool: Profile.Tool? = nil, review: ReviewInfo? = nil, queuedAt: Date? = nil) {
+        self.queuedAt = queuedAt
         self.id = id
         self.automationID = automationID
         self.firedAt = firedAt
@@ -1192,6 +1208,28 @@ final class ScheduledAutomationEngine {
     /// Profiles this engine has asked to boot and is still waiting on, so two
     /// automations due on the same workspace don't race a double launch.
     private var pendingBoots: Set<UUID> = []
+    /// Launches on their way — a clone, a boot, a workspace copy before the
+    /// run is queued and recorded: automation → event key (or a token) →
+    /// since when. They hold a slot of the automation's runs-at-a-time and
+    /// their event isn't fired again meanwhile: the poll that fired them
+    /// has long returned, and the next one would find no record yet.
+    private var launching: [UUID: [String: Date]] = [:]
+
+    func holdLaunch(_ automationID: UUID, _ itemKey: String?) -> String {
+        let token = itemKey ?? "run:" + UUID().uuidString
+        launching[automationID, default: [:]][token] = Date()
+        return token
+    }
+
+    func releaseLaunch(_ automationID: UUID, _ token: String) {
+        launching[automationID]?[token] = nil
+        if launching[automationID]?.isEmpty == true { launching[automationID] = nil }
+    }
+
+    /// The events (or tokens) of `automationID` still on their way.
+    func launchesUnderWay(_ automationID: UUID) -> Set<String> {
+        Set(launching[automationID]?.keys.map { $0 } ?? [])
+    }
     /// Automations with a GitHub poll in flight — one at a time per automation.
     private var pollsInFlight: Set<UUID> = []
     /// Branches already told to finish this session — avoids resending on
@@ -1202,6 +1240,7 @@ final class ScheduledAutomationEngine {
     /// A fire more than this far past its time means the Mac was asleep or
     /// the app wasn't running — not merely a slow tick.
     static let lateGrace: TimeInterval = 180
+    /// Awake time a start waits for its workspace (see `BootBudget`).
     private static let bootTimeout: TimeInterval = 180
     private static let bootPollInterval: UInt64 = 5_000_000_000  // 5s in ns
     /// GitHub PR polling cadence. Generous for the API quota, and PR-review
@@ -1385,6 +1424,7 @@ final class ScheduledAutomationEngine {
         // minutes, so completion-gating would relaunch an item while its
         // first run is still working.
         let processed = Set(store.runs(for: a.id).compactMap { $0.itemKey })
+            .union(launchesUnderWay(a.id))
 
         let firstPoll = previous?.highWater == nil
         if firstPoll { next.highWater = now }
@@ -1403,11 +1443,23 @@ final class ScheduledAutomationEngine {
             return
         }
 
-        // Fire order: oldest first, so a burst is handled in creation order.
+        // Fire order: oldest first, so a burst is handled in creation order —
+        // as many at once as the automation allows. The rest have no run
+        // record yet, so the next poll finds them again (sooner once a run
+        // finishes: finishRun re-polls).
+        var slots = a.maxParallelRuns == 0 ? Int.max
+            : max(0, a.maxParallelRuns - Self.activeRunCount(
+                store.runs, automationID: a.id, profileID: a.profileID, now: Date(),
+                liveBranches: { delegate.liveWorktreeBranches(profileID: $0) })
+                - (launching[a.id]?.count ?? 0))
         for item in items.sorted(by: { $0.createdAt < $1.createdAt })
         where a.filters.matches(item, kind: a.trigger) {
             let key = GitHubPRPoller.eventKey(item, kind: a.trigger)
             if processed.contains(key) { continue }   // already dispatched/blocked
+            guard slots > 0 else {
+                BACDebug.log("automation", "“\(a.name)”: \(a.maxParallelRuns) run(s) at a time — the rest wait for one to finish")
+                break
+            }
 
             // Enrich with comments (third-party text) BEFORE screening, so
             // the agent sees the discussion and the screen covers it too.
@@ -1435,6 +1487,7 @@ final class ScheduledAutomationEngine {
                 continue
             }
             BACDebug.log("automation", "“\(a.name)”: firing for \(label) \(enriched.displayKey)")
+            slots -= 1
             fire(a, now: Date(),
                  promptOverride: GitHubPRPoller.substitute(a.prompt, item: enriched,
                                                            kind: a.trigger),
@@ -1483,6 +1536,35 @@ final class ScheduledAutomationEngine {
         return nil
     }
 
+    /// How long a launched run that never reported done still holds a slot.
+    nonisolated static let activeRunLimit: TimeInterval = 6 * 3600
+    /// A run's tab may take this long to appear after its launch.
+    nonisolated static let tabAppearGrace: TimeInterval = 10 * 60
+
+    /// Runs of `automationID` still working: launched, not done, and — when
+    /// the workspace's tabs are known — with its tab still up (a closed or
+    /// crashed one frees its slot). `liveBranches`: the worktree branches of
+    /// a workspace's open tabs, nil when that can't be told.
+    nonisolated static func activeRunCount(_ runs: [AutomationRunRecord], automationID: UUID, profileID: UUID,
+                                           now: Date, liveBranches: (UUID) -> [String]?) -> Int {
+        runs.filter { run in
+            guard run.automationID == automationID, run.outcome == .launched, run.completedAt == nil,
+                  now.timeIntervalSince(run.firedAt) < activeRunLimit else { return false }
+            if now.timeIntervalSince(run.queuedAt ?? run.firedAt) < tabAppearGrace { return true }
+            guard let slug = run.branchSlug, let pid = Optional(run.runProfileID ?? profileID),
+                  let live = liveBranches(pid) else { return true }
+            return live.contains { AutomationBoard.branchMatches($0, slug: slug) }
+        }.count
+    }
+
+    /// Next tick polls this event automation (a run of it finished).
+    private func repollSoon(_ automationID: UUID) {
+        guard let a = store.automation(automationID), a.trigger != .schedule, a.trigger != .afterAutomation,
+              var state = store.pollState(for: automationID) else { return }
+        state.lastPolledAt = nil
+        store.setPollState(state, for: automationID)
+    }
+
     /// Manual "Run now" — the same path as a scheduled fire; the schedule is
     /// left untouched.
     func runNow(_ automation: ScheduledAutomation, forceBaseline: Bool = false) {
@@ -1499,6 +1581,12 @@ final class ScheduledAutomationEngine {
                       forceBaseline: Bool = false,
                       prepared: WatchRunPreparation? = nil) {
         guard let delegate else { return }
+        // Held from now until the run is recorded: a path that goes async
+        // (a clone, a boot) takes the hold over and lets it go when it
+        // records; every other path lets it go on return.
+        let hold = holdLaunch(a.id, itemKey)
+        var handedOver = false
+        defer { if !handedOver { releaseLaunch(a.id, hold) } }
         guard delegate.profile(for: a.profileID) != nil else {
             store.record(AutomationRunRecord(
                 automationID: a.id, firedAt: now, outcome: .failed,
@@ -1513,9 +1601,11 @@ final class ScheduledAutomationEngine {
         // last review, the branch tip — not when the watch was saved.
         if prepared == nil, promptOverride == nil, a.watchID != nil,
            a.trigger == .schedule, let prepare = prepareWatchRun {
+            handedOver = true
             Task { [weak self] in
                 let prep = await prepare(a, forceBaseline)
                 guard let self else { return }
+                defer { self.releaseLaunch(a.id, hold) }
                 guard let prep else {
                     self.fire(a, now: now, promptOverride: a.prompt, itemKey: itemKey)
                     return
@@ -1555,8 +1645,9 @@ final class ScheduledAutomationEngine {
         // the workspace itself. Restricted to the agents with a real done
         // signal — the teardown rides on it (see `hasReliableDoneSignal`).
         if a.cloneWorkspaceFirst && a.tool.hasReliableDoneSignal {
+            handedOver = true
             fireInClone(a, slug: slug, detail: detail, args: args,
-                        now: now, itemKey: itemKey, review: review)
+                        now: now, itemKey: itemKey, review: review, hold: hold)
             return
         }
 
@@ -1564,8 +1655,9 @@ final class ScheduledAutomationEngine {
         // when it isn't there yet — the whole launch goes async for that.
         if let url = a.cloneURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            !url.isEmpty {
+            handedOver = true
             fireWithCheckout(a, cloneURL: url, slug: slug, detail: detail,
-                             args: args, now: now, itemKey: itemKey, review: review)
+                             args: args, now: now, itemKey: itemKey, review: review, hold: hold)
             return
         }
 
@@ -1602,11 +1694,13 @@ final class ScheduledAutomationEngine {
             pendingBoots.insert(a.profileID)
             delegate.startProfileForAutomation(a.profileID)
         }
-        let deadline = now.addingTimeInterval(Self.bootTimeout)
+        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+        handedOver = true
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             var why = NSLocalizedString("The workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let self, let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
@@ -1616,7 +1710,7 @@ final class ScheduledAutomationEngine {
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
                         detail: detail, branchSlug: slug, itemKey: itemKey,
-                        tool: a.tool, review: review))
+                        tool: a.tool, review: review, queuedAt: Date()))
                     return
                 }
                 // The start was refused (nobody to answer its prompt): say
@@ -1644,11 +1738,14 @@ final class ScheduledAutomationEngine {
     /// Clone the automation's repository into place if needed, then queue
     /// the run. Unreachable = try again later (boot in progress).
     private func launchWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
-                                    args: [String]) async -> CheckoutLaunch {
+                                    args: [String], booted: BootBudget? = nil) async -> CheckoutLaunch {
         guard let delegate else { return .unreachable }
         guard (try? await delegate.guestExec(profileID: a.profileID,
                                               command: "true", timeout: 5)) != nil
         else { return .unreachable }
+        // The workspace is up: the clone (up to 15 min) isn't its boot, and
+        // doesn't keep the Mac awake.
+        booted?.release()
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let path = Self.guestPath(a.repoPath)
         do {
@@ -1674,15 +1771,16 @@ final class ScheduledAutomationEngine {
     private func fireWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
                                   slug: String, detail: String, args: [String],
                                   now: Date, itemKey: String?,
-                                  review: AutomationRunRecord.ReviewInfo? = nil) {
+                                  review: AutomationRunRecord.ReviewInfo? = nil, hold: String) {
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             guard let self else { return }
             @MainActor func launched() {
                 BACDebug.log("automation", "launched “\(a.name)” → \(slug)")
                 self.store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .launched,
                     detail: detail, branchSlug: slug, itemKey: itemKey,
-                    tool: a.tool, review: review))
+                    tool: a.tool, review: review, queuedAt: Date()))
             }
             @MainActor func failed(_ why: String) {
                 BACDebug.log("automation", "“\(a.name)”: \(why)")
@@ -1709,10 +1807,10 @@ final class ScheduledAutomationEngine {
                 self.delegate?.startProfileForAutomation(a.profileID)
             }
             defer { self.pendingBoots.remove(a.profileID) }
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
-            while Date() < deadline {
+            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args) {
+                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args, booted: budget) {
                 case .launched: launched(); return
                 case .failed(let why): failed(why); return
                 case .unreachable: break
@@ -1733,8 +1831,9 @@ final class ScheduledAutomationEngine {
     /// deliberately kept for inspection.
     private func fireInClone(_ a: ScheduledAutomation, slug: String, detail: String,
                              args: [String], now: Date, itemKey: String?,
-                             review: AutomationRunRecord.ReviewInfo? = nil) {
+                             review: AutomationRunRecord.ReviewInfo? = nil, hold: String) {
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             guard let self, let delegate = self.delegate else { return }
             // The delegate syncs a running source's page cache before the
             // CoW copy, so the clone is as fresh as a live source allows.
@@ -1749,10 +1848,10 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
+            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
             var why = NSLocalizedString("The cloned workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
@@ -1761,7 +1860,7 @@ final class ScheduledAutomationEngine {
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
                         detail: detail, branchSlug: slug, itemKey: itemKey,
-                        runProfileID: clone.id, tool: a.tool, review: review))
+                        runProfileID: clone.id, tool: a.tool, review: review, queuedAt: Date()))
                     return
                 }
                 if let refusal = delegate.unattendedLaunchRefusal(clone.id) {
@@ -1857,6 +1956,9 @@ final class ScheduledAutomationEngine {
             if let done = self.store.runs.first(where: { $0.id == runID }) {
                 self.onRunCompleted?(done)
             }
+            // A slot is free: an event automation looks for what waits on
+            // the next tick, not a whole poll interval later.
+            self.repollSoon(automationID)
 
             // Chained automations fire on the finish itself, independent of
             // closeWhenDone (leaving the tab open for inspection shouldn't

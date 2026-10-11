@@ -116,6 +116,7 @@ final class AutomationMCPServer: MCPLineHandler {
         "assignmentFilter": ["type": "string", "enum": ["unassigned", "assignedToMe"],
                              "description": "linearIssue: which issues fire (default unassigned)."],
         "ignoreBacklog": ["type": "boolean", "description": "Event triggers: skip items that already exist when the watch starts (default true)."],
+        "maxParallelRuns": ["type": "integer", "description": "Event triggers: at most this many runs at once; the rest wait, oldest first (default 1, 0 = no limit)."],
         "filters": ["type": "object", "description": "Event triggers: labels (array), titleContains, excludeDrafts, ignoreBots, baseBranch, commitBranch, commitSubfolder.",
                     "properties": [
                         "labels": ["type": "array", "items": ["type": "string"]],
@@ -466,6 +467,7 @@ final class AutomationMCPServer: MCPLineHandler {
             a.assignmentFilter = f
         }
         if let v = args["ignoreBacklog"] as? Bool { a.ignoreBacklog = v }
+        if let v = args["maxParallelRuns"] as? Int { a.maxParallelRuns = max(0, v) }
         if let f = args["filters"] as? [String: Any] {
             if let v = f["labels"] as? [String] { a.filters.labels = v }
             if let v = f["titleContains"] as? String { a.filters.titleContains = v }
@@ -538,6 +540,7 @@ final class AutomationMCPServer: MCPLineHandler {
         }
         if a.trigger != .schedule, a.trigger != .afterAutomation {
             d["ignoreBacklog"] = a.ignoreBacklog
+            d["maxParallelRuns"] = a.maxParallelRuns
             var f: [String: Any] = [
                 "excludeDrafts": a.filters.excludeDrafts, "ignoreBots": a.filters.ignoreBots,
             ]

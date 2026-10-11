@@ -4143,3 +4143,15 @@
 "that finding is gone" = "該發現項目已不存在";
 "couldn't start the fix" = "無法開始修正";
 "no Switchboard could be started" = "無法啟動總機";
+
+/* Automations: runs at a time */
+"Runs at a time" = "同時執行數";
+"No limit" = "不限";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "一批事件會依從舊到新的順序排隊：一次執行結束後才開始下一個。";
+"Reviews at a time" = "同時審查數";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "同時抵達的提交和拉取請求會依從舊到新的順序排隊，而不是同時全部審查。";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "刪除工作區「%@」？";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "將刪除其磁碟、設定和 SSH 金鑰。掛載的主機檔案夾不受影響。";
+"Couldn't delete “%@”" = "無法刪除「%@」";

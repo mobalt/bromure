@@ -94,6 +94,7 @@ SHARED = [
     "DockerDashboard.swift",
     "KubeDashboard.swift",      # cluster dashboard + creation sheet (AppKit-only styles #if'd)
     "TaskReviewWindow.swift",
+    "RepoGitPrograms.swift",    # the git TaskLitter runs switches the repository's programs off
     "TaskTranscriptWindow.swift",
     "TaskTranscriptArchive.swift",
     # P2P client transport (reach a NAT'd server) — all Darwin/URLSession/Crypto

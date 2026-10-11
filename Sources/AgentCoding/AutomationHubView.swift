@@ -2644,6 +2644,21 @@ struct WatchEditorSheet: View {
                     }
                     Toggle(WatchedRepo.Scan.commits.displayName, isOn: scanBinding(.commits))
                     Toggle(WatchedRepo.Scan.pullRequests.displayName, isOn: scanBinding(.pullRequests))
+                    if draft.scans.contains(.commits) || draft.scans.contains(.pullRequests) {
+                        Picker(NSLocalizedString("Reviews at a time", comment: "watch editor: commit/PR scan parallelism"),
+                               selection: $draft.maxParallelScans) {
+                            ForEach(ScheduledAutomation.parallelRunChoices, id: \.self) { n in
+                                Text(n == 0 ? NSLocalizedString("No limit", comment: "automation editor: runs at a time")
+                                            : String(n)).tag(n)
+                            }
+                        }
+                        Text(NSLocalizedString(
+                            "Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once.",
+                            comment: "watch editor: reviews at a time"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if !promptGuardInstalled,
                        draft.scans.contains(.commits) || draft.scans.contains(.pullRequests) {
                         Label(NSLocalizedString(

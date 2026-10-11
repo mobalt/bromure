@@ -18,8 +18,12 @@ enum TaskLitter {
     /// `git status --porcelain` in `dir` (already shell-quoted), litter out.
     /// Untracked folders are listed file by file: a folder holding only
     /// `__pycache__/` would otherwise show (and count) as one new folder.
+    /// Runs nothing the repository's config names (`RepoGitPrograms`): a
+    /// clean filter there ran on every dirty check.
+    /// A status that fails says so (`RepoGitPrograms.statusFailed`): it
+    /// isn't a clean tree. A folder that's gone reads as clean, as before.
     static func status(_ quotedDir: String) -> String {
-        "git -C \(quotedDir) status --porcelain --untracked-files=all 2>/dev/null | \(statusFilter)"
+        "( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
     }
 }
 
@@ -85,14 +89,16 @@ struct TaskReviewData: Equatable, Sendable {
             setBase = "b=$(git rev-list -1 --before=@\(Int(t.timeIntervalSince1970)) HEAD 2>/dev/null); "
                 + "[ -n \"$b\" ] || b=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         }
+        let df = RepoGitPrograms.diffFlags
         let diff = withWorktree
-            ? "{ git diff \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
+            ? "{ git diff \(df) \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
                 + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
-                + "&& git diff --no-index -- /dev/null \"$f\"; done; }"
-            : "git diff \"$b\" HEAD -- 2>/dev/null"
-        return "\(enter); \(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
+                + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done; }"
+            : "git diff \(df) \"$b\" HEAD -- 2>/dev/null"
+        // What the repository's config names never runs (RepoGitPrograms).
+        return "\(enter); \(RepoGitPrograms.off("."))\(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
-            + "echo ===STATUS===; git status --porcelain 2>/dev/null | \(TaskLitter.statusFilter) | head -100; "
+            + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | \(TaskLitter.statusFilter) | head -100; "
             + "echo ===DIFF===; \(diff) | head -c 600000; true"
     }
 
@@ -172,21 +178,23 @@ struct TaskReviewSummary: Equatable, Sendable {
 
     static func command(root: String, worktreeDir: String?, branch: String, target: String) -> String {
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        var cmd = "r=\(q(root)); "
+        var cmd = "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"")
             + "echo \"AB $(git -C \"$r\" rev-list --left-right --count \(q(target + "..." + branch)) 2>/dev/null)\"; "
         if let wt = worktreeDir, !wt.isEmpty {
             cmd += "w=\(q(wt)); "
                 + "m=$(git -C \"$w\" merge-base \(q(target)) HEAD 2>/dev/null); "
-                + "echo \"SS $(git -C \"$w\" diff --shortstat \"$m\" 2>/dev/null)\"; "
+                + "echo \"SS $(git -C \"$w\" diff \(RepoGitPrograms.diffFlags) --shortstat \"$m\" 2>/dev/null)\"; "
                 + "echo \"UC $(\(TaskLitter.status("\"$w\"")) | wc -l | tr -d ' ')\"; "
         } else {
             cmd += "echo \"SS $(git -C \"$r\" diff --shortstat \(q(target + "..." + branch)) 2>/dev/null)\"; echo 'UC 0'; "
         }
         cmd += "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); echo \"TD $d\"; "
-            + "[ -n \"$d\" ] && echo \"TC $(git -C \"$d\" status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-            + "rm=$(git -C \"$r\" remote 2>/dev/null | head -1); echo \"RM $rm\"; "
-            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url \"$rm\" 2>/dev/null)\"; true"
+            + "[ -n \"$d\" ] && echo \"TC $(\(TaskLitter.status("\"$d\"")) | wc -l | tr -d ' ')\"; "
+            // The remote a push would go to — the landing's own pick, so a
+            // name that's really an option is never shown, nor used.
+            + "rm=$(\(CodingTaskEngine.pickRemoteShell(repo: "\"$r\""))); echo \"RM $rm\"; "
+            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url -- \"$rm\" 2>/dev/null)\"; true"
         return cmd
     }
 
@@ -213,7 +221,7 @@ struct TaskReviewSummary: Equatable, Sendable {
             case "UC": s.uncommitted = Int(rest) ?? 0
             case "TD": s.targetDir = rest
             case "TC": s.targetDirty = Int(rest)
-            case "RM": s.remote = rest.isEmpty ? nil : rest
+            case "RM": s.remote = CodingTaskEngine.safeRemote(rest.isEmpty ? nil : rest)
             case "RU": s.remoteURL = rest.isEmpty ? nil : rest
             default: break
             }
@@ -470,10 +478,17 @@ struct TaskReviewBanner: View {
         }
     }
 
+    /// A load the window's `.task` dropped (the task, its target or a
+    /// reload changed) writes nothing: its late answer would land over the
+    /// newer one's.
     private func load(_ t: CodingTask) async {
         await refreshSummary(t)
-        if noCode, report == nil { report = await context.fetchFinalReport(t) }
-        branches = await context.fetchBranches(t)
+        if noCode, report == nil {
+            let r = await context.fetchFinalReport(t)
+            if !Task.isCancelled { report = r }
+        }
+        let b = await context.fetchBranches(t)
+        if !Task.isCancelled { branches = b }
     }
 
     /// Re-read where the branch stands (on open, on ↻, and right before a
@@ -484,7 +499,9 @@ struct TaskReviewBanner: View {
             summaryFailed = summary == nil
             return
         }
-        if let s = await context.fetchSummary(t, target) {
+        let fetched = await context.fetchSummary(t, target)
+        guard !Task.isCancelled else { return }
+        if let s = fetched {
             summary = s; summaryFailed = false
             context.setCodeChanges(t.id, s.files + s.uncommitted)
         } else {

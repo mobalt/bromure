@@ -1695,11 +1695,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // its storage out from under a live VM.
             for _ in 0..<24 {
                 guard let self else { return }
-                if self.runningSessions[id] == nil { break }
+                if !self.diskInUse(id) { break }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             guard let self else { return }
-            guard self.runningSessions[id] == nil else {
+            guard !self.diskInUse(id) else {
                 BACDebug.log("automation",
                              "clone “\(profile.name)” still running — leaving it for manual cleanup")
                 return
@@ -1919,6 +1919,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// else it's off.
     private func runState(for profile: Profile) -> SessionListModel.RunState {
         if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
+        if bootsInFlight.contains(profile.id) { return .booting }
         if let session = runningSessions[profile.id] {
             switch session.sandbox.state {
             case .running:            return .running
@@ -2176,6 +2177,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// attached (detached / headless). The persistent-agent model — where
     /// VMs survive the GUI being closed — hangs off this split.
     var runningSessions: [Profile.ID: RunningSession] = [:]
+
+    /// Boots `launch` has started but not finished (see `BootsInFlight`).
+    let bootsInFlight = BootsInFlight()
+
+    /// A VM has (or is about to have) this workspace's disk and home open:
+    /// it is running, or its boot is under way. Deleting, resetting or
+    /// reverting them now would pull the images out from under it.
+    func diskInUse(_ id: Profile.ID) -> Bool {
+        bootsInFlight.diskInUse(id, running: runningSessions[id] != nil)
+    }
 
     /// Scheduled automations (sidebar "Automations"): recurring, unattended
     /// agent runs. The store persists next to the profiles dir; the engine
@@ -5717,6 +5728,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
                     self.codingTaskEngine.land(id, mode: mode, target: body["target"] as? String,
                                                keepBranch: keep, push: body["push"] as? Bool ?? false)
+                case "merge-batch":
+                    // {with: [ids], push?, keepBranch?}: this task and those,
+                    // one batch (CodingTaskEngine.landBatch).
+                    let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+                    self.codingTaskEngine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
+                                                    push: body["push"] as? Bool ?? false)
                 case "open-pr":
                     self.codingTaskEngine.land(id, mode: .pr, target: body["target"] as? String)
                 case "retry-landing":
@@ -6264,12 +6281,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let p = profileByNameOrID(key) else {
             return ["ok": false, "error": "Workspace not found: \(key)"]
         }
-        if runningSessions[p.id] != nil {
-            return ["ok": false, "error": "Workspace '\(p.name)' has a running VM — `vm kill` it first."]
+        if diskInUse(p.id) {
+            // Read by the CLI and by a fat client's "Delete workspace".
+            return ["ok": false, "error": "“\(p.name)” is running — shut it down (or `vm kill` it), then delete it."]
         }
         do {
             try store.delete(p)
             profiles = store.loadAll()
+            // As the sidebar's own delete does: its cluster access goes too.
+            kubeClusterEngine.workspaceDeleted(p.id)
             refreshSidebar()
             return ["ok": true, "name": p.name]
         } catch {
@@ -6608,7 +6628,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["error": "Workspace not found: \(idOrName)"]
         }
         // The image is replaced wholesale, so the VM must not have it open.
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
         }
         do {
@@ -10178,7 +10198,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard p.homeModel == .ext4 else {
             return NSLocalizedString("This machine keeps its home on the Mac, not in an image — nothing to rewind.", comment: "rewind home")
         }
-        guard runningSessions[p.id] == nil else {
+        guard !diskInUse(p.id) else {
             return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
         }
         do {
@@ -10198,7 +10218,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func restoreHomeStorage(_ profile: Profile) {
         let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .ext4 else { return }
-        guard runningSessions[p.id] == nil else { return }   // row is disabled while running
+        guard !diskInUse(p.id) else { return }   // row is disabled while running
         let checkpoints = store.listHomeCheckpoints(for: p)
         guard !checkpoints.isEmpty else {
             let alert = NSAlert()
@@ -10236,6 +10256,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard alert.runModal() == .alertFirstButtonReturn,
               checkpoints.indices.contains(popup.indexOfSelectedItem) else { return }
         let choice = checkpoints[popup.indexOfSelectedItem]
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(p.id) else { showRunningRefusal(profile: p, what: "home folder"); return }
 
         do {
             // Safety net first: the pre-restore home becomes a checkpoint.
@@ -11445,7 +11467,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func resetProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "system disk")
             return
         }
@@ -11464,6 +11486,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Reset to base")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "system disk"); return }
 
         do {
             try store.resetDisk(for: profile)
@@ -11477,7 +11501,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `resetProfile`: system layer survives, but everything personal
     /// the user accumulated under /home/ubuntu is gone.
     private func resetHomeProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "home folder")
             return
         }
@@ -11498,6 +11522,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Erase Home")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "home folder"); return }
 
         do {
             try store.resetHome(for: profile)
@@ -11520,19 +11545,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func showRunningRefusal(profile: Profile, what: String) {
         let alert = NSAlert()
         alert.messageText = "Close “\(profile.name)” first."
-        alert.informativeText = "The \(what) is in use by the running VM. Resetting it now would corrupt the live session — close the session window and try again."
+        alert.informativeText = "The \(what) is in use by the running VM. Changing it now would corrupt the live session — close the session window and try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
     private func deleteProfile(_ profile: Profile) {
+        if diskInUse(profile.id) {
+            showRunningRefusal(profile: profile, what: "workspace")
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Delete workspace “\(profile.name)”?"
         alert.informativeText = "Removes its disk, settings, and SSH key. The mounted host folder is untouched."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "workspace"); return }
 
         do {
             try store.delete(profile)
@@ -11596,6 +11626,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
+        // Already booting (a detached boot has no pane to find above): one
+        // boot per disk.
+        if bootsInFlight.contains(profile.id) { return }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -11957,7 +11990,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
+        guard bootsInFlight.begin(profile.id) else { return }
+        refreshSidebar()
         Task { @MainActor [self] in
+            defer {
+                bootsInFlight.end(profile.id)
+                refreshSidebar()
+            }
             let sessionDisk = SessionDisk(
                 profile: profile,
                 store: store,
@@ -12445,6 +12484,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// path. Builds the same guest command as the GUI request functions but
     /// writes straight to the session's outbox, so no window/pane is needed.
     @MainActor
+    /// The worktree branches of a workspace's open tabs — what an
+    /// automation run's slot is checked against. [] when the workspace isn't
+    /// running (nothing runs there), nil when its tabs can't be told (no
+    /// window has its entry).
+    func liveWorktreeBranches(profileID: UUID) -> [String]? {
+        guard runningSessions[profileID] != nil else { return [] }
+        guard let entry = unifiedWindow?.listModel.entries.first(where: { $0.id == profileID }) else { return nil }
+        return entry.model.tabs.compactMap(\.worktreeBranch)
+    }
+
     func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
         guard let p = profileByNameOrID(profileNameOrID),
               let session = runningSessions[p.id],
@@ -15250,9 +15299,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            if let robot = BromureIcons.image("robot") {
-                let icon = robot.copy() as! NSImage
-                icon.size = NSSize(width: 18, height: 18)
+            // The app icon's mark (Resources/BromureAC.icon), as a template.
+            if let mark = BromureIcons.image("app-mark") {
+                let icon = mark.copy() as! NSImage
+                let h: CGFloat = 16
+                icon.size = NSSize(width: (h * mark.size.width / max(mark.size.height, 1)).rounded(), height: h)
                 icon.isTemplate = true
                 button.image = icon
             } else {
@@ -15868,43 +15919,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var env = ProcessInfo.processInfo.environment
         env["SSH_AUTH_SOCK"] = agentSocket
 
-        var askpassURL: URL?
-        if let pass = passphrase, !pass.isEmpty {
-            // Script just echoes the passphrase. Single-quote the value
-            // safely; ssh-add doesn't do shell expansion on the result.
-            let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
-            let script = "#!/bin/sh\nprintf '%s\\n' '\(escaped)'\n"
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
-            try? script.write(to: url, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o700)],
-                ofItemAtPath: url.path)
-            env["SSH_ASKPASS"] = url.path
-            // Apple's ssh-add only consults SSH_ASKPASS when DISPLAY is
-            // also set, OR when SSH_ASKPASS_REQUIRE=force. Belt-and-
-            // braces both.
-            env["DISPLAY"] = ":0"
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            askpassURL = url
-        }
+        // ssh-add never prompts on a terminal. It reads a passphrase from
+        // /dev/tty, not stdin — and an app started from a shell has one:
+        // ssh-add tried it from the background, the kernel stopped it
+        // (SIGTTOU), and the launch waited on it forever with the main
+        // thread (a 20-minute beachball on a key with no stored
+        // passphrase). So askpass, always (Apple's ssh-add wants DISPLAY
+        // too, or SSH_ASKPASS_REQUIRE=force: both), and it answers once:
+        // the stored passphrase, then nothing — a wrong one would be
+        // offered again on every "Bad passphrase, try again".
+        let askpassURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
+        try? Self.askpassScript(passphrase: passphrase)
+            .write(to: askpassURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: askpassURL.path)
+        env["SSH_ASKPASS"] = askpassURL.path
+        env["DISPLAY"] = ":0"
+        env["SSH_ASKPASS_REQUIRE"] = "force"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
         p.arguments = [path]
         p.environment = env
-        // ssh-add reading from /dev/null prevents it from blocking on
-        // tty even when SSH_ASKPASS is missing or fails.
         p.standardInput = FileHandle(forReadingAtPath: "/dev/null")
         p.standardOutput = Pipe()
         let stderr = Pipe()
         p.standardError = stderr
         defer {
-            if let u = askpassURL { try? FileManager.default.removeItem(at: u) }
+            try? FileManager.default.removeItem(at: askpassURL)
+            try? FileManager.default.removeItem(atPath: askpassURL.path + ".used")
         }
         do {
-            try p.run()
-            p.waitUntilExit()
+            guard try Self.runBounded(p, seconds: 15) else {
+                FileHandle.standardError.write(Data(
+                    "[mitm] ssh-add (imported '\(label)') didn't finish in 15 s — stopped it\n".utf8))
+                return
+            }
             if p.terminationStatus != 0 {
                 let msg = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
                                  encoding: .utf8) ?? ""
@@ -15918,6 +15969,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             FileHandle.standardError.write(Data(
                 "[mitm] ssh-add (imported '\(label)') launch failed: \(error)\n".utf8))
         }
+    }
+
+    /// The askpass ssh-add runs for an imported key: the passphrase (when
+    /// there is one) on its first call, a refusal after — ssh-add asks
+    /// again after a wrong one, for as long as it gets an answer.
+    nonisolated static func askpassScript(passphrase: String?) -> String {
+        guard let pass = passphrase, !pass.isEmpty else { return "#!/bin/sh\nexit 1\n" }
+        let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
+        return "#!/bin/sh\n[ -e \"$0.used\" ] && exit 1\n: > \"$0.used\"\nprintf '%s\\n' '\(escaped)'\n"
+    }
+
+    /// Run `p` and wait at most `seconds` for it; past that it is killed
+    /// (SIGKILL: a stopped process ignores the rest until continued).
+    /// false = it had to be killed.
+    nonisolated static func runBounded(_ p: Process, seconds: TimeInterval) throws -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        try p.run()
+        if done.wait(timeout: .now() + seconds) == .success { return true }
+        kill(p.processIdentifier, SIGKILL)
+        _ = done.wait(timeout: .now() + 2)
+        return false
     }
 
     /// Add the per-profile key to bromure's private ssh-agent so the

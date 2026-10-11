@@ -105,33 +105,24 @@ extension ACAppDelegate {
         })
     }
 
-    /// "Ask @foo to fix it": hand the finding to that session. Shows it
-    /// when `show`. Returns why it didn't get there (nil = staged and on
-    /// its way; a later typing failure rewrites the finding's note). A
-    /// flagged finding goes only once the user `confirmed` it.
-    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true,
+    /// "Ask @foo to fix it": a backlog task on the board, queued for that
+    /// session (RepoWatchEngine.fix(_:by:)) — not a message typed into it.
+    /// The user stays where they are, in the code review: the finding's
+    /// row says it's in progress and opens the task. Returns why it didn't
+    /// get there (nil = queued). A flagged finding goes only once the user
+    /// `confirmed` it.
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID,
                                confirmed: Bool) async -> String? {
         guard let f = findingStore.finding(findingID),
               let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
             return NSLocalizedString("that session is gone", comment: "finding → session failure")
         }
         if let refusal = f.handOverRefusal(confirmed: confirmed) { return refusal }
-        let brief = RepoWatchPrompts.fixTask(f)
-        let engine = switchboardEngine
-        let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
-        let failure = await findingStore.handOver(findingID, to: name, stage: {
-            try await engine.stageFinding(
-                id: f.id, severity: f.severity.rawValue, repo: f.repo,
-                brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)", to: s)
-        }, deliver: { line in
-            try await engine.deliverFinding(line, findingID: findingID, to: s)
-        }, why: { error in
-            BACDebug.log("switchboard", "finding \(findingID) → session \(sessionID) failed — \(error)")
-            if case SwitchboardEngine.ActError.refused(let r) = error { return r }
-            return error.localizedDescription
-        })
-        if failure == nil, show { ensureUnifiedWindow().selectSession(sessionID) }
-        return failure
+        guard let tid = repoWatchEngine.fix(findingID, by: s) else {
+            return NSLocalizedString("couldn't put it on the board", comment: "finding → session failure")
+        }
+        BACDebug.log("watch", "finding \(findingID) → task \(tid) for session \(sessionID)")
+        return nil
     }
 
     /// Bring up the hub — on a finding when given one.
@@ -232,7 +223,7 @@ extension ACAppDelegate {
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
                 }
-                if let why = await routeFindingToSession(id, session: sid, show: false, confirmed: true) {
+                if let why = await routeFindingToSession(id, session: sid, confirmed: true) {
                     return ["error": why]
                 }
             case ("POST", "duplicate"):

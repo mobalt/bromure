@@ -2255,7 +2255,10 @@ final class ACAutomationServer {
                                     timeout: Int) -> ShellExecOutcome {
         var request: [String: Any] = ["cmd": command, "timeout": timeout]
         if let argv { request["argv"] = argv }
-        switch exchangeJSON(fd: fd, request: request) {
+        // The guest enforces `timeout`; the host gives up a little after it,
+        // so a guest that took the request and never answers can't hold the
+        // caller (and whatever it holds — a boot's keep-awake) forever.
+        switch exchangeJSON(fd: fd, request: request, replyWithin: TimeInterval(max(timeout, 1)) + 30) {
         case .deadConnection: return .deadConnection
         case .protocolFailure: return .protocolFailure
         case .success(let obj):
@@ -2271,7 +2274,10 @@ final class ACAutomationServer {
     /// Factored out of `executeShellCommand` so the file-service ops
     /// (`{"file": {...}}`, the file browser's data plane) share the wire
     /// code without pretending to be shell commands.
-    static func exchangeJSON(fd: Int32, request: [String: Any]) -> JSONExchangeOutcome {
+    /// `replyWithin`: seconds (of awake time) the whole reply may take; past
+    /// it the exchange is a protocol failure (it may have run — not retried).
+    static func exchangeJSON(fd: Int32, request: [String: Any],
+                             replyWithin: TimeInterval? = nil) -> JSONExchangeOutcome {
         guard let bodyData = try? JSONSerialization.data(withJSONObject: request) else {
             return .protocolFailure
         }
@@ -2285,11 +2291,26 @@ final class ACAutomationServer {
         }
         guard bytesWritten == payload.count else { return .deadConnection }
 
+        let deadline = replyWithin.map { ProcessInfo.processInfo.systemUptime + $0 }
+        /// Waits for data; false once the deadline passed with none.
+        func readable() -> Bool {
+            guard let deadline else { return true }
+            while true {
+                let left = deadline - ProcessInfo.processInfo.systemUptime
+                guard left > 0 else { return false }
+                var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let r = poll(&p, 1, Int32(min(left * 1000, 60_000).rounded(.up)))
+                if r > 0 { return true }
+                if r < 0, errno != EINTR { return true }   // let read() report it
+            }
+        }
+
         // Read length prefix. EOF before the FIRST byte = the peer was already
         // gone (stale pool entry from a previous guest boot) → retryable.
         var lenBuf = [UInt8](repeating: 0, count: 4)
         var got = 0
         while got < 4 {
+            guard readable() else { return .protocolFailure }
             let n = lenBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), 4 - got)
             }
@@ -2302,6 +2323,7 @@ final class ACAutomationServer {
         var bodyBuf = [UInt8](repeating: 0, count: Int(respLen))
         got = 0
         while got < Int(respLen) {
+            guard readable() else { return .protocolFailure }
             let n = bodyBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), Int(respLen) - got)
             }
@@ -2342,6 +2364,9 @@ final class ACAutomationServer {
                 "build": BuildInfo.dictionary,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
+                // Not yet wired: the empty list above isn't the host's — a
+                // client keeps the rows it has (an empty listed one is real).
+                "workspacesListed": self.onListWorkspaces != nil,
                 "vms": self.onListVMs?() ?? [],
                 "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
                 "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],

@@ -4174,3 +4174,15 @@
 "that finding is gone" = "that finding is gone";
 "couldn't start the fix" = "couldn't start the fix";
 "no Switchboard could be started" = "no Switchboard could be started";
+
+/* Automations: runs at a time */
+"Runs at a time" = "Runs at a time";
+"No limit" = "No limit";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "A burst of events waits its turn, oldest first: the next one starts when a run finishes.";
+"Reviews at a time" = "Reviews at a time";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once.";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "Delete workspace “%@”?";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Removes its disk, settings, and SSH key. The mounted host folder is untouched.";
+"Couldn't delete “%@”" = "Couldn't delete “%@”";
