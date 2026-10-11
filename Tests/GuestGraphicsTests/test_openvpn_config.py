@@ -217,5 +217,36 @@ http-proxy attacker.example 8080 /etc/shadow
         self.assertIn("http-proxy", dropped)
         self.assertIn("socks-proxy", dropped)
 
+    # CWE-94: `</ca> # x` closes the block for OpenVPN (a prefix, after
+    # leading spaces); the plugin and config lines after it are options.
+    def test_close_tag_with_trailing_text_ends_the_block(self):
+        text = """client
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIB
+-----END CERTIFICATE-----
+</ca> # x
+plugin /tmp/evil.so
+config /tmp/extra.ovpn
+remote vpn.example 1194
+"""
+        names, dropped = self.kept_names(text)
+        self.assertNotIn("plugin", names)
+        self.assertNotIn("config", names)
+        self.assertIn("plugin", dropped)
+        self.assertIn("config", dropped)
+        self.assertIn("remote", names)
+        kept = "\n".join(config.sanitize_ovpn(text)[0])
+        self.assertNotIn("evil.so", kept)
+        self.assertNotIn("extra.ovpn", kept)
+        self.assertIn("MIIB", kept)          # the certificate itself stays
+        # Case matters to OpenVPN: `</CA>` doesn't close `<ca>`, so what
+        # follows is still certificate data — kept, never an option.
+        lines, _ = config.sanitize_ovpn("<ca>\n</CA>\nplugin /x.so\n</ca>\nclient\n")
+        self.assertEqual(lines, ["<ca>", "</CA>", "plugin /x.so", "</ca>", "client"])
+        # A tag that isn't the line's only token opens no block.
+        names, _ = self.kept_names("<ca> extra\nplugin /x.so\nclient\n")
+        self.assertNotIn("plugin", names)
+
 if __name__ == "__main__":
     unittest.main()
