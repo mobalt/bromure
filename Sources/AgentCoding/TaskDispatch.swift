@@ -297,6 +297,27 @@ final class TaskDispatcher {
             }
         case .report:
             store.mutate(task.id) { $0.assigneeNote = m.text }
+        case .deliver where task.stage == .done:
+            // Already Done: Bromure saw the landing in git (it looks every
+            // few seconds) before the assignee's own report came in. The
+            // report is recorded — and ends the landing's grace — but never
+            // read as a fresh hand-in: that pulled a landed card back to
+            // Review, stuck on "Landing…" for good.
+            let landed = task.landing != nil
+            store.mutate(task.id) {
+                if landed { $0.mergeReport = m.text }
+                $0.pendingQuestion = nil
+                $0.pendingAskID = nil
+            }
+            if landed {
+                let pr = task.landing?.mode == .pr
+                Task {
+                    _ = await delegate.codingTaskEngine.reportLanding(
+                        task.id, status: pr ? "pr_opened" : "merged", summary: m.text,
+                        prURL: CodingTask.pullRequestURL(in: m.text))
+                    self.pump()
+                }
+            }
         case .deliver where task.landing != nil && task.stage == .testing:
             // The assignee landed it, as asked on approval — verified in git
             // when this host can look (its worktree is on one of our
@@ -385,7 +406,8 @@ final class TaskDispatcher {
     }
 
     private func toReview(_ taskID: UUID, delegation d: Delegation) async {
-        guard let delegate, let task = delegate.codingTaskStore.task(taskID),
+        // A Done card never goes back to Review on a late message.
+        guard let delegate, let task = delegate.codingTaskStore.task(taskID), task.stage != .done,
               let slug = task.branchSlug else { return }
         let branch = "wt/\(slug)"
         // Where to look: the session that delivered, or — through a room —

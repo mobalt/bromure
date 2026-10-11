@@ -345,6 +345,77 @@ struct TaskLandingTests {
         #expect(TaskLandingText.done(done!) == "PR #9 opened")
     }
 
+    /// Board report: bulk-reviewed cards left one stuck in "Landing…" though
+    /// its agent had committed. Bromure saw the merge in git first (Done);
+    /// the agent's own report came after and was taken as a fresh hand-in —
+    /// back to Review with a `.landed` landing nothing moves again.
+    @Test("a card landed but pulled back to Review goes Done again; one never landed is left alone")
+    func landedInReviewRepaired() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let stuck = reviewTask(s)
+        s.mutate(stuck.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+            $0.completion = .merged(target: "main", verified: true, by: nil)
+        }
+        #expect(TaskLandingLine.of(s.task(stuck.id)!) == .fastMerging(target: "main"))   // the stuck line
+        let landing = reviewTask(s, branch: "wt/other")
+        s.mutate(landing.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+        }
+        engine.repairLandedInReview()
+        #expect(s.task(stuck.id)?.stage == .done)
+        #expect(s.task(landing.id)?.stage == .testing)
+    }
+
+    /// Board report: a bulk review gave the designated agent one message
+    /// per card. Delegated cards given to one session now go as one batch.
+    @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
+    func delegatedBatchKey() {
+        let s = store()
+        let session = TaskAssignment(kind: .session, id: UUID(), label: "@hotfixes")
+        func delegated(_ branch: String, _ a: TaskAssignment) -> CodingTask {
+            var t = reviewTask(s, branch: branch)
+            t.delegationID = UUID()
+            t.assignment = a
+            return t
+        }
+        var a = delegated("wt/a", session), b = delegated("wt/b", session)
+        b.profileID = a.profileID
+        #expect(CodingTaskEngine.batchKey(a) != nil && CodingTaskEngine.batchKey(a) == CodingTaskEngine.batchKey(b))
+        let other = delegated("wt/c", TaskAssignment(kind: .session, id: UUID(), label: "@other"))
+        #expect(CodingTaskEngine.batchKey(other) != CodingTaskEngine.batchKey(a))
+        #expect(CodingTaskEngine.batchKey(delegated("wt/d", .newAgent)) == nil)
+        a.delegationID = nil
+        #expect(CodingTaskEngine.batchKey(a) != nil && CodingTaskEngine.batchKey(a) != CodingTaskEngine.batchKey(b))
+        // The delegate's brief answers with deliver, not the board's tool.
+        let p = CodingTaskEngine.batchLandingPrompt(branches: ["wt/a", "wt/b"], target: "main",
+                                                    rootRepo: "/r", remote: nil, viaBoard: false)
+        #expect(p.contains("`deliver`") && !p.contains("board_report_landing"))
+        #expect(p.contains("'wt/a'") && p.contains("'wt/b'"))
+    }
+
+    @Test("a delegated batch's one report closes every card Bromure can't look at")
+    func delegatedBatchSettlesOnReport() async {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let lead = reviewTask(s, branch: "wt/a"), follower = reviewTask(s, branch: "wt/b")
+        for t in [lead, follower] { s.mutate(t.id) { $0.delegationID = UUID() } }
+        s.mutate(lead.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+            $0.landing?.batch = [follower.id]
+        }
+        s.mutate(follower.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+            $0.landing?.batchLead = lead.id
+        }
+        let r = await engine.reportLanding(lead.id, status: "merged", summary: "both in", prURL: nil)
+        #expect(r.ok)
+        #expect(s.task(lead.id)?.stage == .done)
+        #expect(s.task(follower.id)?.stage == .done)
+        #expect(s.task(follower.id)?.completion == .merged(target: "main", verified: false, by: "Claude Code"))
+    }
+
     /// Finding (CWE-807): with no landing under way, an assignee's
     /// "merged" closed the card as a verified merge into the parent its own
     /// machine reported — no approval, and a parent like `--diff-filter=A`

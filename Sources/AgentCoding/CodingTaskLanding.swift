@@ -463,7 +463,9 @@ extension CodingTaskEngine {
     /// one Bromure merges itself, one after the other; what's left — the
     /// ones whose branches conflict or moved on — goes to ONE agent (the
     /// first such card's), with one brief: merge them all, fix conflicts,
-    /// run the checks once, push once. A delegated task lands its own.
+    /// run the checks once, push once. Delegated tasks given to one session
+    /// go to it the same way: one brief for all of them, not one message per
+    /// card (each one landed alone, and the agent couldn't plan the merges).
     func landBatch(_ ids: [UUID], keepBranch: Bool = false, push: Bool = false) {
         let tasks = ids.compactMap { store.task($0) }.filter {
             $0.stage == .testing && ($0.landing == nil || $0.landing?.phase == .needsYou)
@@ -471,11 +473,10 @@ extension CodingTaskEngine {
         var grouped: [String: [UUID]] = [:]
         var order: [String] = []
         for t in tasks {
-            guard t.delegationID == nil, t.branch != nil else {
+            guard let key = Self.batchKey(t) else {
                 land(t.id, mode: .merge, keepBranch: keepBranch, push: push)
                 continue
             }
-            let key = t.profileID.uuidString + "\u{0}" + (t.rootRepo ?? t.repoPath)
             if grouped[key] == nil { order.append(key) }
             grouped[key, default: []].append(t.id)
         }
@@ -497,6 +498,18 @@ extension CodingTaskEngine {
             BACDebug.log("tasks", "batch landing of \(group.count) tasks")
             Task { [weak self] in await self?.runBatch(group) }
         }
+    }
+
+    /// Which cards of a batch go to one agent together: the same machine and
+    /// repository — and, for a delegated card, the same session it was given
+    /// to (its own steer reaches only that one). nil: lands on its own (no
+    /// branch; given to a room or a fresh agent of its own).
+    nonisolated static func batchKey(_ t: CodingTask) -> String? {
+        guard t.branch != nil else { return nil }
+        let repo = t.profileID.uuidString + "\u{0}" + (t.rootRepo ?? t.repoPath)
+        guard t.delegationID != nil else { return repo }
+        guard let a = t.assignment, a.kind == .session else { return nil }
+        return "session:" + a.id.uuidString + "\u{0}" + repo
     }
 
     /// One after the other through the fast path, then the rest to one agent.
@@ -539,7 +552,8 @@ extension CodingTaskEngine {
             let prompt = Self.batchLandingPrompt(
                 branches: hs.map(\.branch),
                 target: target, rootRepo: lead.root,
-                remote: pushes ? leadTask.landing?.remote : nil)
+                remote: pushes ? leadTask.landing?.remote : nil,
+                viaBoard: leadTask.delegationID == nil)
             await handLandingToAgent(lead.taskID, branch: lead.branch, target: target, root: lead.root,
                                      promptOverride: prompt)
         }
@@ -553,8 +567,11 @@ extension CodingTaskEngine {
     /// user's word, and a title can be anything a planner filed
     /// (`board_create_subtasks`) — text read from a repository or an issue
     /// would become the user's instructions to an agent that pushes.
+    /// `viaBoard`: false for a delegated assignee, which answers with the
+    /// delegation tool `deliver` (it has no board tools).
     nonisolated static func batchLandingPrompt(branches: [String], target: String,
-                                               rootRepo: String, remote: String?) -> String {
+                                               rootRepo: String, remote: String?,
+                                               viaBoard: Bool = true) -> String {
         let rm = safeRemote(remote)
         let (qtRef, list) = (q("refs/heads/" + target), branches.enumerated().map { i, b in
             "   \(i + 1). `\(q(b))`"
@@ -579,10 +596,17 @@ extension CodingTaskEngine {
             steps.append("Push it: `git push -- \(q(r)) \(qtRef)`. Never force-push '\(target)'. If it's rejected "
                 + "because '\(r)' moved on, pull --rebase again, re-run the checks and push again.")
         }
-        steps.append("Call the board_report_landing tool once, with status \"merged\" and a one-line summary, when "
-            + "every branch is in '\(target)'\(rm.map { " and '\($0)/\(target)'" } ?? "") — Bromure checks each. "
-            + "If some can't be merged, merge the others, then call board_report_landing with status \"blocked\" "
-            + "naming the ones that aren't in and why. Don't force anything.")
+        if viaBoard {
+            steps.append("Call the board_report_landing tool once, with status \"merged\" and a one-line summary, when "
+                + "every branch is in '\(target)'\(rm.map { " and '\($0)/\(target)'" } ?? "") — Bromure checks each. "
+                + "If some can't be merged, merge the others, then call board_report_landing with status \"blocked\" "
+                + "naming the ones that aren't in and why. Don't force anything.")
+        } else {
+            steps.append("Call `deliver` once (on this request), with a one-line summary, when every branch is in "
+                + "'\(target)'\(rm.map { " and '\($0)/\(target)'" } ?? "") — Bromure checks each and closes every "
+                + "task of the batch. If some can't be merged, merge the others, then `ask` naming the ones that "
+                + "aren't in and why. Don't force anything.")
+        }
         let numbered = steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         return "The user approved \(branches.count) tasks — merge them all into '\(target)', in one go. "
             + "Do it yourself, in this session:\n" + numbered + "\n"
@@ -592,13 +616,20 @@ extension CodingTaskEngine {
 
     /// Where a batch's other cards stand once its agent reports or stops:
     /// each one Bromure sees in its target goes Done; the rest need you.
-    private func settleBatchFollowers(of leadID: UUID, why: @escaping (CodingTask) -> String) async {
+    /// `reportedMerged`: the agent said every branch is in — a card Bromure
+    /// can't look at (a delegated one on a machine it can't reach) is
+    /// recorded on that word, as a single landing would be.
+    private func settleBatchFollowers(of leadID: UUID, reportedMerged: Bool = false,
+                                      why: @escaping (CodingTask) -> String) async {
         guard let ids = store.task(leadID)?.landing?.batch else { return }
         for id in ids {
             guard let t = store.task(id), t.stage == .testing, t.landing?.phase == .agentLanding,
                   t.landing?.batchLead == leadID else { continue }
-            if await landingVerified(t) == true {
+            let seen = await landingVerified(t)
+            if seen == true {
                 finishLanding(id, verified: true, by: nil)
+            } else if seen == nil, reportedMerged, t.delegationID != nil {
+                finishLanding(id, verified: false, by: Self.landingAgentName(t))
             } else {
                 needsYou(id, why(t))
             }
@@ -1113,7 +1144,7 @@ extension CodingTaskEngine {
         guard !batch.isEmpty, status == "merged" || status == "blocked" else { return own }
         // One report for the whole batch: each card Bromure sees in its
         // target goes Done; the others need the user, with the agent's word.
-        await settleBatchFollowers(of: taskID) { _ in
+        await settleBatchFollowers(of: taskID, reportedMerged: status == "merged") { _ in
             let why = summary.trimmingCharacters(in: .whitespacesAndNewlines)
             return status == "blocked" && !why.isEmpty ? why : NSLocalizedString(
                 "The batch's agent reported it done, but this branch isn't in the target — retry, or merge it on its own.",
@@ -1220,6 +1251,7 @@ extension CodingTaskEngine {
     }
 
     func sweepIdleReview() {
+        repairLandedInReview()
         let now = Date()
         // A landing nothing is watching any more (its watch ended, a report
         // that never came): look at git again — in, it goes Done.
@@ -1236,9 +1268,25 @@ extension CodingTaskEngine {
         }
     }
 
+    /// A card that landed (Done, its outcome recorded) and was then pulled
+    /// back to Review by its assignee's late report: in Review with a
+    /// `.landed` landing, which reads "Landing — merging…" and that nothing
+    /// ever moves again. It landed: Done again.
+    func repairLandedInReview() {
+        for t in store.tasks where t.stage == .testing && t.landing?.phase == .landed && t.completion != nil {
+            BACDebug.log("tasks", "“\(t.title)”: landed but back in Review — Done again")
+            store.mutate(t.id) {
+                $0.stage = .done
+                if $0.completedAt == nil { $0.completedAt = Date() }
+                $0.lastError = nil
+            }
+        }
+    }
+
     /// App launch: the idle-Review sweep, and landings that were under way
     /// when the app quit are followed again.
     func startHousekeeping() {
+        repairLandedInReview()
         for t in store.tasks where t.stage == .testing && t.landing?.phase == .agentLanding {
             if t.landing?.handingOver == true {
                 // Quit before the brief reached the agent: nothing is landing.
