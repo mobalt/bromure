@@ -476,7 +476,8 @@ final class FileExplorerModel {
             + "\(listing); printf '\\003'; "
             + "for d in \(probe); do git -C \"$d\" rev-parse --show-toplevel 2>/dev/null; done | sort -u "
             + "| while IFS= read -r r; do [ -n \"$r\" ] || continue; printf '\\002%s\\001' \"$r\"; "
-            + "git -C \"$r\" status --porcelain -z 2>/dev/null; done; true; } | base64 -w0"
+            // The repository's own programs never run (RepoGitPrograms).
+            + "\(RepoGitPrograms.off("\"$r\""))git -C \"$r\" status --porcelain -z --ignore-submodules=dirty 2>/dev/null; done; true; } | base64 -w0"
         do {
             let out = try await exec(cmd)
             guard generation == refreshGeneration, root == self.root else { return }
@@ -845,7 +846,8 @@ final class FileExplorerModel {
                 // base64 for the same reason as refresh(): the diff body is
                 // whatever bytes the file contains.
                 let out = try await exec(
-                    "git -C \(qrepo) diff HEAD --no-color --no-ext-diff -- \(qfile) " +
+                    RepoGitPrograms.off(qrepo)
+                    + "git -C \(qrepo) diff HEAD --no-color \(RepoGitPrograms.diffFlags) -- \(qfile) " +
                     "| head -c \(Self.maxDiffBytes) | base64 -w0")
                 guard generation == detailGeneration else { return }
                 let data = Data(base64Encoded: out.filter { !$0.isWhitespace }) ?? Data()
