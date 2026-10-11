@@ -1254,6 +1254,18 @@ def _inline_piece_ends_block(line, close):
     return False
 
 
+def _split_utf8(line, limit):
+    """``line`` cut into pieces of at most ``limit`` UTF-8 bytes, never
+    inside a character."""
+    pieces, cur = [], ""
+    for ch in line:
+        if len((cur + ch).encode("utf-8")) > limit:
+            pieces.append(cur)
+            cur = ""
+        cur += ch
+    return pieces + [cur]
+
+
 def sanitize_ovpn(text, connection_body=False):
     """``text`` without the forbidden directives, read the way OpenVPN 2.6
     reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
@@ -1302,6 +1314,13 @@ def sanitize_ovpn(text, connection_body=False):
                 out.extend(inner)
                 dropped.extend(more)
                 block = None
+            if keep and connection_body and not ends and size == OPENVPN_LINE_MAX:
+                # A block nested in <connection> is read back (in_src_get)
+                # into 256 bytes, which gives a 255-byte line no newline: the
+                # next line (a key or certificate footer) is glued onto it.
+                # Two lines, each short enough to get its newline back.
+                out.extend(_split_utf8(line, OPENVPN_LINE_MAX - 1))
+                continue
             if keep:
                 out.append(line)
             if ends:
