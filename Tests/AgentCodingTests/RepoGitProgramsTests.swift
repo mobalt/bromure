@@ -114,6 +114,29 @@ struct RepoGitProgramsTests {
         #expect(!FileManager.default.fileExists(atPath: marker))
     }
 
+    /// Finding (CWE-754): a submodule whose own `git status` fails (here a
+    /// truncated index, as a crash mid-write leaves it) printed nothing, so
+    /// the checkout read as clean and empty — and Mark done removed it.
+    @Test("a submodule whose status fails reads as a change")
+    @MainActor func failedSubmoduleStatusCounts() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgf-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/.bromure/worktrees/repo/x"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a; "
+               + "git -c protocol.file.allow=always submodule -q add \(home)/sub sub; git commit -qm sub")
+        #expect(!sh(TaskLitter.status("'\(root)'")).contains("sub"))
+        // A tracked edit, then the submodule's index cut short.
+        _ = sh("cd \(root)/sub; echo SECRET >> f; i=\"$(git rev-parse --git-dir)/index\"; "
+               + "head -c 20 \"$i\" > \"$i.t\"; mv \"$i.t\" \"$i\"")
+        #expect(sh("cd \(root)/sub && git status --porcelain >/dev/null 2>&1 || echo failed").contains("failed"))
+        #expect(sh(TaskLitter.status("'\(root)'")).contains(" M sub"))
+        #expect(sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])).contains("k\t1"))
+        #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
+                                                   squash: false)).contains("dirty"))
+    }
+
     /// Finding: the same hidden submodule edit passed the checks that gate
     /// `git worktree remove --force` — the landing's dirty-source check
     /// (a merged branch's worktree is removed) and Mark done's empty branch.

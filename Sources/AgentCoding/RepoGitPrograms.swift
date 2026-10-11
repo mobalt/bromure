@@ -55,12 +55,15 @@ enum RepoGitPrograms {
     /// submodule under the PARENT's switched-off programs — which hid an
     /// edited submodule: the checkout read as clean ("nothing is lost") and
     /// discarding it deleted that work. Each submodule's status runs in the
-    /// submodule, under its own `off`. Paths are relative to `dir`.
+    /// submodule, under its own `off`; one that fails (a truncated index, an
+    /// unknown repository extension) counts as dirty, as `statusFailed` does
+    /// for the parent — never the empty output of a clean submodule. Paths
+    /// are relative to `dir`.
     static func dirtySubmodules(_ dir: String, nul: Bool = false) -> String {
         let end = nul ? "\\0" : "\\n"
         return "_bsl() { git -c core.quotePath=false -C \"$1\" ls-files --stage 2>/dev/null "
             + "| awk -F'\\t' '$1 ~ /^160000 /{print $2}'; }; "
-            + "_bsd() { [ -n \"$( ( cd \"$1\" || exit; \(off("."))git status --porcelain --ignore-submodules=dirty ) 2>/dev/null | head -c1)\" ] "
+            + "_bsd() { [ -n \"$( ( cd \"$1\" || { echo '!!'; exit; }; \(off("."))git status --porcelain --ignore-submodules=dirty\(statusFailed) ) 2>/dev/null | head -c1)\" ] "
             + "&& return 0; _bsl \"$1\" | { while IFS= read -r _s; do [ -e \"$1/$_s/.git\" ] && _bsd \"$1/$_s\" && exit 0; done; exit 1; }; }; "
             + "_bsl \(dir) | while IFS= read -r _s; do [ -e \(dir)/\"$_s/.git\" ] && _bsd \(dir)/\"$_s\" "
             + "&& printf ' M %s\(end)' \"$_s\"; done; "
