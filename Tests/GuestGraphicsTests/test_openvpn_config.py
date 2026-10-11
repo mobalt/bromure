@@ -298,5 +298,23 @@ remote vpn.example 1194
         self.assertNotIn("log /mnt/share/profile.img", lines)
         self.assertIn("log", dropped)
 
+    # CWE-73: genkey writes a generated key to the path the profile names
+    # (as root, then stops) — the host's profile disk on the share.
+    def test_file_writing_and_one_shot_modes_are_dropped(self):
+        text = """client
+genkey secret /mnt/share/profile.img
+"--genkey" tls-crypt-v2-client /etc/passwd
+memstats /mnt/share/profile.img
+rmtun
+mktun
+test-crypto
+remote vpn.example 1194
+"""
+        names, dropped = self.kept_names(text)
+        self.assertEqual(names, ["client", "remote"])
+        self.assertNotIn("profile.img", "\n".join(config.sanitize_ovpn(text)[0]))
+        for bad in ["genkey", "memstats", "rmtun", "mktun", "test-crypto"]:
+            self.assertIn(bad, dropped, bad)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1153,7 +1153,10 @@ OPENVPN_FORBIDDEN = frozenset({
     "config", "cd", "chroot", "tmp-dir", "daemon", "writepid",
     # Write a file of the config's choosing, as root.
     "log", "log-append", "status", "replay-persist", "tls-export-cert",
-    "ifconfig-pool-persist",
+    "ifconfig-pool-persist", "genkey", "memstats",
+    # One-shot modes instead of a tunnel: create or delete a tun device
+    # (another VPN's), a crypto self-test.
+    "mktun", "rmtun", "test-crypto",
     "auth-user-pass",
 })
 
