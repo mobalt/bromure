@@ -526,6 +526,54 @@ struct LandingRemoteNameTests {
         #expect(!FileManager.default.fileExists(atPath: r.marker))
     }
 
+    /// Finding (CWE-78): with the remote named `origin`, the repository's
+    /// config still chose programs the fetch ran: an `ext::` URL (with
+    /// `protocol.ext.allow=always`), `core.gitProxy` for a `git://` URL,
+    /// `core.askPass` for an HTTP remote asking for a password.
+    @Test("the fetch and push run no transport program or askpass the repository's config names")
+    func networkConfigRunsNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        let dir = (r.root as NSString).deletingLastPathComponent
+        let pwn = dir + "/pwn.sh"
+        _ = try sh("printf '#!/bin/sh\\ntouch \(r.marker)\\nexit 1\\n' > \(pwn); chmod +x \(pwn)")
+        func both(_ setup: String, _ label: String, env: String = "") throws {
+            _ = try sh("cd \(r.root) && \(setup)")
+            let push = try sh(env + CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
+            #expect(push.trimmingCharacters(in: .whitespacesAndNewlines) == "fetch-failed", "\(label)")
+            let verify = try sh(env + CodingTaskEngine.landingVerifyCommand(root: r.root, branch: "main", target: "main",
+                                                                            sourceDir: nil, remote: "origin"))
+            #expect(verify.contains("NOREMOTE"), "\(label)")
+            #expect(!FileManager.default.fileExists(atPath: r.marker), "\(label)")
+        }
+        // A remote URL that is a command.
+        try both("git config protocol.ext.allow always; git config remote.origin.url 'ext::\(pwn) %S'", "ext")
+        // The git:// transport's proxy program.
+        try both("git config --unset protocol.ext.allow; git config remote.origin.url git://127.0.0.1:9/x; "
+                 + "git config core.gitProxy \(pwn)", "gitProxy")
+        // An HTTP remote that asks for a password: the askpass program.
+        let port = 20000 + Int.random(in: 0..<20000)
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        server.arguments = ["python3", "-c", """
+            import http.server as h
+            class H(h.BaseHTTPRequestHandler):
+                def do_GET(s):
+                    s.send_response(401); s.send_header('WWW-Authenticate', 'Basic realm="x"'); s.end_headers()
+                def log_message(s, *a): pass
+            h.HTTPServer(('127.0.0.1', \(port)), H).serve_forever()
+            """]
+        try server.run()
+        defer { server.terminate() }
+        Thread.sleep(forTimeInterval: 0.5)
+        // No global helper may answer first: the user's own config is out.
+        let noGlobal = "export GIT_CONFIG_GLOBAL=/dev/null; "
+        try both("git config --unset core.gitProxy; git config remote.origin.url http://127.0.0.1:\(port)/x.git; "
+                 + "git config core.askPass \(pwn)", "askPass", env: noGlobal)
+        // The same repository, without the fix's environment, does run it.
+        _ = try sh(noGlobal + "cd \(r.root) && GIT_TERMINAL_PROMPT=0 git fetch -q origin; true")
+        #expect(FileManager.default.fileExists(atPath: r.marker))
+    }
+
     /// Finding: a remote whose NAME is safe (`origin`) still ran the
     /// programs the repository's config names — its pack helpers, hooks.
     @Test("a safe-named remote runs none of the programs the repository's config names")

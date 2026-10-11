@@ -138,8 +138,14 @@ extension CodingTaskEngine {
     /// ssh program from the user's own git config (global, system) or plain
     /// `ssh` — never a `core.sshCommand` the repository sets. Read outside
     /// any repository so the local config can't answer.
+    /// Transports: https, http, ssh, file only (`GIT_ALLOW_PROTOCOL`
+    /// overrides any `protocol.*.allow` the repository sets) — never `ext::`
+    /// (a remote URL that is a command) nor `git://` (its `core.gitProxy`
+    /// program), nor a remote helper the config names. No `core.askPass`:
+    /// an asked-for password gets nothing (`GIT_ASKPASS` beats the config).
     nonisolated static let networkGitEnv =
-        "export GIT_TERMINAL_PROMPT=0; "
+        "export GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:http:ssh:file; "
+        + "[ -n \"${GIT_ASKPASS:-}\" ] || export GIT_ASKPASS=/bin/false; "
         + "if [ -z \"${GIT_SSH_COMMAND:-}\" ] && [ -z \"${GIT_SSH:-}\" ]; then "
         + "GIT_SSH_COMMAND=$(cd / && { git config --global --get core.sshCommand || git config --system --get core.sshCommand; } 2>/dev/null) "
         + "|| GIT_SSH_COMMAND=ssh; export GIT_SSH_COMMAND; fi; "
@@ -153,17 +159,18 @@ extension CodingTaskEngine {
     }
 
     /// `git fetch` from a remote with its pack program pinned: never the
-    /// `remote.<name>.uploadpack` the repository's config sets.
+    /// `remote.<name>.uploadpack` the repository's config sets. Never into
+    /// submodules either (their own config). Runs under `networkGitEnv`.
     nonisolated static func pinnedFetch(_ dir: String, remote: String) -> String {
         "\(pinnedGit(dir)) -c \(q("remote.\(remote).uploadpack=git-upload-pack")) "
-            + "fetch -q --upload-pack=git-upload-pack -- \(q(remote))"
+            + "fetch -q --no-recurse-submodules --upload-pack=git-upload-pack -- \(q(remote))"
     }
 
     /// `git push` with its pack program pinned (never the repository's
     /// `remote.<name>.receivepack`) and no `pre-push` hook.
     nonisolated static func pinnedPush(_ dir: String, remote: String, refspec: String) -> String {
         "\(pinnedGit(dir)) -c \(q("remote.\(remote).receivepack=git-receive-pack")) "
-            + "push -q --no-verify --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
+            + "push -q --no-verify --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
     }
 
     /// A remote name safe to hand git and an agent: one plain token, never
