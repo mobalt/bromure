@@ -1142,41 +1142,126 @@ OPENVPN_FORBIDDEN = frozenset({
     "script-security", "up", "down", "route-up", "route-pre-down", "ipchange",
     "tls-verify", "tls-crypt-v2-verify", "auth-user-pass-verify",
     "client-connect", "client-disconnect", "learn-address",
-    "plugin", "iproute", "ifconfig-noexec-cmd",
+    "plugin", "iproute", "ifconfig-noexec-cmd", "dns-updown",
+    # Load a shared library, by path, into the root process.
+    "engine", "providers", "pkcs11-providers",
     "management", "management-client", "management-client-auth",
     "management-hold", "management-query-passwords", "management-forget-disconnect",
     "management-external-key", "management-external-cert",
     "config", "cd", "chroot", "tmp-dir", "daemon", "writepid",
-    "log", "log-append", "status", "auth-user-pass",
+    # Write a file of the config's choosing, as root.
+    "log", "log-append", "status", "replay-persist", "tls-export-cert",
+    "ifconfig-pool-persist",
+    "auth-user-pass",
 })
+
+# OpenVPN reads its config with fgets() into a 257-byte buffer (an inline
+# block's lines into 256): a longer line is read as several, the part past
+# the cut parsed as a line of its own. Kept lines stay below both.
+OPENVPN_LINE_MAX = 255
+
+_C_SPACE = " \t\n\v\f\r"
+
+
+def openvpn_parse_line(line):
+    """The tokens OpenVPN's parse_line() (2.6, options.c) makes of
+    ``line``, or None where it refuses the line (and ignores it): quotes
+    and backslashes are undone the same way, so ``"log"``, ``'log'`` and
+    ``l\\og`` all read as ``log``. A comment ends the line where a token
+    would start."""
+    INITIAL, QUOTED, UNQUOTED, SQUOTED = 0, 1, 2, 4
+    tokens, parm = [], []
+    state, backslash = INITIAL, False
+    for ch in line + "\0":
+        out = None
+        if not backslash and ch == "\\" and state != SQUOTED:
+            backslash = True
+        else:
+            space = ch == "\0" or ch in _C_SPACE
+            done = False
+            if state == INITIAL:
+                if not space:
+                    if ch in ";#":
+                        break
+                    if not backslash and ch == '"':
+                        state = QUOTED
+                    elif not backslash and ch == "'":
+                        state = SQUOTED
+                    else:
+                        out, state = ch, UNQUOTED
+            elif state == UNQUOTED:
+                if not backslash and space:
+                    done = True
+                else:
+                    out = ch
+            elif state == QUOTED:
+                if not backslash and ch == '"':
+                    done = True
+                else:
+                    out = ch
+            elif state == SQUOTED:
+                if ch == "'":
+                    done = True
+                else:
+                    out = ch
+            if done:
+                tokens.append("".join(parm))
+                parm, state = [], INITIAL
+            if backslash and out is not None and not (out in '\\"' or out == "\0" or out in _C_SPACE):
+                return None          # "Bad backslash usage": the line is ignored
+            backslash = False
+        if out is not None:
+            if out == "\0":
+                break
+            parm.append(out)
+        if ch == "\0":
+            break
+    if state != INITIAL:
+        return None                  # an unclosed quote: ignored
+    return tokens
 
 
 def sanitize_ovpn(text):
-    """``text`` without the forbidden directives (in either form, `up x`
-    or `--up x`), inline blocks (<ca>…</ca>) kept as they are. Returns
-    (lines, dropped directive names)."""
-    out, dropped, inline = [], [], None
-    for line in text.splitlines():
-        s = line.strip()
-        if inline is not None:
-            out.append(line)
-            if s.lower() == "</%s>" % inline:
-                inline = None
+    """``text`` without the forbidden directives, read the way OpenVPN 2.6
+    reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
+    blocks (<ca>…</ca>) kept as they are and ended where OpenVPN ends them.
+    Lines OpenVPN would split or ignore are dropped, so every line written
+    is parsed by OpenVPN exactly as here. Returns (lines, dropped names)."""
+    out, dropped = [], []
+    close, keep = None, True        # inside an inline block: its close tag
+    for i, line in enumerate(text.splitlines()):
+        if i == 0 and line.startswith("\ufeff"):
+            line = line[1:]
+        if "\0" in line or len(line.encode("utf-8")) >= OPENVPN_LINE_MAX:
+            dropped.append("(an overlong or binary line)")
             continue
-        if s.startswith("<") and s.endswith(">") and not s.startswith("</"):
-            inline = s[1:-1].strip().lower()
-            out.append(line)
+        if close is not None:
+            # OpenVPN ends the block at the first line that, leading
+            # spaces off, STARTS with the close tag.
+            if keep:
+                out.append(line)
+            if line.lstrip(_C_SPACE).startswith(close):
+                close = None
             continue
-        if not s or s[0] in "#;":
-            out.append(line)
+        tokens = openvpn_parse_line(line)
+        if not tokens:
+            if tokens is None:
+                dropped.append("(a line OpenVPN can't parse)")
+            else:
+                out.append(line)     # blank, or a comment
             continue
-        name = s.split(None, 1)[0].lower()
-        if name.startswith("--"):
+        name = tokens[0]
+        if len(name) >= 3 and name.startswith("--"):
             name = name[2:]
-        if name in OPENVPN_FORBIDDEN:
-            dropped.append(name)
-            continue
-        out.append(line)
+        inline = len(tokens) == 1 and len(name) >= 2 and name[0] == "<" and name[-1] == ">"
+        if inline:
+            name = name[1:-1]
+            close = "</%s>" % name
+        keep = name.lower() not in OPENVPN_FORBIDDEN
+        if keep:
+            out.append(line)
+        else:
+            dropped.append(name.lower())   # an inline one: the whole block
     return out, dropped
 
 
