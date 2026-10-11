@@ -4179,17 +4179,17 @@ final class RemoteHostWindow: NSWindow {
                             done(.fromServer(status: status, json: json))
                         }
                     },
-                    askSession: { [weak self] id, sid, confirmed, done in
+                    askSession: { id, sid, confirmed, done in
                         // Wait for the server's answer: an older server
-                        // doesn't know the route, and switching to the
-                        // session then read as sent while nothing was.
+                        // doesn't know the route. The user stays in the
+                        // code review, as on the local window: the
+                        // finding's row says it's in progress and opens
+                        // the task.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
                                   body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
-                            let reply = HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
+                            done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",
-                                comment: "finding → session failure"))
-                            if reply == .done { self?.selectSession(sid) }
-                            done(reply)
+                                comment: "finding → session failure")))
                         }
                     },
                     sessionChoices: {
