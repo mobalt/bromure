@@ -1583,8 +1583,18 @@ final class RemoteHostController {
 
     private func seg(_ id: Profile.ID) -> String { ControlClient.encodeSegment(id.uuidString) }
 
-    func startWorkspace(_ id: Profile.ID) {
+    /// Gone from the mirror (deleted here or on the host) once a snapshot
+    /// is in: its stage, pop-out and settings must go, and nothing may act
+    /// on it — a missing row otherwise reads as `.off`, with a Start button.
+    func isGone(_ id: Profile.ID) -> Bool { hasSnapshot && profilesByID[id] == nil }
+
+    /// Nothing for a workspace the mirror no longer has: an older host
+    /// minted a NEW workspace for an unknown id (named with it) and booted it.
+    @discardableResult
+    func startWorkspace(_ id: Profile.ID) -> Bool {
+        guard profilesByID[id] != nil else { return false }
         send("POST", "/vms", body: ["profile": id.uuidString, "detach": true])
+        return true
     }
     func shutdownWorkspace(_ id: Profile.ID) {
         send("DELETE", "/vms/\(seg(id))", body: ["action": "shutdown"])
@@ -6730,6 +6740,19 @@ final class RemoteHostWindow: NSWindow {
         mount(host)
     }
 
+    /// A deleted workspace leaves the stage, the selection, its pop-out and
+    /// its settings window — at once after our delete (no new revision), or
+    /// at the snapshot that drops it.
+    private func leaveGoneWorkspaces() {
+        if let id = shownDashboard?.id, controller.isGone(id) { clearVMDashboard() }
+        if let id = shownWorkspace, controller.isGone(id) { unmountTerminal() }
+        if let id = controller.listModel.selectedID, controller.isGone(id) {
+            controller.listModel.selectedID = nil
+        }
+        for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
+        for id in Array(settingsWindows.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+    }
+
     private func clearVMDashboard() {
         dashboardHost?.removeFromSuperview()
         dashboardHost = nil
@@ -7441,6 +7464,7 @@ final class RemoteHostWindow: NSWindow {
         if reconnectHost.isHidden == showOverlay {
             reconnectHost.isHidden = !showOverlay
         }
+        leaveGoneWorkspaces()
         guard controller.revision != lastRevision else { return }
         lastRevision = controller.revision
         // Test hook: auto-select a named workspace once it's running.

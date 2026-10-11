@@ -6507,11 +6507,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// or resolves a profile, applies `-v` mounts, persists it, then drives the
     /// normal `launch` path (so all the engine / token / boot wiring is shared)
     /// and optionally detaches for a headless `-d` run.
+    /// A `profile` that is a workspace id no workspace has: deleted, not a
+    /// name to mint a workspace under (a client still showing the deleted
+    /// one's Start button created a new workspace named with its id, and
+    /// booted it). The /vms route answers 404.
+    nonisolated static func unknownWorkspaceRefusal(_ ref: Any?) -> [String: Any]? {
+        guard let ref = ref as? String, UUID(uuidString: ref) != nil else { return nil }
+        return ["error": "No workspace with id \(ref) — it was deleted.", "notFound": true]
+    }
+
     @MainActor private func automationCreateVM(spec: [String: Any]) async -> [String: Any]? {
         // 1. Resolve an existing profile, or mint one on the fly.
         var profile: Profile
         if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
             profile = existing
+        } else if let refusal = Self.unknownWorkspaceRefusal(spec["profile"]) {
+            return refusal
         } else {
             let fallback = "cli-" + String(UUID().uuidString.prefix(8)).lowercased()
             let name = (spec["name"] as? String) ?? (spec["profile"] as? String) ?? fallback

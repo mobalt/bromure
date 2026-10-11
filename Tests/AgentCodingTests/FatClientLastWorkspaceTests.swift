@@ -68,4 +68,24 @@ struct FatClientLastWorkspaceTests {
         #expect(c.profile(for: id) == nil)
         #expect(c.listModel.profileRows.isEmpty)
     }
+
+    /// Finding (CWE-672): the deleted workspace's dashboard stayed on stage
+    /// (a missing row reads as `.off`), and its Start button POSTed /vms with
+    /// the deleted id — which the host took as a new workspace to mint and boot.
+    @Test("a deleted workspace is gone: Start sends nothing, and the host refuses its id")
+    func deletedCannotStart() {
+        let id = UUID(), other = UUID()
+        let c = controller(with: id)
+        #expect(!c.isGone(id))
+        c.workspaceDeleted(id)
+        #expect(c.isGone(id))
+        #expect(!c.startWorkspace(id))
+        // Nothing is "gone" before the first snapshot (still connecting).
+        let fresh = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        #expect(!fresh.isGone(other))
+        // The host: an unknown workspace id is a refusal, a name still mints.
+        #expect(ACAppDelegate.unknownWorkspaceRefusal(id.uuidString)?["notFound"] as? Bool == true)
+        #expect(ACAppDelegate.unknownWorkspaceRefusal("my-new-workspace") == nil)
+        #expect(ACAppDelegate.unknownWorkspaceRefusal(nil) == nil)
+    }
 }
