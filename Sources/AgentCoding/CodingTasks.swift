@@ -2020,8 +2020,8 @@ final class CodingTaskEngine {
             delegate.startProfileForAutomation(profileID, detached: detached)
         }
         defer { pendingBoots.remove(profileID) }
-        let deadline = Date().addingTimeInterval(Self.bootTimeout)
-        while Date() < deadline {
+        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting a workspace for a task")
+        while budget.remains {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if let why = delegate.unattendedLaunchRefusal(profileID) { return why }
             if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {

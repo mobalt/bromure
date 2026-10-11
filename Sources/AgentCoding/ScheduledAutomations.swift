@@ -1240,6 +1240,7 @@ final class ScheduledAutomationEngine {
     /// A fire more than this far past its time means the Mac was asleep or
     /// the app wasn't running — not merely a slow tick.
     static let lateGrace: TimeInterval = 180
+    /// Awake time a start waits for its workspace (see `BootBudget`).
     private static let bootTimeout: TimeInterval = 180
     private static let bootPollInterval: UInt64 = 5_000_000_000  // 5s in ns
     /// GitHub PR polling cadence. Generous for the API quota, and PR-review
@@ -1693,13 +1694,13 @@ final class ScheduledAutomationEngine {
             pendingBoots.insert(a.profileID)
             delegate.startProfileForAutomation(a.profileID)
         }
-        let deadline = now.addingTimeInterval(Self.bootTimeout)
+        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
         handedOver = true
         Task { [weak self] in
             defer { self?.releaseLaunch(a.id, hold) }
             var why = NSLocalizedString("The workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let self, let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
@@ -1803,8 +1804,8 @@ final class ScheduledAutomationEngine {
                 self.delegate?.startProfileForAutomation(a.profileID)
             }
             defer { self.pendingBoots.remove(a.profileID) }
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
-            while Date() < deadline {
+            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args) {
                 case .launched: launched(); return
@@ -1844,10 +1845,10 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
+            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
             var why = NSLocalizedString("The cloned workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
