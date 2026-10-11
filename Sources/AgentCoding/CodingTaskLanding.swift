@@ -191,6 +191,32 @@ extension CodingTaskEngine {
             + #"END { if (o) print "origin"; else if (f != "") print f }'"#
     }
 
+    /// A branch name safe to hand git — Bromure's commands and an agent's
+    /// brief alike: what `git check-ref-format --branch` accepts, and never
+    /// an option. Quoting stops the shell, not git: a parent branch named
+    /// `--upload-pack=./pwn.sh` (HEAD can point at one, and the worktree's
+    /// parent is read from HEAD) ran that program from `git pull --rebase`.
+    nonisolated static func isSafeBranchName(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 255, !s.hasPrefix("-"), s != "@",
+              !s.hasPrefix("/"), !s.hasSuffix("/"), !s.hasSuffix("."), !s.hasSuffix(".lock"),
+              !s.contains(".."), !s.contains("//"), !s.contains("@{") else { return false }
+        let banned = Set(" ~^:?*[\\")
+        guard !s.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || banned.contains(Character($0)) })
+        else { return false }
+        return !s.split(separator: "/").contains { $0.hasPrefix(".") || $0.hasSuffix(".lock") }
+    }
+
+    /// The first of these names that isn't a plain branch name, if any.
+    nonisolated static func unsafeBranch(_ names: String?...) -> String? {
+        names.compactMap { $0 }.first { !isSafeBranchName($0) }
+    }
+
+    nonisolated static func unsafeBranchWhy(_ name: String) -> String {
+        String(format: NSLocalizedString(
+            "“%@” isn't a plain branch name — git would read it as an option. Rename the branch, then retry.",
+            comment: "task landing: an option-shaped branch name"), name)
+    }
+
     /// `git remote`'s listing → the remote a landing pushes to.
     nonisolated static func pickRemote(_ listing: String) -> String? {
         let names = listing.split(whereSeparator: \.isNewline)
@@ -205,6 +231,7 @@ extension CodingTaskEngine {
     /// agent's) — except a squash of a single commit, which IS a ff.
     nonisolated static func landingCheckCommand(root: String, branch: String, target: String,
                                                 sourceDir: String?, mode: TaskLanding.Mode) -> String {
+        guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo failed" }
         var cmd = "r=\(q(root)); "
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
@@ -227,8 +254,8 @@ extension CodingTaskEngine {
         return cmd
             + "d=$(\(pinnedGit("\"$r\"")) worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); "
-            + "if [ -n \"$d\" ]; then \(pinnedGit("\"$d\"")) merge --ff-only -q \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
-            + "else \(pinnedGit("\"$r\"")) fetch -q . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
+            + "if [ -n \"$d\" ]; then \(pinnedGit("\"$d\"")) merge --ff-only -q -- \(q(branch)) >/dev/null 2>&1 && echo merged-now || echo dirty-target; "
+            + "else \(pinnedGit("\"$r\"")) fetch -q -- . \(q(branch + ":" + target)) >/dev/null 2>&1 && echo merged-now || echo failed; fi"
     }
 
     nonisolated static func parseLandingCheck(_ out: String?) -> LandingCheck {
@@ -253,6 +280,8 @@ extension CodingTaskEngine {
     /// too (fetched first).
     nonisolated static func landingVerifyCommand(root: String, branch: String, target: String,
                                                  sourceDir: String?, remote: String? = nil) -> String {
+        // A name git would read as an option is never looked up — nor LANDED.
+        guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo PENDING" }
         var cmd = ""
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
@@ -287,7 +316,7 @@ extension CodingTaskEngine {
     /// `behind` (the remote moved on: the agent pulls and merges first),
     /// `push-failed` or `fetch-failed` (the agent looks into it).
     nonisolated static func pushTargetCommand(root: String, target: String, remote: String) -> String {
-        guard isSafeRemoteName(remote) else { return "echo push-failed" }
+        guard isSafeRemoteName(remote), isSafeBranchName(target) else { return "echo push-failed" }
         let tracking = "refs/remotes/\(remote)/\(target)"
         return "r=\(q(root)); " + networkGitEnv
             + "if \(localCredentialHelperCheck("\"$r\"")); then echo push-failed; exit 0; fi; "
@@ -307,16 +336,18 @@ extension CodingTaskEngine {
         // The names go into commands the agent runs: quoted, and only a
         // safe remote (finding: an unchecked one was a command line).
         let rm = safeRemote(remote) ?? "origin"
-        let (qr, qt) = (q(rm), q(target))
+        // Pull and push re-read what follows `--` as options (pull hands it
+        // to fetch): the target goes as a full ref, which never parses as one.
+        let (qr, qtRef) = (q(rm), q("refs/heads/" + target))
         let report = viaBoard
             ? "Call the board_report_landing tool with status \"merged\" and a one-line summary once '\(rm)/\(target)' has it. If you can't push it, don't force anything: call board_report_landing with status \"blocked\" and the reason."
             : "Call `deliver` with one line saying it's pushed to '\(rm)/\(target)'. If you can't push it, don't force anything: `ask`, saying what's in the way."
         return """
             The user approved this task and '\(branch)' is merged into '\(target)' locally — now push '\(target)' to '\(rm)'. Do it yourself, in this session:
             1. `git fetch \(qr)`.
-            2. In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't checked out anywhere, check it out in a scratch worktree), bring in what '\(rm)/\(target)' has: `git pull --rebase \(qr) \(qt)`. Resolve every conflict keeping both sides' intent — never drop the other side's changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.
+            2. In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't checked out anywhere, check it out in a scratch worktree), bring in what '\(rm)/\(target)' has: `git pull --rebase -- \(qr) \(qtRef)`. Resolve every conflict keeping both sides' intent — never drop the other side's changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.
             3. If the project has quick checks (tests, a build, a linter), run them and fix what the merge broke. Don't go fixing unrelated failures.
-            4. Push: `git push \(qr) \(qt)`. Never force-push '\(target)'. If it's rejected because '\(rm)' moved again, repeat from step 1.
+            4. Push: `git push -- \(qr) \(qtRef)`. Never force-push '\(target)'. If it's rejected because '\(rm)' moved again, repeat from step 1.
             5. \(report)
             If git has no identity configured, commit with `git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask.
             """
@@ -332,12 +363,15 @@ extension CodingTaskEngine {
         // Every name the agent's commands carry is quoted; the remote is
         // a safe one or the default.
         let rm = safeRemote(remote)
-        let (qb, qt) = (q(branch), q(target))
+        // `--` ends git's options before each name; pull and push get the
+        // target as a full ref (pull hands its arguments on to fetch, which
+        // reads them as options again).
+        let (qb, qt, qtRef) = (q(branch), q(target), q("refs/heads/" + target))
         let identity = "If git has no identity configured, commit with "
             + "`git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask."
         let commit = "Commit anything still uncommitted on '\(branch)' with clear messages "
             + "(leave out build artifacts and scratch files)."
-        let rebase = "Rebase onto the latest '\(target)': `git rebase \(qt)`. Resolve every conflict "
+        let rebase = "Rebase onto the latest '\(target)': `git rebase -- \(qt)`. Resolve every conflict "
             + "keeping both sides' intent — never drop the other side's changes."
         let checks = "If the project has quick checks (tests, a build, a linter), run them and fix "
             + "what your change broke. Don't go fixing unrelated failures."
@@ -351,7 +385,7 @@ extension CodingTaskEngine {
                 1. \(commit)
                 2. \(rebase) (If '\(target)' tracks '\(r)', `git fetch \(q(r))` first and rebase onto '\(r)/\(target)'.)
                 3. \(checks)
-                4. Push: `git push -u \(q(r)) \(qb)` (after a rebase, `--force-with-lease` is fine: the branch is yours).
+                4. Push: `git push -u -- \(q(r)) \(qb)` (after a rebase, `--force-with-lease` is fine: the branch is yours).
                 5. Create it with `gh pr create --base \(qt)`: a concise imperative title, and a body with a '## Summary' (what changed and why) and a '## Test plan' (how it was verified).
                 6. \(report)
                 \(identity)
@@ -365,19 +399,19 @@ extension CodingTaskEngine {
         var steps = [commit]
         if let r = pushTo {
             steps.append("`git fetch \(q(r))`. If '\(r)/\(target)' has commits '\(target)' lacks, bring them into '\(target)' "
-                + "first, in its checkout: `git pull --rebase \(q(r)) \(qt)` (resolve conflicts keeping both sides' intent).")
+                + "first, in its checkout: `git pull --rebase -- \(q(r)) \(qtRef)` (resolve conflicts keeping both sides' intent).")
         }
         steps += [rebase, checks]
         if mode == .squash {
-            steps.append("Squash your work into one commit: `git reset --soft \(qt) && git commit -m \(q(title))`.")
+            steps.append("Squash your work into one commit: `git reset --soft \(qt) -- && git commit -m \(q(title))`.")
         }
         steps.append("Fast-forward '\(target)' to your branch: in the checkout where '\(target)' is checked out "
-            + "(`git worktree list` shows it), run `git merge --ff-only \(qb)`. If '\(target)' isn't checked out "
-            + "anywhere, run `git -C \(q(rootRepo)) fetch . \(q(branch + ":" + target))` instead. Never touch, stash or discard "
+            + "(`git worktree list` shows it), run `git merge --ff-only -- \(qb)`. If '\(target)' isn't checked out "
+            + "anywhere, run `git -C \(q(rootRepo)) fetch -- . \(q(branch + ":" + target))` instead. Never touch, stash or discard "
             + "uncommitted changes in that checkout — if git refuses because of them, stop and report blocked.")
         if let r = pushTo {
-            steps.append("Push it: `git push \(q(r)) \(qt)`. Never force-push '\(target)'. If it's rejected because "
-                + "'\(r)' moved on, `git pull --rebase \(q(r)) \(qt)` in the '\(target)' checkout, resolve any "
+            steps.append("Push it: `git push -- \(q(r)) \(qtRef)`. Never force-push '\(target)'. If it's rejected because "
+                + "'\(r)' moved on, `git pull --rebase -- \(q(r)) \(qtRef)` in the '\(target)' checkout, resolve any "
                 + "conflicts, re-run the checks and push again.")
         }
         steps.append(report)
@@ -508,7 +542,7 @@ extension CodingTaskEngine {
     nonisolated static func batchLandingPrompt(branches: [String], target: String,
                                                rootRepo: String, remote: String?) -> String {
         let rm = safeRemote(remote)
-        let (qt, list) = (q(target), branches.enumerated().map { i, b in
+        let (qtRef, list) = (q("refs/heads/" + target), branches.enumerated().map { i, b in
             "   \(i + 1). `\(q(b))`"
         }.joined(separator: "\n"))
         var steps: [String] = [
@@ -517,18 +551,18 @@ extension CodingTaskEngine {
         ]
         if let r = rm {
             steps.append("In the checkout where '\(target)' is checked out, bring in what '\(r)/\(target)' has "
-                + "first: `git fetch \(q(r))` then `git pull --rebase \(q(r)) \(qt)`.")
+                + "first: `git fetch \(q(r))` then `git pull --rebase -- \(q(r)) \(qtRef)`.")
         }
         steps.append("In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't "
             + "checked out anywhere, check it out in a scratch worktree of \(q(rootRepo))), merge the branches one "
-            + "after the other, in this order — `git merge --no-edit <branch>` for each, committing each merge "
+            + "after the other, in this order — `git merge --no-edit -- <branch>` for each, committing each merge "
             + "before the next. Resolve every conflict keeping both sides' intent — never drop the other side's "
             + "changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses "
             + "because of them, stop and report blocked.\n" + list)
         steps.append("Once they're all in, run the project's quick checks (tests, a build, a linter) once and fix "
             + "what the merges broke. Don't go fixing unrelated failures.")
         if let r = rm {
-            steps.append("Push it: `git push \(q(r)) \(qt)`. Never force-push '\(target)'. If it's rejected "
+            steps.append("Push it: `git push -- \(q(r)) \(qtRef)`. Never force-push '\(target)'. If it's rejected "
                 + "because '\(r)' moved on, pull --rebase again, re-run the checks and push again.")
         }
         steps.append("Call the board_report_landing tool once, with status \"merged\" and a one-line summary, when "
@@ -592,6 +626,10 @@ extension CodingTaskEngine {
             task = store.task(taskID) ?? task
         }
         let target = targetOverride ?? task.parentBranch
+        if let bad = Self.unsafeBranch(branch, target.flatMap { $0.isEmpty ? nil : $0 }) {
+            needsYou(taskID, Self.unsafeBranchWhy(bad))
+            return nil
+        }
         guard let target, !target.isEmpty, let root = task.rootRepo, !root.isEmpty else {
             if delegated {
                 return await handOff(.init(taskID: taskID, branch: branch, target: target ?? "",
@@ -696,6 +734,11 @@ extension CodingTaskEngine {
     private func handLandingToAgent(_ taskID: UUID, branch: String, target: String, root: String,
                                     pushedLocally: Bool = false, promptOverride: String? = nil) async {
         guard let delegate, let task = store.task(taskID), let mode = task.landing?.mode else { return }
+        // Every name the brief carries reaches git as typed by the agent.
+        if let bad = Self.unsafeBranch(branch, target.isEmpty ? nil : target) {
+            needsYou(taskID, Self.unsafeBranchWhy(bad))
+            return
+        }
         var remote: String?
         if mode == .pr {
             remote = await remoteName(task)

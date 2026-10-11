@@ -151,23 +151,23 @@ struct TaskLandingTests {
         let p = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
                                                rootRepo: "/home/ubuntu/repo", title: "Fix it",
                                                remote: nil, viaBoard: true)
-        #expect(p.contains("git rebase 'main'"))
-        #expect(p.contains("git merge --ff-only 'wt/fix'"))
-        #expect(p.contains("fetch . 'wt/fix:main'"))
+        #expect(p.contains("git rebase -- 'main'"))
+        #expect(p.contains("git merge --ff-only -- 'wt/fix'"))
+        #expect(p.contains("fetch -- . 'wt/fix:main'"))
         #expect(p.contains("Never touch, stash or discard uncommitted changes"))
         #expect(p.contains("board_report_landing") && p.contains("\"merged\"") && p.contains("\"blocked\""))
         #expect(p.contains("user.email=bromure@localhost"))
         #expect(!p.contains("git reset --soft"))
         let sq = CodingTaskEngine.landingPrompt(mode: .squash, branch: "wt/fix", target: "main",
                                                 rootRepo: "/r", title: "Fix \"it\"", remote: nil, viaBoard: true)
-        #expect(sq.contains("git reset --soft 'main' && git commit -m 'Fix \"it\"'"))
+        #expect(sq.contains("git reset --soft 'main' -- && git commit -m 'Fix \"it\"'"))
     }
 
     @Test("PR landing prompt: push to the remote, gh pr create against the target, report the URL")
     func prPrompt() {
         let p = CodingTaskEngine.landingPrompt(mode: .pr, branch: "wt/fix", target: "dev",
                                                rootRepo: "/r", title: "Fix", remote: "upstream", viaBoard: true)
-        #expect(p.contains("git push -u 'upstream' 'wt/fix'"))
+        #expect(p.contains("git push -u -- 'upstream' 'wt/fix'"))
         #expect(p.contains("gh pr create --base 'dev'"))
         #expect(p.contains("## Test plan"))
         #expect(p.contains("\"pr_opened\"") && p.contains("prURL"))
@@ -179,7 +179,7 @@ struct TaskLandingTests {
                                                        sourceDir: "/w", mode: .merge)
         #expect(cmd.contains("merge --ff-only"))
         #expect(cmd.contains("'branch refs/heads/main'"))
-        #expect(cmd.contains("fetch -q . 'wt/x:main'"))
+        #expect(cmd.contains("fetch -q -- . 'wt/x:main'"))
         #expect(cmd.contains("dirty-source"))
         let pr = CodingTaskEngine.landingCheckCommand(root: "/r", branch: "wt/x", target: "main",
                                                       sourceDir: nil, mode: .pr)
@@ -244,15 +244,15 @@ struct TaskLandingTests {
                                                rootRepo: "/r", title: "Fix", remote: "origin",
                                                viaBoard: true, push: true)
         #expect(p.contains("git fetch 'origin'"))
-        #expect(p.contains("git pull --rebase 'origin' 'main'"))
-        #expect(p.contains("git push 'origin' 'main'"))
+        #expect(p.contains("git pull --rebase -- 'origin' 'refs/heads/main'"))
+        #expect(p.contains("git push -- 'origin' 'refs/heads/main'"))
         #expect(p.contains("Never force-push"))
         #expect(p.contains("'origin/main'"))
         let local = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
                                                    rootRepo: "/r", title: "Fix", remote: "origin", viaBoard: true)
         #expect(!local.contains("git push"))
         let sync = CodingTaskEngine.pushPrompt(branch: "wt/fix", target: "main", remote: "origin", viaBoard: false)
-        #expect(sync.contains("git pull --rebase 'origin' 'main'") && sync.contains("git push 'origin' 'main'"))
+        #expect(sync.contains("git pull --rebase -- 'origin' 'refs/heads/main'") && sync.contains("git push -- 'origin' 'refs/heads/main'"))
         #expect(sync.contains("`deliver`"))
     }
 
@@ -515,17 +515,71 @@ struct LandingRemoteNameTests {
         #expect(!FileManager.default.fileExists(atPath: r.marker))
     }
 
+    /// Finding: the parent branch (read from HEAD, which can name
+    /// `refs/heads/--upload-pack=./pwn.sh`) went into the briefs' git
+    /// commands as an option.
+    @Test("only a plain branch name is a landing branch or target")
+    func safeBranchNames() {
+        for ok in ["main", "wt/fix-it-261010-2237", "release/5.2", "feature_x", "v1.2.3", "a-b"] {
+            #expect(CodingTaskEngine.isSafeBranchName(ok), "\(ok)")
+        }
+        for bad in ["--upload-pack=./pwn.sh", "--exec=./pwn.sh", "-x", "", "a b", "a..b", "a/", "/a", "a//b",
+                    "a.lock", ".hidden", "a/.b", "x@{1}", "@", "a~1", "a^", "a:b", "a?", "a*", "a[", "a\\b",
+                    "a\nb", "a."] {
+            #expect(!CodingTaskEngine.isSafeBranchName(bad), "\(bad)")
+        }
+        #expect(CodingTaskEngine.unsafeBranch("wt/x", "--exec=./pwn.sh") == "--exec=./pwn.sh")
+        #expect(CodingTaskEngine.unsafeBranch("wt/x", nil) == nil)
+        // Bromure's own commands never look such a name up.
+        #expect(CodingTaskEngine.landingCheckCommand(root: "/r", branch: "wt/x", target: "--upload-pack=./p",
+                                                     sourceDir: nil, mode: .merge) == "echo failed")
+        #expect(CodingTaskEngine.landingVerifyCommand(root: "/r", branch: "--exec=./p", target: "main",
+                                                      sourceDir: nil) == "echo PENDING")
+        #expect(CodingTaskEngine.pushTargetCommand(root: "/r", target: "--exec=./p", remote: "origin") == "echo push-failed")
+    }
+
+    @Test("the briefs end git's options before every name they pass")
+    func briefsEndOptions() {
+        let land = CodingTaskEngine.landingPrompt(mode: .squash, branch: "wt/x", target: "main", rootRepo: "/r",
+                                                  title: "T", remote: "origin", viaBoard: true, push: true)
+        for line in ["`git rebase -- 'main'`", "`git pull --rebase -- 'origin' 'refs/heads/main'`", "`git push -- 'origin' 'refs/heads/main'`",
+                     "`git merge --ff-only -- 'wt/x'`", "fetch -- . 'wt/x:main'`", "`git reset --soft 'main' -- &&"] {
+            #expect(land.contains(line), "\(line)")
+        }
+        let push = CodingTaskEngine.pushPrompt(branch: "wt/x", target: "main", remote: "origin", viaBoard: false)
+        #expect(push.contains("`git pull --rebase -- 'origin' 'refs/heads/main'`") && push.contains("`git push -- 'origin' 'refs/heads/main'`"))
+        let pr = CodingTaskEngine.landingPrompt(mode: .pr, branch: "wt/x", target: "main", rootRepo: "/r",
+                                                title: "T", remote: "origin", viaBoard: true)
+        #expect(pr.contains("`git push -u -- 'origin' 'wt/x'`") && pr.contains("`git rebase -- 'main'`"))
+        let batch = CodingTaskEngine.batchLandingPrompt(branches: ["wt/a", "wt/b"],
+                                                        target: "main", rootRepo: "/r", remote: "origin")
+        #expect(batch.contains("`git merge --no-edit -- <branch>`") && batch.contains("`git pull --rebase -- 'origin' 'refs/heads/main'`")
+                && batch.contains("`git push -- 'origin' 'refs/heads/main'`"))
+    }
+
+    @Test("after --, an option-shaped branch is a name: the brief's commands run nothing")
+    func endOfOptionsRunsNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        _ = try sh("cd \(r.root) && git push -q origin main")
+        for evil in ["--upload-pack=./pwn.sh", "--exec=./pwn.sh", "--receive-pack=./pwn.sh"] {
+            _ = try sh("cd \(r.root) && GIT_TERMINAL_PROMPT=0 git -c user.name=t -c user.email=t@t pull -q --rebase -- origin \(CodingTaskEngine.shellQuote("refs/heads/" + evil)); "
+                       + "git -c user.name=t -c user.email=t@t rebase -q -- \(CodingTaskEngine.shellQuote(evil)); "
+                       + "git push -q -- origin \(CodingTaskEngine.shellQuote("refs/heads/" + evil)); true")
+            #expect(!FileManager.default.fileExists(atPath: r.marker), "\(evil)")
+        }
+    }
+
     @Test("the agent's briefs quote every name and never carry an unsafe remote")
     func briefsQuoted() {
         let push = CodingTaskEngine.pushPrompt(branch: "wt/x", target: "main", remote: "origin;./pwn.sh", viaBoard: false)
         #expect(!push.contains("pwn.sh"))
-        #expect(push.contains("`git push 'origin' 'main'`"))
+        #expect(push.contains("`git push -- 'origin' 'refs/heads/main'`"))
         let land = CodingTaskEngine.landingPrompt(mode: .squash, branch: "wt/x", target: "main", rootRepo: "/r",
                                                   title: "Fix: $(touch /tmp/p) \"q\"", remote: "--exec=./pwn.sh",
                                                   viaBoard: true, push: true)
         #expect(!land.contains("--exec"))
         #expect(land.contains("git commit -m 'Fix: $(touch /tmp/p) \"q\"'"))
-        #expect(land.contains("`git merge --ff-only 'wt/x'`"))
+        #expect(land.contains("`git merge --ff-only -- 'wt/x'`"))
     }
 }
 
@@ -540,7 +594,7 @@ struct BatchLandingPromptTests {
         let a = p.range(of: "`'wt/a'`")!.lowerBound, b = p.range(of: "`'wt/b'`")!.lowerBound,
             c = p.range(of: "`'wt/c'`")!.lowerBound
         #expect(a < b && b < c)
-        #expect(p.contains("git merge --no-edit <branch>"))
+        #expect(p.contains("git merge --no-edit -- <branch>"))
         #expect(p.contains("run the project's quick checks (tests, a build, a linter) once"))
         #expect(p.components(separatedBy: "board_report_landing").count - 1 == 2)   // merged, or blocked
         #expect(!p.contains("git push") && !p.contains("git fetch"))
@@ -563,8 +617,8 @@ struct BatchLandingPromptTests {
     func briefPush() {
         let p = CodingTaskEngine.batchLandingPrompt(branches: ["wt/a", "wt/b"],
                                                     target: "main", rootRepo: "/r", remote: "origin")
-        #expect(p.contains("`git fetch 'origin'`") && p.contains("`git pull --rebase 'origin' 'main'`"))
-        #expect(p.contains("`git push 'origin' 'main'`"))
+        #expect(p.contains("`git fetch 'origin'`") && p.contains("`git pull --rebase -- 'origin' 'refs/heads/main'`"))
+        #expect(p.contains("`git push -- 'origin' 'refs/heads/main'`"))
         let bad = CodingTaskEngine.batchLandingPrompt(branches: ["wt/a", "wt/b"],
                                                       target: "main", rootRepo: "/r", remote: "--exec=./x")
         #expect(!bad.contains("--exec") && !bad.contains("git push"))

@@ -120,6 +120,12 @@ extension AgentSessionEngine {
                 return
             }
             let into = target ?? facts.parent
+            // Both names reach git, from this script and from the agent's
+            // brief: never one git would read as an option.
+            if let bad = CodingTaskEngine.unsafeBranch(branch, into) {
+                self.store.mutate(id) { $0.lastError = CodingTaskEngine.unsafeBranchWhy(bad) }
+                return
+            }
             self.store.mutate(id) {
                 $0.lastError = nil
                 $0.branchMerge = BranchMerge(target: into, squash: squash, removeAfter: removeAfter,
@@ -139,8 +145,8 @@ extension AgentSessionEngine {
             // (the same stand-in `git init` on the fly uses).
             let who = "who=; git -C \"$t\" config user.email >/dev/null || who='-c user.name=Bromure -c user.email=bromure@localhost'; "
             let mergeCmd = squash
-                ? "git $who -C \"$t\" merge --squash \(b) >/dev/null 2>&1 && git $who -C \"$t\" commit -q -m \"Squash-merge \(branch)\" >/dev/null 2>&1"
-                : "git $who -C \"$t\" merge --no-edit \(b) >/dev/null 2>&1"
+                ? "git $who -C \"$t\" merge --squash -- \(b) >/dev/null 2>&1 && git $who -C \"$t\" commit -q -m \"Squash-merge \(branch)\" >/dev/null 2>&1"
+                : "git $who -C \"$t\" merge --no-edit -- \(b) >/dev/null 2>&1"
             let script = tdir + who
                 + "if [ \"$(git -C \"$t\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" != \(t) ]; then echo elsewhere; "
                 + "elif [ -n \"$(git -C \(src) status --porcelain 2>/dev/null)\" ]; then echo dirty; "
@@ -159,8 +165,8 @@ extension AgentSessionEngine {
                 ? "'\(into)' isn't checked out anywhere, so it can't be merged into directly — check it out (in the main checkout, if that is free) first."
                 : "Merging it straight away hit a conflict (or the target checkout has uncommitted changes)."
             let step = squash
-                ? "`git -C \"$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0==\"branch refs/heads/\(into)\"{print w}')\" merge --squash \(branch)`, then commit it there as \"Squash-merge \(branch)\""
-                : "`git merge --no-edit \(branch)` in the checkout of '\(into)' (`git worktree list` shows where it is)"
+                ? "`git -C \"$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0==\"branch refs/heads/\(into)\"{print w}')\" merge --squash -- \(b)`, then commit it there as \"Squash-merge \(branch)\""
+                : "`git merge --no-edit -- \(b)` in the checkout of '\(into)' (`git worktree list` shows where it is)"
             let prompt = """
                 The user asked to \(squash ? "squash-merge" : "merge") this branch ('\(branch)') into '\(into)'. \(why)
                 1. Commit all the intended work on this branch with clear commit messages (leave out build artifacts and scratch files).
@@ -184,6 +190,9 @@ extension AgentSessionEngine {
         if let target { into = target }
         else if let facts = await branchFacts(s) { into = facts.parent }
         else { return "couldn't read the branch on its machine" }
+        if let bad = CodingTaskEngine.unsafeBranch(s.worktreeBranch, into) {
+            return "'\(bad)' isn't a plain branch name — git would read it as an option"
+        }
         store.mutate(id) {
             $0.branchMerge = BranchMerge(target: into, squash: squash, removeAfter: true,
                                          startedAt: Date(), phase: .requested, askedBy: askedBy)
@@ -289,11 +298,17 @@ extension AgentSessionEngine {
     func branchPullRequest(_ id: UUID, into target: String? = nil) {
         guard let s = store.session(id), let branch = s.worktreeBranch else { return }
         let into = target ?? s.branchParent ?? "main"
+        // The names go into commands the agent runs: plain branch names
+        // only, quoted.
+        if let bad = CodingTaskEngine.unsafeBranch(branch, into) {
+            store.mutate(id) { $0.lastError = CodingTaskEngine.unsafeBranchWhy(bad) }
+            return
+        }
         resume(id, message: """
             Open a pull request for this branch ('\(branch)') into '\(into)':
             1. Review the changes and commit anything outstanding with clear messages.
-            2. Push the branch: `git push -u origin \(branch)`.
-            3. Create the PR with `gh pr create --base \(into)` — a concise title, and a body that explains what changed and why, and how it was tested.
+            2. Push the branch: `git push -u -- origin \(Self.q(branch))`.
+            3. Create the PR with `gh pr create --base \(Self.q(into))` — a concise title, and a body that explains what changed and why, and how it was tested.
             4. Reply with the PR's URL.
             """)
     }
