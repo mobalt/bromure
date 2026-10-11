@@ -461,17 +461,29 @@ final class P2PBroker: @unchecked Sendable {
             return
         }
         // The relay permission needs the dialer's public IP; it arrives as a
-        // srflx trickle right after the offer (bounded wait).
-        var permitIP: String?
-        let deadline = Date().addingTimeInterval(6)
-        while permitIP == nil && Date() < deadline {
-            permitIP = session.candidates.first(where: { $0.kind == .srflx })?.ip
-            if permitIP == nil { try? await Task.sleep(nanoseconds: 150_000_000) }
+        // srflx trickle right after the offer (bounded wait). The dialer asks
+        // every relay, not only its nearest — the one we allocate on may be
+        // on another continent, and a network with several exits reaches it
+        // from another address: permitting only the first one seen left the
+        // relay dropping the dialer's connect (timeouts out of Asia to a US
+        // host). A short grace after the first collects the others; later
+        // ones are still permitted on the live listeners (below).
+        func srflxIPs() -> [String] {
+            var ips: [String] = []
+            for c in session.candidates where c.kind == .srflx && !ips.contains(c.ip) { ips.append(c.ip) }
+            return ips
         }
-        guard let permitIP else {
+        let deadline = Date().addingTimeInterval(6)
+        while srflxIPs().isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        guard !srflxIPs().isEmpty else {
             FatClientLog.log("p2p: dialer sent no srflx — relay rung skipped")
             return
         }
+        let grace = Date().addingTimeInterval(1.5)
+        while Date() < grace { try? await Task.sleep(nanoseconds: 150_000_000) }
+        let permitIPs = srflxIPs()
         // Allocate on the nearest relay (by measured RTT, cached per network path).
         // Built up first, then bound to a `let` — the listener starts inside a
         // @Sendable closure, which can't capture a still-mutable var.
@@ -479,10 +491,11 @@ final class P2PBroker: @unchecked Sendable {
         mutableCreds.urls = await orderedRelayURLs(creds.urls)
         let relayCreds = mutableCreds
         let started = await Self.blocking {
-            TurnRelayListener.start(creds: relayCreds, permitIP: permitIP, sshPort: sshPort)
+            TurnRelayListener.start(creds: relayCreds, permitIPs: permitIPs, sshPort: sshPort)
         }
         guard let (listener, info) = started else { return }
         register(listener: listener, for: grant.id)
+        var permitters: [(String) -> Void] = [{ listener.permit(ip: $0) }]
         if !Self.relayOnly {
             let guess = P2PCandidate(kind: .srflx, proto: .tcp, ip: info.mappedIP, port: sshPort)
             try? await session.send(.candidate, payload: P2PSignalPayload(candidate: guess), via: ch)
@@ -496,12 +509,25 @@ final class P2PBroker: @unchecked Sendable {
         // dialer prefers it when both connect.
         if P2PRelayConfig.udpRelayEnabled {
             let udpStarted = await Self.blocking {
-                TurnUDPRelayListener.start(creds: relayCreds, permitIP: permitIP, sshPort: sshPort)
+                TurnUDPRelayListener.start(creds: relayCreds, permitIPs: permitIPs, sshPort: sshPort)
             }
             if let (udpListener, udpInfo) = udpStarted {
                 register(listener: udpListener, for: grant.id)
+                permitters.append { udpListener.permit(ip: $0) }
                 try? await session.send(.candidate, payload: P2PSignalPayload(candidate: udpInfo.relay), via: ch)
             }
+        }
+        // A dialer address that arrives late (a far relay answered slowly)
+        // is permitted too, while the grant's signalling is open.
+        var known = Set(permitIPs)
+        let lateUntil = Date().addingTimeInterval(12)
+        while Date() < lateUntil {
+            for ip in srflxIPs() where !known.contains(ip) {
+                known.insert(ip)
+                FatClientLog.log("p2p: dialer also seen from \(ip) — permitted")
+                permitters.forEach { $0(ip) }
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
     }
 
@@ -768,17 +794,33 @@ final class P2PBroker: @unchecked Sendable {
             }
             FatClientLog.log("p2p: turn relays advertised: \(creds.urls.joined(separator: ", "))")
             let urls = await self?.orderedRelayURLs(creds.urls) ?? creds.urls
-            guard let stun = TurnRelayTransport.stunEndpoint(urls) else { return }
-            let pub = await Self.blocking {
-                TurnTCPClient.publicAddress(host: stun.host, port: stun.port, timeout: 4)
+            // Asked of EVERY relay, nearest first: the listener allocates on
+            // its own nearest, maybe on another continent, and a network with
+            // several exits (carrier NAT pools, per-destination routing) is
+            // seen there from another address — which the relay's permission
+            // must cover, or it silently drops our connect.
+            let stuns = TurnRelayTransport.stunEndpointsPerHost(urls)
+            guard !stuns.isEmpty else { return }
+            var sent = Set<String>()
+            await withTaskGroup(of: (String, (ip: String, port: Int)?).self) { group in
+                for stun in stuns {
+                    group.addTask {
+                        (stun.host, await Self.blocking {
+                            TurnTCPClient.publicAddress(host: stun.host, port: stun.port, timeout: 4)
+                        })
+                    }
+                }
+                for await (host, pub) in group {
+                    guard let pub else {
+                        FatClientLog.log("p2p: STUN binding to \(host) failed")
+                        continue
+                    }
+                    guard sent.insert(pub.ip).inserted else { continue }
+                    FatClientLog.log("p2p: our public address (via \(host)) is \(pub.ip):\(pub.port)")
+                    let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: pub.ip, port: pub.port)
+                    try? await session.send(.candidate, payload: P2PSignalPayload(candidate: srflx), via: ch)
+                }
             }
-            guard let pub else {
-                FatClientLog.log("p2p: STUN binding to \(stun.host):\(stun.port) failed")
-                return
-            }
-            FatClientLog.log("p2p: our public address is \(pub.ip):\(pub.port)")
-            let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: pub.ip, port: pub.port)
-            try? await session.send(.candidate, payload: P2PSignalPayload(candidate: srflx), via: ch)
         }
 
         // 4. Dial candidates as they arrive — the answer's host bundle first,

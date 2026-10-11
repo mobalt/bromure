@@ -311,7 +311,7 @@ struct TurnTCPTests {
         defer { sshd.stop() }
 
         let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
-                                              permitIP: "127.0.0.1", sshPort: sshd.port)
+                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port)
         let (listener, info) = try #require(started)
         defer { listener.stop() }
         #expect(info.relay.kind == .relay)
@@ -341,6 +341,47 @@ struct TurnTCPTests {
             got += buf[0..<n]
         }
         #expect(got == probe)
+    }
+
+    /// Board report: out of Asia to a US host, the relay rung timed out. The
+    /// dialer learned its address from ITS nearest relay, the listener
+    /// allocated on ITS own (another continent) and permitted only that one
+    /// address — a network with several exits reaches the far relay from
+    /// another, and the relay dropped it. Every address the dialer reports is
+    /// permitted now, and the dialer asks every relay.
+    @Test("the relay permits every address the dialer was seen from")
+    func everyDialerAddressPermitted() throws {
+        let turn = try #require(FakeCoturn(username: "1893456000:conn-under-test", password: "s3cr3t"))
+        defer { turn.stop() }
+        let sshd = try #require(EchoServer())
+        defer { sshd.stop() }
+        // As seen by a far relay first (another exit), then by this one.
+        let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
+                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port)
+        let (listener, info) = try #require(started)
+        defer { listener.stop() }
+        #expect(turn.permittedIPs.contains("198.51.100.9") && turn.permittedIPs.contains("127.0.0.1"))
+        // The dialer arrives from the second address and still gets through.
+        let peer = try #require(P2PTCP.connect(ip: info.relay.ip, port: info.relay.port, timeout: 5))
+        defer { Darwin.close(peer) }
+        let probe = [UInt8]("hello".utf8)
+        #expect(probe.withUnsafeBytes { Darwin.write(peer, $0.baseAddress, probe.count) } == probe.count)
+        var got = [UInt8](), buf = [UInt8](repeating: 0, count: 16)
+        let deadline = Date().addingTimeInterval(8)
+        while got.count < probe.count && Date() < deadline {
+            var pfd = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
+            guard poll(&pfd, 1, 500) > 0 else { continue }
+            let n = Darwin.read(peer, &buf, buf.count)
+            guard n > 0 else { break }
+            got += buf[0..<n]
+        }
+        #expect(got == probe)
+
+        // The dialer asks one STUN endpoint per relay host, nearest first.
+        let urls = ["stun:turn-a.sg.example:3478", "turns:turn-a.sg.example:5349?transport=tcp",
+                    "turn:turn-a.us.example:3478?transport=tcp", "stun:turn-a.eu.example:3478"]
+        #expect(TurnRelayTransport.stunEndpointsPerHost(urls).map { "\($0.host):\($0.port)" }
+                == ["turn-a.sg.example:3478", "turn-a.us.example:3478", "turn-a.eu.example:3478"])
     }
 
     @Test("an unpermitted peer never reaches the listener")

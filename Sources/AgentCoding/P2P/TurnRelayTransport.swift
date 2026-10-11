@@ -78,6 +78,14 @@ enum TurnRelayTransport {
         return preferredTCPEndpoint(urls)
     }
 
+    /// One STUN endpoint per distinct relay host, in `urls` order (nearest
+    /// first once ranked): its `stun:` URL, else its TCP turn endpoint.
+    static func stunEndpointsPerHost(_ urls: [String]) -> [(host: String, port: Int, transport: String?)] {
+        distinctHosts(urls).compactMap { h in
+            stunEndpoint(urls.filter { parseHostPort(fromURL: $0)?.host == h })
+        }
+    }
+
     /// Distinct relay hosts in first-seen order (a coturn `urls` list repeats
     /// each host across its stun/turn/turns entries).
     static func distinctHosts(_ urls: [String]) -> [String] {

@@ -352,7 +352,7 @@ final class TurnUDPRelayListener: @unchecked Sendable {
     private let maxPeers = 32
     var onStopped: (() -> Void)?
 
-    static func start(creds: TurnCredentials, permitIP: String, sshPort: Int)
+    static func start(creds: TurnCredentials, permitIPs: [String], sshPort: Int)
         -> (listener: TurnUDPRelayListener, started: Started)? {
         guard let (host, port) = TurnRelayTransport.preferredUDPEndpoint(creds.urls) else {
             FatClientLog.log("p2p: no turn:…?transport=udp URL in credentials")
@@ -369,15 +369,18 @@ final class TurnUDPRelayListener: @unchecked Sendable {
             client.close()
             return nil
         }
-        guard client.createPermission(peerIP: permitIP) else {
-            FatClientLog.log("p2p: TURN UDP permission for \(permitIP) refused")
+        // Every address the dialer was seen from (one per relay it asked):
+        // a network with several exits reaches THIS relay from any of them.
+        let permitted = permitIPs.filter { client.createPermission(peerIP: $0) }
+        guard !permitted.isEmpty else {
+            FatClientLog.log("p2p: TURN UDP permission for \(permitIPs.joined(separator: ", ")) refused")
             client.close()
             return nil
         }
         FatClientLog.log("p2p: TURN UDP relay allocated \(alloc.relayIP):\(alloc.relayPort) "
-            + "at \(host):\(port) (lifetime \(alloc.lifetime)s, permit \(permitIP))")
+            + "at \(host):\(port) (lifetime \(alloc.lifetime)s, permit \(permitted.joined(separator: ", ")))")
         let listener = TurnUDPRelayListener(client: client, sshPort: sshPort,
-                                            lifetime: alloc.lifetime, permitted: [permitIP])
+                                            lifetime: alloc.lifetime, permitted: permitted)
         client.onPeerDatagram = { [weak listener] key, ip, port, payload in
             listener?.handlePeer(key: key, ip: ip, port: port, payload: payload)
         }

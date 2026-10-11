@@ -401,7 +401,7 @@ final class TurnRelayListener: @unchecked Sendable {
     /// (≤ ~10 s), call on a background thread. The permission is in place
     /// before this returns, so the relay candidate can be advertised without
     /// racing the dialer's connect.
-    static func start(creds: TurnCredentials, permitIP: String, sshPort: Int)
+    static func start(creds: TurnCredentials, permitIPs: [String], sshPort: Int)
         -> (listener: TurnRelayListener, started: Started)? {
         guard let (host, port, tls) = TurnRelayTransport.preferredRelayEndpoint(creds.urls) else {
             FatClientLog.log("p2p: no turn(s):…?transport=tcp URL in credentials")
@@ -418,16 +418,19 @@ final class TurnRelayListener: @unchecked Sendable {
             client.close()
             return nil
         }
-        guard client.createPermission(peerIP: permitIP) else {
-            FatClientLog.log("p2p: TURN permission for \(permitIP) refused")
+        // Every address the dialer was seen from (one per relay it asked):
+        // a network with several exits reaches THIS relay from any of them.
+        let permitted = permitIPs.filter { client.createPermission(peerIP: $0) }
+        guard !permitted.isEmpty else {
+            FatClientLog.log("p2p: TURN permission for \(permitIPs.joined(separator: ", ")) refused")
             client.close()
             return nil
         }
         FatClientLog.log("p2p: TURN relay allocated \(alloc.relayIP):\(alloc.relayPort) "
             + "over \(tls ? "TLS" : "TCP") \(host):\(port) "
-            + "(lifetime \(alloc.lifetime)s, permit \(permitIP))")
+            + "(lifetime \(alloc.lifetime)s, permit \(permitted.joined(separator: ", ")))")
         let listener = TurnRelayListener(client: client, sshPort: sshPort,
-                                         lifetime: alloc.lifetime, permitted: [permitIP])
+                                         lifetime: alloc.lifetime, permitted: permitted)
         Thread.detachNewThread { listener.serviceLoop() }
         let relay = P2PCandidate(kind: .relay, proto: .tcp,
                                  ip: alloc.relayIP, port: alloc.relayPort, ttl: Int(alloc.lifetime))
