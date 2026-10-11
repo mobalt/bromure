@@ -12185,6 +12185,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// path. Builds the same guest command as the GUI request functions but
     /// writes straight to the session's outbox, so no window/pane is needed.
     @MainActor
+    /// The worktree branches of a workspace's open tabs — what an
+    /// automation run's slot is checked against. [] when the workspace isn't
+    /// running (nothing runs there), nil when its tabs can't be told (no
+    /// window has its entry).
+    func liveWorktreeBranches(profileID: UUID) -> [String]? {
+        guard runningSessions[profileID] != nil else { return [] }
+        guard let entry = unifiedWindow?.listModel.entries.first(where: { $0.id == profileID }) else { return nil }
+        return entry.model.tabs.compactMap(\.worktreeBranch)
+    }
+
     func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
         guard let p = profileByNameOrID(profileNameOrID),
               let session = runningSessions[p.id],

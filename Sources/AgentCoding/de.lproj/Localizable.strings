@@ -4140,3 +4140,10 @@
 "that finding is gone" = "diesen Befund gibt es nicht mehr";
 "couldn't start the fix" = "der Fix konnte nicht gestartet werden";
 "no Switchboard could be started" = "keine Schaltzentrale konnte gestartet werden";
+
+/* Automations: runs at a time */
+"Runs at a time" = "Läufe gleichzeitig";
+"No limit" = "Unbegrenzt";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "Viele Ereignisse auf einmal warten, bis sie an der Reihe sind – die ältesten zuerst: Das nächste startet, sobald ein Lauf fertig ist.";
+"Reviews at a time" = "Reviews gleichzeitig";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "Commits und Pull-Requests, die zusammen eintreffen, warten der Reihe nach – die ältesten zuerst –, statt alle gleichzeitig geprüft zu werden.";

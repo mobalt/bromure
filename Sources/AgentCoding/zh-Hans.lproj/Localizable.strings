@@ -4140,3 +4140,10 @@
 "that finding is gone" = "该发现项已不存在";
 "couldn't start the fix" = "无法开始修复";
 "no Switchboard could be started" = "无法启动总机";
+
+/* Automations: runs at a time */
+"Runs at a time" = "同时运行数";
+"No limit" = "不限";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "一批事件会按从旧到新的顺序排队：一次运行结束后才开始下一个。";
+"Reviews at a time" = "同时审查数";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "同时到达的提交和拉取请求会按从旧到新的顺序排队，而不是同时全部审查。";

@@ -214,6 +214,13 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
     /// `git clone` this into `repoPath` before a run when the folder isn't a
     /// repository yet (watch-owned automations — the checkout is theirs).
     var cloneURL: String?
+    /// Event triggers: at most this many runs at once (0 = no limit). A
+    /// burst — 20 commits pushed at once — is taken oldest first, the next
+    /// one when a run finishes, instead of 20 agents side by side.
+    var maxParallelRuns: Int
+
+    /// The choices the editors offer (0 = no limit).
+    static let parallelRunChoices = [1, 2, 3, 5, 10, 0]
 
     var createdAt: Date
 
@@ -242,6 +249,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
          chainedAutomationID: UUID? = nil,
          watchID: UUID? = nil,
          cloneURL: String? = nil,
+         maxParallelRuns: Int = 1,
          createdAt: Date = Date()) {
         self.id = id
         self.name = name
@@ -268,6 +276,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         self.chainedAutomationID = chainedAutomationID
         self.watchID = watchID
         self.cloneURL = cloneURL
+        self.maxParallelRuns = max(0, maxParallelRuns)
         self.createdAt = createdAt
     }
 
@@ -277,7 +286,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         case frequency, weekday, hour, minute, intervalMinutes
         case missedRunPolicy, tool, prompt, repoPath, closeWhenDone, createdAt
         case startWorkspaceIfNeeded, cloneWorkspaceFirst, chainedAutomationID
-        case watchID, cloneURL
+        case watchID, cloneURL, maxParallelRuns
     }
 
     init(from decoder: Decoder) throws {
@@ -311,6 +320,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         chainedAutomationID = try c.decodeIfPresent(UUID.self, forKey: .chainedAutomationID)
         watchID         = try c.decodeIfPresent(UUID.self, forKey: .watchID)
         cloneURL        = try c.decodeIfPresent(String.self, forKey: .cloneURL)
+        // One at a time unless the user chose otherwise — also for event
+        // automations saved before the choice existed.
+        maxParallelRuns = max(0, try c.decodeIfPresent(Int.self, forKey: .maxParallelRuns) ?? 1)
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 
@@ -1403,11 +1415,22 @@ final class ScheduledAutomationEngine {
             return
         }
 
-        // Fire order: oldest first, so a burst is handled in creation order.
+        // Fire order: oldest first, so a burst is handled in creation order —
+        // as many at once as the automation allows. The rest have no run
+        // record yet, so the next poll finds them again (sooner once a run
+        // finishes: finishRun re-polls).
+        var slots = a.maxParallelRuns == 0 ? Int.max
+            : max(0, a.maxParallelRuns - Self.activeRunCount(
+                store.runs, automationID: a.id, profileID: a.profileID, now: Date(),
+                liveBranches: { delegate.liveWorktreeBranches(profileID: $0) }))
         for item in items.sorted(by: { $0.createdAt < $1.createdAt })
         where a.filters.matches(item, kind: a.trigger) {
             let key = GitHubPRPoller.eventKey(item, kind: a.trigger)
             if processed.contains(key) { continue }   // already dispatched/blocked
+            guard slots > 0 else {
+                BACDebug.log("automation", "“\(a.name)”: \(a.maxParallelRuns) run(s) at a time — the rest wait for one to finish")
+                break
+            }
 
             // Enrich with comments (third-party text) BEFORE screening, so
             // the agent sees the discussion and the screen covers it too.
@@ -1435,6 +1458,7 @@ final class ScheduledAutomationEngine {
                 continue
             }
             BACDebug.log("automation", "“\(a.name)”: firing for \(label) \(enriched.displayKey)")
+            slots -= 1
             fire(a, now: Date(),
                  promptOverride: GitHubPRPoller.substitute(a.prompt, item: enriched,
                                                            kind: a.trigger),
@@ -1481,6 +1505,35 @@ final class ScheduledAutomationEngine {
                                      comment: "blocked automation run")
         }
         return nil
+    }
+
+    /// How long a launched run that never reported done still holds a slot.
+    nonisolated static let activeRunLimit: TimeInterval = 6 * 3600
+    /// A run's tab may take this long to appear after its launch.
+    nonisolated static let tabAppearGrace: TimeInterval = 10 * 60
+
+    /// Runs of `automationID` still working: launched, not done, and — when
+    /// the workspace's tabs are known — with its tab still up (a closed or
+    /// crashed one frees its slot). `liveBranches`: the worktree branches of
+    /// a workspace's open tabs, nil when that can't be told.
+    nonisolated static func activeRunCount(_ runs: [AutomationRunRecord], automationID: UUID, profileID: UUID,
+                                           now: Date, liveBranches: (UUID) -> [String]?) -> Int {
+        runs.filter { run in
+            guard run.automationID == automationID, run.outcome == .launched, run.completedAt == nil,
+                  now.timeIntervalSince(run.firedAt) < activeRunLimit else { return false }
+            if now.timeIntervalSince(run.firedAt) < tabAppearGrace { return true }
+            guard let slug = run.branchSlug, let pid = Optional(run.runProfileID ?? profileID),
+                  let live = liveBranches(pid) else { return true }
+            return live.contains { AutomationBoard.branchMatches($0, slug: slug) }
+        }.count
+    }
+
+    /// Next tick polls this event automation (a run of it finished).
+    private func repollSoon(_ automationID: UUID) {
+        guard let a = store.automation(automationID), a.trigger != .schedule, a.trigger != .afterAutomation,
+              var state = store.pollState(for: automationID) else { return }
+        state.lastPolledAt = nil
+        store.setPollState(state, for: automationID)
     }
 
     /// Manual "Run now" — the same path as a scheduled fire; the schedule is
@@ -1857,6 +1910,9 @@ final class ScheduledAutomationEngine {
             if let done = self.store.runs.first(where: { $0.id == runID }) {
                 self.onRunCompleted?(done)
             }
+            // A slot is free: an event automation looks for what waits on
+            // the next tick, not a whole poll interval later.
+            self.repollSoon(automationID)
 
             // Chained automations fire on the finish itself, independent of
             // closeWhenDone (leaving the tab open for inspection shouldn't

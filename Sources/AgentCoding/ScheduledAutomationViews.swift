@@ -1266,6 +1266,17 @@ struct AutomationEditorView: View {
              : NSLocalizedString(
                 "The existing open backlog is processed once, too, then new items as they appear.",
                 comment: ""))
+        Picker(NSLocalizedString("Runs at a time", comment: "automation editor: event triggers' parallelism"),
+               selection: $draft.maxParallelRuns) {
+            ForEach(ScheduledAutomation.parallelRunChoices, id: \.self) { n in
+                Text(n == 0 ? NSLocalizedString("No limit", comment: "automation editor: runs at a time")
+                            : String(n)).tag(n)
+            }
+        }
+        .fixedSize()
+        hint(NSLocalizedString(
+            "A burst of events waits its turn, oldest first: the next one starts when a run finishes.",
+            comment: "automation editor: runs at a time"))
     }
 
     @ViewBuilder

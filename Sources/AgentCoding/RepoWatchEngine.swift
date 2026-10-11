@@ -100,6 +100,7 @@ final class RepoWatchEngine {
             cloneWorkspaceFirst: false,
             watchID: w.id,
             cloneURL: w.cloneURL,
+            maxParallelRuns: w.maxParallelScans,
             createdAt: createdAt ?? w.createdAt)
         switch scan {
         case .fullScan:
