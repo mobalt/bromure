@@ -37,6 +37,34 @@ struct AutomationParallelismTests {
         #expect(ScheduledAutomationEngine.activeRunCount(runs, automationID: UUID(), profileID: pid, now: now) { _ in nil } == 0)
     }
 
+    /// Finding (CWE-770): a watch scan records its run only after its clone
+    /// (up to 15 min) or a boot — polls in between found no record, the cap
+    /// counted nothing, and the same commit fired again and again.
+    @Test("a launch still cloning or booting holds its slot and its event")
+    @MainActor func launchUnderWayHolds() {
+        let store = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-\(UUID().uuidString).json"))
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        let held = engine.holdLaunch(aid, "commit:abc")
+        let other = engine.holdLaunch(aid, nil)
+        #expect(engine.launchesUnderWay(aid) == ["commit:abc", other])
+        #expect(engine.launchesUnderWay(UUID()).isEmpty)
+        engine.releaseLaunch(aid, held)
+        #expect(engine.launchesUnderWay(aid) == [other])
+        engine.releaseLaunch(aid, other)
+        #expect(engine.launchesUnderWay(aid).isEmpty)
+    }
+
+    @Test("a run's tab grace starts when it was queued, not when its clone or boot began")
+    func graceFromQueued() {
+        var r = run(15 * 60, slug: "late")          // fired 15 min ago…
+        r.queuedAt = now.addingTimeInterval(-60)    // …queued a minute ago, after its clone
+        // Its tab isn't in the roster yet: it still counts.
+        #expect(ScheduledAutomationEngine.activeRunCount([r], automationID: aid, profileID: pid, now: now) { _ in [] } == 1)
+        r.queuedAt = nil
+        #expect(ScheduledAutomationEngine.activeRunCount([r], automationID: aid, profileID: pid, now: now) { _ in [] } == 0)
+    }
+
     @Test("one at a time by default — also for automations and watches saved before the choice")
     func defaults() throws {
         let a = ScheduledAutomation(profileID: pid, trigger: .githubCommit)
