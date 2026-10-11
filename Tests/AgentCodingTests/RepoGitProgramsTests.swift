@@ -84,4 +84,33 @@ struct RepoGitProgramsTests {
         // A folder that's gone still reads as clean.
         #expect(sh(TaskLitter.status("'\(home)/nope'")).isEmpty)
     }
+
+    /// Finding: `--ignore-submodules=dirty` hid an edited submodule — the
+    /// session list said "no changes yet", Discard said nothing would be
+    /// lost, and removing the worktree deleted that work.
+    @Test("an edited submodule reads as a change, and its own programs still don't run")
+    @MainActor func dirtySubmoduleCounts() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgs-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/.bromure/worktrees/repo/x"
+        let marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); chmod +x \(pwn); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a; "
+               + "git -c protocol.file.allow=always submodule -q add \(home)/sub sub; git commit -qm sub")
+        // Clean so far.
+        func count() -> String {
+            sh(WorktreeEntry.guestCommand, home: home).split(separator: "\t").dropFirst(5).first.map(String.init) ?? "?"
+        }
+        #expect(count() == "0")
+        // Edit a tracked file in the submodule, with a clean filter there.
+        _ = sh("cd \(root)/sub; echo secret-edit >> f; echo '* filter=evil' > \"$(git rev-parse --git-dir)/info/attributes\"; "
+               + "git config filter.evil.clean \(pwn)")
+        #expect(count() == "1")
+        #expect(sh(TaskLitter.status("'\(root)'")).contains(" M sub"))
+        #expect(sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])).contains("k\t1"))
+        #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
+                                                   squash: false)).contains("dirty"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
 }

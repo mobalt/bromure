@@ -477,7 +477,7 @@ final class FileExplorerModel {
             + "for d in \(probe); do git -C \"$d\" rev-parse --show-toplevel 2>/dev/null; done | sort -u "
             + "| while IFS= read -r r; do [ -n \"$r\" ] || continue; printf '\\002%s\\001' \"$r\"; "
             // The repository's own programs never run (RepoGitPrograms).
-            + "\(RepoGitPrograms.off("\"$r\""))git -C \"$r\" status --porcelain -z --ignore-submodules=dirty 2>/dev/null; done; true; } | base64 -w0"
+            + "\(RepoGitPrograms.off("\"$r\""))git -C \"$r\" status --porcelain -z --ignore-submodules=dirty 2>/dev/null; \(RepoGitPrograms.dirtySubmodules("\"$r\"", nul: true))done; true; } | base64 -w0"
         do {
             let out = try await exec(cmd)
             guard generation == refreshGeneration, root == self.root else { return }

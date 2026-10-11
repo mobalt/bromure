@@ -48,6 +48,24 @@ enum RepoGitPrograms {
     /// edits be discarded as empty).
     static let statusFailed = " || echo '!! (git status failed)'"
 
+    /// Shell printing ` M <path>` (NUL-ended with `nul`, else newline-ended)
+    /// for every checked-out submodule under `dir` (already shell-quoted, or
+    /// a "$var") with uncommitted work, nested ones included. Bromure's
+    /// statuses pass `--ignore-submodules=dirty`, so git never reads a
+    /// submodule under the PARENT's switched-off programs — which hid an
+    /// edited submodule: the checkout read as clean ("nothing is lost") and
+    /// discarding it deleted that work. Each submodule's status runs in the
+    /// submodule, under its own `off`. Paths are relative to `dir`.
+    static func dirtySubmodules(_ dir: String, nul: Bool = false) -> String {
+        let end = nul ? "\\0" : "\\n"
+        return "_bsl() { git -c core.quotePath=false -C \"$1\" ls-files --stage 2>/dev/null "
+            + "| awk -F'\\t' '$1 ~ /^160000 /{print $2}'; }; "
+            + "_bsd() { [ -n \"$( ( cd \"$1\" || exit; \(off("."))git status --porcelain --ignore-submodules=dirty ) 2>/dev/null | head -c1)\" ] "
+            + "&& return 0; _bsl \"$1\" | { while IFS= read -r _s; do [ -e \"$1/$_s/.git\" ] && _bsd \"$1/$_s\" && exit 0; done; exit 1; }; }; "
+            + "_bsl \(dir) | while IFS= read -r _s; do [ -e \(dir)/\"$_s/.git\" ] && _bsd \(dir)/\"$_s\" "
+            + "&& printf ' M %s\(end)' \"$_s\"; done; "
+    }
+
     /// The flags a diff Bromure runs itself carries: no external diff, no
     /// textconv program, no recursion into a submodule (its own config).
     static let diffFlags = "--no-ext-diff --no-textconv --ignore-submodules=dirty"

@@ -23,7 +23,7 @@ enum TaskLitter {
     /// A status that fails says so (`RepoGitPrograms.statusFailed`): it
     /// isn't a clean tree. A folder that's gone reads as clean, as before.
     static func status(_ quotedDir: String) -> String {
-        "( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed) ) | \(statusFilter)"
+        "( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
     }
 }
 
@@ -98,7 +98,7 @@ struct TaskReviewData: Equatable, Sendable {
         // What the repository's config names never runs (RepoGitPrograms).
         return "\(enter); \(RepoGitPrograms.off("."))\(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
-            + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); } | \(TaskLitter.statusFilter) | head -100; "
+            + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | \(TaskLitter.statusFilter) | head -100; "
             + "echo ===DIFF===; \(diff) | head -c 600000; true"
     }
 

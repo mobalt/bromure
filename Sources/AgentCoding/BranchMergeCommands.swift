@@ -57,7 +57,7 @@ enum BranchMergeCommands {
         // merge driver (RepoGitPrograms) — for the target's checkout too.
         return tdir + RepoGitPrograms.off(r, q(sourceDir), "\"$t\"") + who
             + "if [ \"$(git -C \"$t\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" != \(t) ]; then echo elsewhere; "
-            + "elif [ -n \"$(git -C \(q(sourceDir)) status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed))\" ]; then echo dirty; "
+            + "elif [ -n \"$( { git -C \(q(sourceDir)) status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(q(sourceDir))) } )\" ]; then echo dirty; "
             + "elif \(mergeCmd); then echo merged; "
             + "else git -C \"$t\" merge --abort >/dev/null 2>&1; git -C \"$t\" reset -q --merge >/dev/null 2>&1; echo conflict; fi"
     }

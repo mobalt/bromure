@@ -1830,7 +1830,7 @@ final class AgentSessionEngine {
             let q = "'" + t.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
             let epoch = Int(t.since.timeIntervalSince1970)
             return "p=\(q); if git -C \"$p\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
-                + "r=$( \(RepoGitPrograms.off("\"$p\""))git -C \"$p\" status --porcelain --ignore-submodules=dirty -- . 2>/dev/null\(RepoGitPrograms.statusFailed) | head -c1); else "
+                + "r=$( { \(RepoGitPrograms.off("\"$p\""))git -C \"$p\" status --porcelain --ignore-submodules=dirty -- . 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules("\"$p\"")) } | head -c1); else "
                 + "r=$(timeout 8 find \"$p\" -mindepth 1 \\( -name '.*' -o -name node_modules \\) -prune "
                 + "-o -type f -newermt '@\(epoch)' -print -quit 2>/dev/null); fi; "
                 + "printf '%s\\t%s\\n' '\(t.key)' \"${r:+1}\""
