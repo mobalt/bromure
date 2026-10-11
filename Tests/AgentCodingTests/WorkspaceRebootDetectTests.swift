@@ -46,4 +46,39 @@ struct WorkspaceRebootDetectTests {
         #expect(!RemoteHostController.uptimeDidReset(prevBoot: prev,
                                                      newBoot: prev.addingTimeInterval(-100)))
     }
+
+    /// Board report: over a slow P2P relay the boot screen flashed every few
+    /// seconds — a reply arriving 20 s+ late made `now − uptime` jump forward,
+    /// read as a reboot. The host's own boot stamp doesn't move with latency.
+    @Test("The host's boot stamp: only a new boot moves it, however late the reply")
+    func bootStamp() {
+        let booted = now.timeIntervalSince1970 - 3600
+        #expect(!RemoteHostController.bootStampMoved(prev: booted, new: booted))
+        #expect(!RemoteHostController.bootStampMoved(prev: booted, new: booted - 30))
+        #expect(RemoteHostController.bootStampMoved(prev: booted, new: now.timeIntervalSince1970))
+    }
+
+    @Test("A late reply from a host that stamps its boot is not a reboot")
+    @MainActor func lateReplyNotReboot() {
+        let id = UUID()
+        let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        var reboots = 0
+        c.onWorkspaceRebooted = { _ in reboots += 1 }
+        let booted = Date().timeIntervalSince1970 - 3600
+        func push(uptime: Int, bootedAt: Double?) {
+            var vm: [String: Any] = ["id": id.uuidString, "state": "running", "uptimeSeconds": uptime,
+                                     "tabs": [["index": 0, "title": "t", "active": true]]]
+            if let bootedAt { vm["bootedAt"] = bootedAt }
+            c.applyPushedSnapshot(["workspaces": [["id": id.uuidString, "name": "w", "tool": "claude",
+                                                   "authMode": "token", "state": "running"]],
+                                   "vms": [vm], "workspacesListed": true])
+        }
+        push(uptime: 3600, bootedAt: booted)
+        // Built 40 s before it arrived: the uptime reads 40 s short.
+        push(uptime: 3560, bootedAt: booted)
+        #expect(reboots == 0)
+        // A real reboot moves the stamp.
+        push(uptime: 5, bootedAt: Date().timeIntervalSince1970 - 5)
+        #expect(reboots == 1)
+    }
 }

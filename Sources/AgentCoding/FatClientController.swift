@@ -118,6 +118,15 @@ final class RemoteHostController {
     nonisolated static func uptimeDidReset(prevBoot: Date, newBoot: Date) -> Bool {
         newBoot.timeIntervalSince(prevBoot) > 20
     }
+
+    /// The host's own boot stamp (`bootedAt`, its clock) moved forward: a new
+    /// boot. Exact, unlike the uptime guess above — a reply that arrives late
+    /// (a slow P2P relay: 20 s and more) made `now − uptime` jump forward and
+    /// read as a reboot every few seconds (boot screen, browser rebuilt).
+    /// Only hosts that don't send the stamp fall back to the guess.
+    nonisolated static func bootStampMoved(prev: Double, new: Double) -> Bool {
+        new - prev > 1
+    }
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -152,6 +161,8 @@ final class RemoteHostController {
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
+    /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
+    private var bootStamps: [Profile.ID: Double] = [:]
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -922,7 +933,7 @@ final class RemoteHostController {
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
-        var rebootedIDs = Set<Profile.ID>()   // uptime reset since last poll → the VM rebooted
+        var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard
@@ -941,11 +952,18 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+            let stamp = vm["bootedAt"] as? Double
+            if let stamp {
+                if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
+                    rebootedIDs.insert(id)
+                }
+                bootStamps[id] = stamp
+            }
             if let up = vm["uptimeSeconds"] as? Int {
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
                 if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
-                        rebootedIDs.insert(id)
+                        if stamp == nil { rebootedIDs.insert(id) }
                         bootTimes[id] = derived
                     } else if abs(prev.timeIntervalSince(derived)) >= 3 {
                         bootTimes[id] = derived   // minor drift correction
@@ -1004,6 +1022,7 @@ final class RemoteHostController {
         // gone. Filtering by liveIDs here would erase the pre-reboot boot time
         // and the return would look like a first sighting (missed reboot).
         bootTimes = bootTimes.filter { profilesByID[$0.key] != nil }
+        bootStamps = bootStamps.filter { profilesByID[$0.key] != nil }
         mounts = mounts.filter { liveIDs.contains($0.key) }
         // A rebooted workspace's browser is bound to the old boot's network
         // (its IP inside the SOCKS-routed subnet); the window rebuilds it so the
@@ -3098,7 +3117,11 @@ final class RemoteHostWindow: NSWindow {
             // they just approved) — re-show the boot dive screen so the reboot
             // reads as progress, not a frozen pane. Cleared when the fresh
             // roster lands (onTabsApplied).
-            if self.shownWorkspace == id { self.showBootCue(for: id) }
+            // Not over a live roster: that VM is up (its terminal is right
+            // there), whatever the reboot guess said.
+            if self.shownWorkspace == id, self.controller.tabsModel(for: id)?.rosterLive != true {
+                self.showBootCue(for: id)
+            }
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)

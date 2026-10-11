@@ -6203,6 +6203,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                // The boot itself, on this host's clock: a client tells a
+                // reboot by this changing — never by uptime against its own
+                // clock, which a late reply (a slow relay) moved forward.
+                "bootedAt": s.startedAt.timeIntervalSince1970,
                 "ip": s.lastIP ?? "",
                 "mounts": s.profile.folderPaths,
                 "tabs": tabs,
