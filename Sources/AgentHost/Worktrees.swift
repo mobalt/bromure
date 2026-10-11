@@ -184,7 +184,7 @@ enum Worktrees {
             + "p=\(q(parent ?? "")); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD); "
             + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
             + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-            + "c=$(git status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
+            + "c=$( { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); } | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
         guard let out = sh(script) else { return nil }
         let f = out.split(separator: "|").map(String.init)
         guard f.count == 3 else { return nil }

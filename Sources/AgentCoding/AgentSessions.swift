@@ -137,7 +137,7 @@ struct WorktreeEntry: Identifiable, Equatable, Sendable {
     && disp=$(awk -F"$(printf '\\037')" -v b="$b" '$1==b{print $3}' "$reg" | tail -1); \
     [ -n "$p" ] || p=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null); \
     a=$(git rev-list --count "$p..HEAD" 2>/dev/null || echo 0); \
-    c=$( \(RepoGitPrograms.off("."))git status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' '); \
+    c=$( { \(RepoGitPrograms.off("."))git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); } | wc -l | tr -d ' '); \
     t=$(git log -1 --format=%ct 2>/dev/null || echo 0); \
     printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$d" "$r" "$b" "$p" "$a" "$c" "$t" "$disp"; \
     done; true

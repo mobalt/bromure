@@ -12,7 +12,11 @@ import Foundation
 /// set in the LOCAL or WORKTREE config (includes count as local) — `git
 /// status` runs a clean filter, a checkout or merge a smudge one, on
 /// attributes `.git/info/attributes` or an incoming `.gitattributes` can
-/// name. The user's own (global, system) drivers — git-lfs — still apply.
+/// name. The user's own (global, system) drivers — git-lfs — still apply,
+/// even where the local config sets the same key (`git lfs install
+/// --local`): such a key is pinned to the global/system value. With none, a
+/// filter's clean/smudge becomes `cat` — never blank, which fails a
+/// `filter.<x>.required` filter and with it `git status` and the merge.
 /// A diff runs its programs only with `--no-ext-diff --no-textconv` off.
 enum RepoGitPrograms {
     /// The config keys whose value is a program git runs on its own.
@@ -31,9 +35,18 @@ enum RepoGitPrograms {
             + "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null "
             + "GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false; _bn=2; "
             + "set -f; _bo=$IFS; IFS=$(printf '\\n_'); IFS=${IFS%_}; "
-            + "for _bx in $_bk; do export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=\"; _bn=$((_bn + 1)); done; "
+            + "for _bx in $_bk; do "
+            + #"_bv=$(cd / && { git config --global --get "$_bx" || git config --system --get "$_bx"; } 2>/dev/null) "#
+            + "|| case \"$_bx\" in (filter.*.clean|filter.*.smudge) _bv=cat ;; (*) _bv= ;; esac; "
+            + "export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=$_bv\"; _bn=$((_bn + 1)); done; "
             + "IFS=$_bo; set +f; export GIT_CONFIG_COUNT=$_bn; "
     }
+
+    /// Appended to a `git status --porcelain` Bromure reads as "dirty or
+    /// clean": a status that FAILS prints this line, so a failure is never
+    /// the empty output a clean tree gives (which let a worktree holding
+    /// edits be discarded as empty).
+    static let statusFailed = " || echo '!! (git status failed)'"
 
     /// The flags a diff Bromure runs itself carries: no external diff, no
     /// textconv program, no recursion into a submodule (its own config).

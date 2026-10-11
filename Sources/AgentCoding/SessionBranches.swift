@@ -61,7 +61,7 @@ extension AgentSessionEngine {
                 + "p=\(parent); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
                 + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
                 + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-                + "c=$(git status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' '); "
+                + "c=$( { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); } | wc -l | tr -d ' '); "
                 + "echo \"$a $b $c|$r|$p\" ); "
         }
         guard let out = try? await delegate.guestExec(profileID: profileID, command: script, timeout: 20) else { return }

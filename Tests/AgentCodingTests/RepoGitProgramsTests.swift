@@ -47,4 +47,41 @@ struct RepoGitProgramsTests {
         #expect(roster.contains(root))
         #expect(!FileManager.default.fileExists(atPath: marker))
     }
+
+    /// Finding (CWE-754): a local filter key was blanked, which hid the
+    /// user's global driver of the same name (`git lfs install --local`) and
+    /// failed a `required` filter — `git status` exited 128 with no output,
+    /// which read as a clean tree, and the worktree was discarded as empty.
+    @Test("a local required filter: the global one is kept, or cat; a failing status is never clean")
+    func requiredFilterKeepsStatus() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgf-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", globalRan = home + "/GLOBAL"
+        let pwn = home + "/pwn.sh", global = home + "/global.sh", gcfg = home + "/gitconfig"
+        _ = sh("set -e; mkdir -p \(root); "
+               + "printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); "
+               + "printf '#!/bin/sh\\ntouch \(globalRan)\\ncat\\n' > \(global); chmod +x \(pwn) \(global); "
+               + "cd \(root); git init -q -b main; echo '*.bin filter=x' > .gitattributes; echo a > a.bin; "
+               + "echo p > plain.txt; git add .; git commit -qm a; "
+               + "git config filter.x.clean \(pwn); git config filter.x.smudge \(pwn); git config filter.x.required true; "
+               // Same size: git has to read (clean) a.bin to tell.
+               + "echo c > a.bin; echo q >> plain.txt")
+        // No global driver: the local one is cat, the status still reads.
+        let bare = sh(TaskLitter.status("'\(root)'"))
+        #expect(bare.contains(" M plain.txt") && bare.contains(" M a.bin"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // A global driver of the same name: that one runs, never the local one.
+        _ = sh("printf '[filter \"x\"]\\n\\tclean = \(global)\\n\\tsmudge = \(global)\\n' > \(gcfg)")
+        let withGlobal = sh("export GIT_CONFIG_GLOBAL=\(gcfg); " + TaskLitter.status("'\(root)'"))
+        #expect(withGlobal.contains(" M plain.txt"))
+        #expect(FileManager.default.fileExists(atPath: globalRan))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // A status that fails is not a clean tree, so the worktree isn't "empty".
+        _ = sh("echo garbage > \(root)/.git/index")
+        #expect(!sh(TaskLitter.status("'\(root)'")).isEmpty)
+        #expect(!sh(CodingTaskEngine.emptyBranchCommand(root: root, branch: "main", parent: "main",
+                                                         worktreeDir: root)).contains("EMPTY"))
+        // A folder that's gone still reads as clean.
+        #expect(sh(TaskLitter.status("'\(home)/nope'")).isEmpty)
+    }
 }
