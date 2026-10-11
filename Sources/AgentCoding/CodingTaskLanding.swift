@@ -489,7 +489,7 @@ extension CodingTaskEngine {
             store.mutate(lead.taskID) { $0.landing?.batch = Array(followers) }
             let pushes = leadTask.landing?.pushes == true
             let prompt = Self.batchLandingPrompt(
-                branches: hs.map { ($0.branch, store.task($0.taskID)?.title ?? "") },
+                branches: hs.map(\.branch),
                 target: target, rootRepo: lead.root,
                 remote: pushes ? leadTask.landing?.remote : nil)
             await handLandingToAgent(lead.taskID, branch: lead.branch, target: target, root: lead.root,
@@ -500,11 +500,16 @@ extension CodingTaskEngine {
     /// The batch brief: merge each branch into `target` in order, in its
     /// checkout; conflicts resolved keeping both sides; checks once; push
     /// once (`remote`); one report for all.
-    nonisolated static func batchLandingPrompt(branches: [(branch: String, title: String)], target: String,
+    /// Branch names only, never the cards' titles: this brief goes to ONE
+    /// agent (often another task's session, running unattended) as the
+    /// user's word, and a title can be anything a planner filed
+    /// (`board_create_subtasks`) — text read from a repository or an issue
+    /// would become the user's instructions to an agent that pushes.
+    nonisolated static func batchLandingPrompt(branches: [String], target: String,
                                                rootRepo: String, remote: String?) -> String {
         let rm = safeRemote(remote)
         let (qt, list) = (q(target), branches.enumerated().map { i, b in
-            "   \(i + 1). `\(q(b.branch))` — \(b.title.replacingOccurrences(of: "\n", with: " "))"
+            "   \(i + 1). `\(q(b))`"
         }.joined(separator: "\n"))
         var steps: [String] = [
             "For each branch below, commit anything still uncommitted in its checkout (`git worktree list` "

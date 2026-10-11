@@ -1076,7 +1076,9 @@ struct CodingKanbanView: View {
                             "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
                             comment: "review column: batch merge"),
                             Set(selected.compactMap(\.landingTarget)).sorted().joined(separator: ", "),
-                            selected.first?.workerName ?? ""))
+                            selected.first?.workerName ?? "")
+                            // What's approved, in full: a card shows three lines of its title.
+                            + "\n\n" + selected.map { "• \($0.title)" }.joined(separator: "\n"))
                     }
                     Button(NSLocalizedString("Clear", comment: "plan column")) { selectedReview.removeAll() }
                         .controlSize(.small)
