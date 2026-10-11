@@ -692,6 +692,27 @@ struct LandingRemoteNameTests {
         #expect(!FileManager.default.fileExists(atPath: r.marker))
     }
 
+    /// Finding (CWE-78): the landing push ran the repository's `gpg.program`
+    /// — `push.gpgSign=true` signs the push certificate once the remote
+    /// advertises `push-cert` (a bare repo with `receive.certNonceSeed`).
+    @Test("a signed push the repository asks for runs no gpg program")
+    func signedPushRunsNothing() throws {
+        let r = try repo(remotes: ["origin"])
+        let bare = (r.root as NSString).deletingLastPathComponent + "/bare.git"
+        _ = try sh("cd \(r.root); git --git-dir=\(bare) config receive.certNonceSeed seed; "
+                   + "git config push.gpgSign true; git config gpg.program ./pwn.sh; "
+                   + "git config gpg.ssh.program ./pwn.sh; git config gpg.x509.program ./pwn.sh; "
+                   + "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m two")
+        // The setup is live: a plain push runs it.
+        _ = try sh("cd \(r.root) && git push -q origin main:refs/heads/probe")
+        #expect(FileManager.default.fileExists(atPath: r.marker))
+        try FileManager.default.removeItem(atPath: r.marker)
+
+        let push = try sh("cd \(r.root) && " + CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
+        #expect(push.trimmingCharacters(in: .whitespacesAndNewlines) == "pushed")
+        #expect(!FileManager.default.fileExists(atPath: r.marker))
+    }
+
     /// Finding: the parent branch (read from HEAD, which can name
     /// `refs/heads/--upload-pack=./pwn.sh`) went into the briefs' git
     /// commands as an option.

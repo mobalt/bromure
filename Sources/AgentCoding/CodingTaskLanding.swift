@@ -170,10 +170,13 @@ extension CodingTaskEngine {
     }
 
     /// `git push` with its pack program pinned (never the repository's
-    /// `remote.<name>.receivepack`) and no `pre-push` hook.
+    /// `remote.<name>.receivepack`), no `pre-push` hook, and never signed:
+    /// a `push.gpgSign` the repository sets would run its `gpg.program` to
+    /// sign the push certificate once the remote asks for one. Runs under
+    /// `RepoGitPrograms.off` too, which blanks a local `gpg.program`.
     nonisolated static func pinnedPush(_ dir: String, remote: String, refspec: String) -> String {
-        "\(pinnedGit(dir)) -c \(q("remote.\(remote).receivepack=git-receive-pack")) "
-            + "push -q --no-verify --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
+        "\(pinnedGit(dir)) -c push.gpgSign=false -c \(q("remote.\(remote).receivepack=git-receive-pack")) "
+            + "push -q --no-verify --no-signed --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
     }
 
     /// A remote name safe to hand git and an agent: one plain token, never
@@ -327,7 +330,7 @@ extension CodingTaskEngine {
     nonisolated static func pushTargetCommand(root: String, target: String, remote: String) -> String {
         guard isSafeRemoteName(remote), isSafeBranchName(target) else { return "echo push-failed" }
         let tracking = "refs/remotes/\(remote)/\(target)"
-        return "r=\(q(root)); " + networkGitEnv
+        return "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"") + networkGitEnv
             + "if \(localCredentialHelperCheck("\"$r\"")); then echo push-failed; exit 0; fi; "
             + "\(pinnedFetch("\"$r\"", remote: remote)) >/dev/null 2>&1 || { echo fetch-failed; exit 0; }; "
             + "if \(pinnedGit("\"$r\"")) rev-parse -q --verify \(q(tracking)) >/dev/null 2>&1 "
