@@ -1,4 +1,5 @@
 import Foundation
+import IOKit.pwr_mgt
 
 /// How long an unattended start (an automation firing, a board task) waits
 /// for its workspace to come up — counted in time the Mac is AWAKE, and
@@ -11,6 +12,14 @@ import Foundation
 /// suspended workspace restores in seconds and slipped through; a cold boot
 /// of one that's OFF doesn't.
 ///
+/// Kept awake means two assertions. `beginActivity(.idleSystemSleepDisabled)`
+/// is PreventUserIdleSystemSleep: idle sleep only — the kernel's return to
+/// sleep at the end of a DARK wake (the one a scheduled fire runs in,
+/// often lid-closed) ignores it, so the boot lost the CPU after a slice too
+/// short to finish. PreventSystemSleep (IOKit) is the one that check
+/// honours. macOS honours it on AC power only; on battery the boot waits
+/// for the next wake (the budget counts awake time, so it isn't spent).
+///
 /// The keep-awake lasts only the boot wait: it ends when the budget runs out
 /// (checked or not — a caller stuck in a call that never returns can't hold
 /// the Mac awake past it), on `release()` (the workspace answered; what
@@ -20,6 +29,7 @@ final class BootBudget: @unchecked Sendable {
     private let clock: () -> TimeInterval
     private let lock = NSLock()
     private var activity: NSObjectProtocol?
+    private var systemSleepAssertion: IOPMAssertionID?
 
     /// `clock`: seconds of awake time (the default doesn't advance while the
     /// Mac sleeps). `holdAwake`: hold off idle sleep and App Nap until the
@@ -33,6 +43,12 @@ final class BootBudget: @unchecked Sendable {
                                                     reason: reason)
             : nil
         if holdAwake {
+            var id = IOPMAssertionID(0)
+            if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventSystemSleep as CFString,
+                                           IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                           reason as CFString, &id) == kIOReturnSuccess {
+                systemSleepAssertion = id
+            }
             // DispatchTime stops while the Mac sleeps, like the budget.
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [weak self] in self?.release() }
         }
@@ -43,14 +59,16 @@ final class BootBudget: @unchecked Sendable {
     /// Stop keeping the Mac awake (idempotent).
     func release() {
         lock.lock()
-        let a = activity
+        let a = activity, sys = systemSleepAssertion
         activity = nil
+        systemSleepAssertion = nil
         lock.unlock()
         if let a { ProcessInfo.processInfo.endActivity(a) }
+        if let sys { IOPMAssertionRelease(sys) }
     }
 
     /// Whether the Mac is still being kept awake for this budget.
-    var holdsAwake: Bool { lock.lock(); defer { lock.unlock() }; return activity != nil }
+    var holdsAwake: Bool { lock.lock(); defer { lock.unlock() }; return activity != nil || systemSleepAssertion != nil }
 
     /// Time is left. Once it isn't, the keep-awake ends.
     var remains: Bool {

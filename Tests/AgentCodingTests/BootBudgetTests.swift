@@ -1,4 +1,5 @@
 import Foundation
+import IOKit.pwr_mgt
 import Testing
 @testable import bromure_ac
 
@@ -56,5 +57,27 @@ struct BootBudgetTests {
         let took = ProcessInfo.processInfo.systemUptime - start
         if case .protocolFailure = out {} else { Issue.record("expected a protocol failure, got \(out)") }
         #expect(took < 3)
+    }
+
+    /// Finding: the boot's keep-awake was PreventUserIdleSystemSleep only,
+    /// which a dark wake's return to sleep ignores — the boot lost the CPU.
+    @Test("the boot holds PreventSystemSleep too, and lets it go with the budget")
+    func preventsSystemSleep() {
+        let reason = "boot-budget-test-\(UUID().uuidString)"
+        func held() -> Bool {
+            var dict: Unmanaged<CFDictionary>?
+            guard IOPMCopyAssertionsByProcess(&dict) == kIOReturnSuccess,
+                  let all = dict?.takeRetainedValue() as? [NSNumber: [[String: Any]]],
+                  let mine = all[NSNumber(value: getpid())] else { return false }
+            return mine.contains {
+                $0[kIOPMAssertionNameKey as String] as? String == reason
+                    && $0[kIOPMAssertionTypeKey as String] as? String == kIOPMAssertionTypePreventSystemSleep as String
+            }
+        }
+        let b = BootBudget(seconds: 180, reason: reason)
+        #expect(held())
+        b.release()
+        #expect(!held())
+        #expect(!b.holdsAwake)
     }
 }
