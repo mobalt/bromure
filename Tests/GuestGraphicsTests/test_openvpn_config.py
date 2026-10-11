@@ -316,5 +316,28 @@ remote vpn.example 1194
         for bad in ["genkey", "memstats", "rmtun", "mktun", "test-crypto"]:
             self.assertIn(bad, dropped, bad)
 
+    # OpenVPN reads a long line inside an inline block in pieces and joins
+    # them: a 300-character certificate line is valid and must stay.
+    def test_long_certificate_lines_are_kept(self):
+        body = "M" + "A" * 299
+        text = "client\n<ca>\n-----BEGIN CERTIFICATE-----\n" + body + "\n-----END CERTIFICATE-----\n</ca>\nremote vpn.example 1194\n"
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertIn(body, lines)
+        self.assertEqual(dropped, [])
+
+    def test_a_long_line_hiding_a_close_tag_is_dropped(self):
+        # The piece starting at byte 255 opens with </ca>: OpenVPN ends the
+        # block there and reads what follows on that line as options.
+        hidden = "A" * 255 + "</ca>"
+        text = "<ca>\n" + hidden + "\nlog /mnt/share/profile.img\n</ca>\nclient\n"
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertNotIn(hidden, lines)
+        self.assertIn("(an overlong line)", dropped)
+        # Inside a forbidden block, or at top level, a long line still goes.
+        lines, _ = config.sanitize_ovpn("<config>\n" + "B" * 300 + "\n</config>\n")
+        self.assertNotIn("B" * 300, lines)
+        lines, _ = config.sanitize_ovpn("remote " + "a" * 300 + "\n")
+        self.assertEqual(lines, [])
+
 if __name__ == "__main__":
     unittest.main()

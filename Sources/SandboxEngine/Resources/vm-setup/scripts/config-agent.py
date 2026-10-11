@@ -1239,6 +1239,19 @@ def openvpn_parse_line(line):
     return tokens
 
 
+def _inline_piece_ends_block(line, close):
+    """Whether any piece OpenVPN's read_inline_file reads of ``line``
+    (fgets into 256 bytes: at most 255, the newline counted) starts, leading
+    spaces off, with ``close``."""
+    data = (line + "\n").encode("utf-8")
+    tag = close.encode("utf-8")
+    space = _C_SPACE.encode("ascii")
+    for i in range(0, len(data), OPENVPN_LINE_MAX):
+        if data[i:i + OPENVPN_LINE_MAX].lstrip(space).startswith(tag):
+            return True
+    return False
+
+
 def sanitize_ovpn(text):
     """``text`` without the forbidden directives, read the way OpenVPN 2.6
     reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
@@ -1251,8 +1264,19 @@ def sanitize_ovpn(text):
     for i, line in enumerate(text.splitlines()):
         if i == 0 and line.startswith("\ufeff"):
             line = line[1:]
-        if "\0" in line or len(line.encode("utf-8")) >= OPENVPN_LINE_MAX:
-            dropped.append("(an overlong or binary line)")
+        if "\0" in line:
+            dropped.append("(a binary line)")
+            continue
+        if len(line.encode("utf-8")) >= OPENVPN_LINE_MAX:
+            # Inside a certificate or key block OpenVPN reads a long line in
+            # pieces and joins them again: kept — unless one of the pieces
+            # would end the block, and the rest of the line be read as
+            # options. Anywhere else, the cut-off part would be an option.
+            if close is None or block is not None or not keep \
+                    or _inline_piece_ends_block(line, close):
+                dropped.append("(an overlong line)")
+                continue
+            out.append(line)
             continue
         if close is not None:
             # OpenVPN ends the block at the first line that, leading
