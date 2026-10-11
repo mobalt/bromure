@@ -113,4 +113,30 @@ struct RepoGitProgramsTests {
                                                    squash: false)).contains("dirty"))
         #expect(!FileManager.default.fileExists(atPath: marker))
     }
+
+    /// Finding: the same hidden submodule edit passed the checks that gate
+    /// `git worktree remove --force` — the landing's dirty-source check
+    /// (a merged branch's worktree is removed) and Mark done's empty branch.
+    @Test("a task worktree with an edited submodule is neither landed clean nor empty")
+    func dirtySubmoduleBlocksRemoval() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgw-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", wt = home + "/wt"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a; "
+               + "git -c protocol.file.allow=always submodule -q add \(home)/sub sub; git commit -qm sub; "
+               + "git worktree add -q -b wt/t \(wt); cd \(wt); git -c protocol.file.allow=always submodule -q update --init")
+        let check = { CodingTaskEngine.parseLandingCheck(self.sh(CodingTaskEngine.landingCheckCommand(
+            root: root, branch: "wt/t", target: "main", sourceDir: wt, mode: .merge))) }
+        let empty = { self.sh(CodingTaskEngine.emptyBranchCommand(root: root, branch: "wt/t", parent: "main",
+                                                                  worktreeDir: wt)) }
+        // Nothing done: already merged, and empty.
+        #expect(check() == .merged)
+        #expect(empty().contains("EMPTY"))
+        // An uncommitted edit inside the submodule: the agent must commit it.
+        _ = sh("echo secret-edit >> \(wt)/sub/f")
+        #expect(check() == .dirtySource)
+        #expect(!empty().contains("EMPTY"))
+    }
 }
