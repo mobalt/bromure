@@ -85,6 +85,29 @@ struct RepoGitProgramsTests {
         #expect(sh(TaskLitter.status("'\(home)/nope'")).isEmpty)
     }
 
+    /// Finding (CWE-754): `git lfs install --local` also sets a `process`
+    /// filter; switched off it was blank, and a blank process filter that is
+    /// `required` failed every status — a clean checkout read as dirty.
+    @Test("a local required process filter with no global driver: a clean tree reads clean")
+    func requiredProcessFilterKeepsCleanTree() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgp-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        let iso = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh(iso + "set -e; mkdir -p \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); chmod +x \(pwn); "
+               + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; echo a > a.bin; "
+               + "git add .; git commit -qm a; "
+               + "for k in clean smudge process; do git config filter.lfs.$k \(pwn); done; "
+               + "git config filter.lfs.required true; touch a.bin")
+        #expect(sh(iso + TaskLitter.status("'\(root)'")) == "")
+        #expect(sh(iso + CodingTaskEngine.emptyBranchCommand(root: root, branch: "main", parent: "main",
+                                                               worktreeDir: root)).contains("EMPTY"))
+        // An edit still shows, and the repository's program never ran.
+        _ = sh("echo b > \(root)/a.bin")
+        #expect(sh(iso + TaskLitter.status("'\(root)'")).contains(" M a.bin"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
     /// Finding: `--ignore-submodules=dirty` hid an edited submodule — the
     /// session list said "no changes yet", Discard said nothing would be
     /// lost, and removing the worktree deleted that work.

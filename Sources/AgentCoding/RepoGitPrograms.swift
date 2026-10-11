@@ -16,7 +16,9 @@ import Foundation
 /// even where the local config sets the same key (`git lfs install
 /// --local`): such a key is pinned to the global/system value. With none, a
 /// filter's clean/smudge becomes `cat` — never blank, which fails a
-/// `filter.<x>.required` filter and with it `git status` and the merge.
+/// `filter.<x>.required` filter and with it `git status` and the merge —
+/// and a blank `process` (there is no no-op one) makes the filter not
+/// required (`git lfs install --local` sets `required`).
 /// A diff runs its programs only with `--no-ext-diff --no-textconv` off.
 enum RepoGitPrograms {
     /// The config keys whose value is a program git runs on its own.
@@ -37,7 +39,11 @@ enum RepoGitPrograms {
             + "set -f; _bo=$IFS; IFS=$(printf '\\n_'); IFS=${IFS%_}; "
             + "for _bx in $_bk; do "
             + #"_bv=$(cd / && { git config --global --get "$_bx" || git config --system --get "$_bx"; } 2>/dev/null) "#
-            + "|| case \"$_bx\" in (filter.*.clean|filter.*.smudge) _bv=cat ;; (*) _bv= ;; esac; "
+            + "|| case \"$_bx\" in (filter.*.clean|filter.*.smudge) _bv=cat ;; "
+            // A blank process filter fails to start: not required, the
+            // content passes through unchanged, as `cat` would.
+            + "(filter.*.process) _bv=; export \"GIT_CONFIG_KEY_$_bn=${_bx%.process}.required\" \"GIT_CONFIG_VALUE_$_bn=false\"; _bn=$((_bn + 1)) ;; "
+            + "(*) _bv= ;; esac; "
             + "export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=$_bv\"; _bn=$((_bn + 1)); done; "
             + "IFS=$_bo; set +f; export GIT_CONFIG_COUNT=$_bn; "
     }
