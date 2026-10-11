@@ -48,4 +48,30 @@ import Testing
         #expect(delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999"))
         #expect(p.baseImageUpgradeDeclinedFor == "999")
     }
+
+    /// Finding (CWE-362): a reboot drops the old session from runningSessions
+    /// and awaits (boot remedy, settle, prepare/start) before the new one
+    /// registers — with no in-use mark, Delete / reset / revert went through
+    /// and removed the disk the fresh VM was opening.
+    @Test("a reboot's gap holds the disk in use, and its release leaves another boot's mark")
+    func relaunchGapHoldsDisk() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boots-\(UUID().uuidString)", isDirectory: true)
+        let delegate = ACAppDelegate(
+            imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
+        let id = UUID()
+        #expect(!delegate.diskInUse(id))
+        let release = delegate.holdDiskForRelaunch(id)
+        #expect(delegate.diskInUse(id))
+        #expect(delegate.bootsInFlight.contains(id))   // runState reads .booting
+        // A launch during the gap is refused (one boot per disk).
+        #expect(!delegate.bootsInFlight.begin(id))
+        release()
+        #expect(!delegate.diskInUse(id))
+        // Held by a launch already: the reboot's release doesn't end it.
+        #expect(delegate.bootsInFlight.begin(id))
+        let second = delegate.holdDiskForRelaunch(id)
+        second()
+        #expect(delegate.diskInUse(id))
+    }
 }

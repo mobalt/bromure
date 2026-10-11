@@ -2187,6 +2187,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         bootsInFlight.diskInUse(id, running: runningSessions[id] != nil)
     }
 
+    /// A reboot's gap: the old session is out of `runningSessions`, yet a
+    /// boot remedy and the fresh VM's prepare()/start() own the disk until it
+    /// registers. Marks it booting (in use) until the returned release runs —
+    /// which leaves a mark it didn't set alone.
+    func holdDiskForRelaunch(_ id: Profile.ID) -> () -> Void {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        return { [weak self] in
+            guard let self else { return }
+            if claimed { self.bootsInFlight.end(id) }
+            self.refreshSidebar()
+        }
+    }
+
     /// Scheduled automations (sidebar "Automations"): recurring, unattended
     /// agent runs. The store persists next to the profiles dir; the engine
     /// ticks on the main run loop and fires due automations through the same
@@ -14670,8 +14684,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             handleSessionStopped(profileID: profileID)
             if let profile {
                 if let remedy {
+                    // In use while the remedy works on the disk; handed to
+                    // launch's own mark (it refuses while one is set).
+                    let release = holdDiskForRelaunch(profileID)
                     Task { @MainActor in
                         await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        release()
                         self.launch(profile, detached: true)
                     }
                 } else {
@@ -15087,6 +15105,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
         unregisterSession(profile.id)
+        // Out of runningSessions, but the remedy, the fresh VM's prepare() and
+        // start() still own the disk until it registers: in use (booting) for
+        // the whole gap, or a delete / reset / revert landed under the new VM.
+        let release = holdDiskForRelaunch(profile.id)
         // The reboot killed any streamed planning driver with the guest;
         // without this the hub session stays un-ended forever (no terminal
         // event, the dead driver never reconnects), pinning the plan
@@ -15107,6 +15129,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor [self] in
+            defer { release() }
             // A queued boot-failure remedy (native fsck / disk reset) runs
             // first, against the stopped VM's disk, with the pane's boot
             // overlay narrating. Only then does the fresh VM build.
