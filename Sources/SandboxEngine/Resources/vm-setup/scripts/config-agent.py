@@ -1155,6 +1155,19 @@ OPENVPN_FORBIDDEN = frozenset({
     "auth-user-pass",
 })
 
+def _sends_a_file(name, tokens):
+    """The option reads a FILE the profile names and sends its contents to
+    a host the profile names: a proxy's username/password file —
+    `http-proxy host port <file>`, `socks-proxy host port <file>`,
+    `http-proxy-user-pass <file>` (only its inline block is the profile's
+    own text). Root reads any file, so that was /etc/shadow to the proxy."""
+    if name == "http-proxy":
+        return len(tokens) > 3 and tokens[3] not in ("auto", "auto-nct")
+    if name == "socks-proxy":
+        return len(tokens) > 3
+    return name == "http-proxy-user-pass"
+
+
 # OpenVPN reads its config with fgets() into a 257-byte buffer (an inline
 # block's lines into 256): a longer line is read as several, the part past
 # the cut parsed as a line of its own. Kept lines stay below both.
@@ -1229,6 +1242,7 @@ def sanitize_ovpn(text):
     is parsed by OpenVPN exactly as here. Returns (lines, dropped names)."""
     out, dropped = [], []
     close, keep = None, True        # inside an inline block: its close tag
+    block = None                    # a <connection> block's lines, sanitized on close
     for i, line in enumerate(text.splitlines()):
         if i == 0 and line.startswith("\ufeff"):
             line = line[1:]
@@ -1238,9 +1252,20 @@ def sanitize_ovpn(text):
         if close is not None:
             # OpenVPN ends the block at the first line that, leading
             # spaces off, STARTS with the close tag.
+            ends = line.lstrip(_C_SPACE).startswith(close)
+            if block is not None and not ends:
+                block.append(line)
+                continue
+            if block is not None:
+                # A <connection> block holds options too (OpenVPN parses it
+                # like a config: proxies, remotes) — sanitized the same way.
+                inner, more = sanitize_ovpn("\n".join(block))
+                out.extend(inner)
+                dropped.extend(more)
+                block = None
             if keep:
                 out.append(line)
-            if line.lstrip(_C_SPACE).startswith(close):
+            if ends:
                 close = None
             continue
         tokens = openvpn_parse_line(line)
@@ -1258,8 +1283,12 @@ def sanitize_ovpn(text):
             name = name[1:-1]
             close = "</%s>" % name
         keep = name.lower() not in OPENVPN_FORBIDDEN
+        if keep and not inline and _sends_a_file(name.lower(), tokens):
+            keep = False
         if keep:
             out.append(line)
+            if inline and name.lower() == "connection":
+                block = []
         else:
             dropped.append(name.lower())   # an inline one: the whole block
     return out, dropped
