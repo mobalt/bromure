@@ -9162,6 +9162,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.closePreferencesWindow()
             },
             onCancel: { [weak self] in self?.closePreferencesWindow() },
+            // File import stays off here (a key file is copied into ONE
+            // workspace's folder; the template has none), but a host-agent
+            // key is only a public key + socket, so new workspaces can
+            // inherit it.
+            hostAgentSockets: HostAgentClient.candidateHostSockets(),
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             claudeReauthRequiredAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: nil) },
             codexReauthRequiredAt: { [weak self] in self?.mitmEngine?.codexSubscriptionStore.reauthRequiredAt(for: nil) },
