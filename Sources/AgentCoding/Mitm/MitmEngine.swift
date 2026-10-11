@@ -687,6 +687,7 @@ public final class MitmEngine {
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)
+        sshAgent.clearHostAgentKeys(for: profileID)
         awsCreds.clearCredentials(for: profileID)
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)

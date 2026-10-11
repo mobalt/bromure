@@ -9823,6 +9823,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
             },
+            hostAgentSockets: HostAgentClient.candidateHostSockets(),
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             claudeAccountSavedAt: (editing ?? initialDraft).map { p in
                 { [weak self] in
                     self?.mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
@@ -11675,6 +11677,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
             }
             engine.sshAgent.setImportedKeyApprovals(approvals, for: profile.id)
+            // Keys picked out of a host agent (YubiKey & co.): the allow-
+            // list of blobs the VM may see and sign with through that
+            // agent. Nothing else it holds is reachable.
+            var hostAgentKeys: [Data: String] = [:]
+            for k in profile.importedSSHKeys {
+                guard let socket = k.hostAgentSocket,
+                      let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
+                else { continue }
+                hostAgentKeys[blob] = socket
+            }
+            engine.sshAgent.setHostAgentKeys(hostAgentKeys, for: profile.id)
         } else {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
@@ -15463,9 +15476,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             hasPassphrase: hasPass)
     }
 
+    /// The keys a host ssh-agent holds, as `ImportedSSHKey`s ready to
+    /// add to a profile: nothing is copied — `hostAgentSocket` points
+    /// signing back at the agent. `socket` is a `hostAgentSocket` value
+    /// ("" = this process's SSH_AUTH_SOCK).
+    nonisolated static func listHostAgentKeys(socket: String) throws -> [ImportedSSHKey] {
+        func fail(_ msg: String) -> NSError {
+            NSError(domain: "BromureAC", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        guard let path = HostAgentClient.resolveHostSocket(socket) else {
+            throw fail(NSLocalizedString("SSH_AUTH_SOCK isn't set for Bromure.", comment: ""))
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw fail(String(format: NSLocalizedString("No agent socket at %@.", comment: ""), path))
+        }
+        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+            // The blob opens with the key type as an ssh-string.
+            guard ident.blob.count > 4 else { return nil }
+            let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+            guard n > 0, 4 + n <= ident.blob.count,
+                  let type = String(data: ident.blob.subdata(in: 4..<(4 + n)), encoding: .utf8)
+            else { return nil }
+            let comment = ident.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ImportedSSHKey(
+                label: comment.isEmpty ? type : comment,
+                filename: "",
+                publicKeyText: "\(type) \(ident.blob.base64EncodedString())"
+                    + (comment.isEmpty ? "" : " \(comment)"),
+                hostAgentSocket: socket)
+        }
+    }
+
     /// Remove an imported key: file + (optional) keychain entry. The
     /// editor calls this when the user clicks the row's minus button.
     func removeImportedSSHKey(_ key: ImportedSSHKey, for profile: Profile) {
+        // A host-agent key has no file (filename "" would name the whole
+        // imported/ dir) — the agent keeps it.
+        guard !key.isFromHostAgent, !key.filename.isEmpty else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
         try? FileManager.default.removeItem(
@@ -15486,7 +15533,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
               let agentSocket = mitmEngine?.sshAgentSocket(for: profile.id) else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
-        for key in profile.importedSSHKeys {
+        for key in profile.importedSSHKeys where !key.isFromHostAgent {
             let path = importedDir.appendingPathComponent(key.filename).path
             guard FileManager.default.fileExists(atPath: path) else {
                 FileHandle.standardError.write(Data(

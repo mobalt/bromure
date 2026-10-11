@@ -13,8 +13,17 @@ import Foundation
 /// the explicit-import flow in the profile UI, which lands the key
 /// in that workspace's agent and registers an `ImportedApproval` for
 /// per-key consent.
+///
+/// The one exception is a key the user picked out of a host agent
+/// (`ImportedSSHKey.hostAgentSocket` — a YubiKey can't be imported as a
+/// file). `SSHAgentServer` opens a client on that socket too, but only
+/// ever advertises and signs with the picked keys' blobs.
 final class HostAgentClient: @unchecked Sendable {
     let socketPath: String
+    /// Per-read/write timeout; nil = block. Set for host agents, where a
+    /// sign can wait on a hardware touch or a pinentry dialog — bounded so
+    /// an agent that never answers doesn't hold the VM's connection open.
+    let timeout: TimeInterval?
 
     /// One client PER WORKSPACE, registered by MitmEngine when it spawns
     /// that workspace's ssh-agent. There is deliberately no process-wide
@@ -40,8 +49,103 @@ final class HostAgentClient: @unchecked Sendable {
         byProfile.removeValue(forKey: profileID)
     }
 
-    init(socketPath: String) {
+    init(socketPath: String, timeout: TimeInterval? = nil) {
         self.socketPath = socketPath
+        self.timeout = timeout
+    }
+
+    /// The socket an `ImportedSSHKey.hostAgentSocket` names: "" means this
+    /// process's `SSH_AUTH_SOCK`, a leading "~" is the home folder. nil
+    /// when "" and there's no `SSH_AUTH_SOCK`.
+    static func resolveHostSocket(_ setting: String) -> String? {
+        let trimmed = setting.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            let env = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] ?? ""
+            return env.isEmpty ? nil : env
+        }
+        return (trimmed as NSString).expandingTildeInPath
+    }
+
+    /// Agent sockets worth offering in the "Add from host agent" sheet, as
+    /// `hostAgentSocket` values: "" (bromure's `SSH_AUTH_SOCK` — usually
+    /// launchd's Apple agent, since an app started from the Finder doesn't
+    /// see a shell's export) then the well-known third-party agents that
+    /// exist on this Mac.
+    static func candidateHostSockets() -> [String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var out = [""]
+        var known = [
+            "~/.gnupg/S.gpg-agent.ssh",
+            "~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh",
+            "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
+            "~/.ssh/agent.sock",
+        ]
+        // gpg-agent's socket moves when GNUPGHOME or a run dir is in play;
+        // gpgconf knows where this one actually is.
+        if let gpg = gpgconfSSHSocket() {
+            let tilde = gpg.hasPrefix(home + "/") ? "~" + gpg.dropFirst(home.count) : gpg
+            if !known.contains(tilde) { known.insert(tilde, at: 0) }
+        }
+        for path in known {
+            var st = stat()
+            let full = (path as NSString).expandingTildeInPath
+            if stat(full, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK { out.append(path) }
+        }
+        return out
+    }
+
+    private static func gpgconfSSHSocket() -> String? {
+        for bin in ["/opt/homebrew/bin/gpgconf", "/usr/local/bin/gpgconf",
+                    "/usr/local/MacGPG2/bin/gpgconf"]
+            where FileManager.default.isExecutableFile(atPath: bin) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = ["--list-dirs", "agent-ssh-socket"]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { continue }
+            p.waitUntilExit()
+            let path = String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                              encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if p.terminationStatus == 0, !path.isEmpty { return path }
+        }
+        return nil
+    }
+
+    /// REQUEST_IDENTITIES: the agent's keys as (wire blob, comment). Empty
+    /// on I/O failure or protocol mismatch.
+    func identities() -> [(blob: Data, comment: String)] {
+        guard let resp = request(Data([11])), !resp.isEmpty, resp[0] == 12 else { return [] }
+        var cursor = 1
+        func u32() -> Int? {
+            guard cursor + 4 <= resp.count else { return nil }
+            let v = resp.subdata(in: cursor..<(cursor + 4)).reduce(0) { $0 << 8 | Int($1) }
+            cursor += 4
+            return v
+        }
+        func str() -> Data? {
+            guard let n = u32(), cursor + n <= resp.count else { return nil }
+            defer { cursor += n }
+            return resp.subdata(in: cursor..<(cursor + n))
+        }
+        guard let count = u32() else { return [] }
+        var result: [(Data, String)] = []
+        for _ in 0..<count {
+            guard let blob = str(), let comment = str() else { break }
+            result.append((blob, String(data: comment, encoding: .utf8) ?? ""))
+        }
+        return result
+    }
+
+    /// `request` off the Swift concurrency pool: a host agent's sign can
+    /// block for as long as `timeout` waiting on a touch.
+    func requestDetached(_ payload: Data) async -> Data? {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: self.request(payload))
+            }
+        }
     }
 
     /// Send a single ssh-agent-protocol request frame, return the
@@ -69,6 +173,11 @@ final class HostAgentClient: @unchecked Sendable {
             }
         }
         if connectStatus < 0 { return nil }
+        if let timeout {
+            var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
 
         // Frame: 4-byte big-endian length + payload.
         var lenBE = UInt32(payload.count).bigEndian

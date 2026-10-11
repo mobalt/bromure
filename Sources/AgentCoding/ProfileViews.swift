@@ -529,6 +529,8 @@ struct ProfileEditorView: View {
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
+    /// Sheet state for "Add from host agent…".
+    @State private var hostAgentSheet: HostAgentSheetState?
     @State private var confirmBrowserRedownload = false
     /// Keys of the disclosure groups the user has expanded in the
     /// Credentials pane. All sections start collapsed — the user
@@ -570,6 +572,17 @@ struct ProfileEditorView: View {
         var passphrase: String
     }
 
+    struct HostAgentSheetState: Identifiable {
+        let id = UUID()
+        /// A `hostAgentSocket` value: "" = bromure's SSH_AUTH_SOCK.
+        var socket: String
+        var keys: [ImportedSSHKey] = []
+        /// `publicKeyText` of the rows ticked.
+        var selected: Set<String> = []
+        var error: String?
+        var loaded = false
+    }
+
     let onSave: (Profile, _ generateSSH: Bool) -> Void
     let onCancel: () -> Void
     /// Fires as the name is typed so a hosting NSWindow can keep its title bar
@@ -584,6 +597,12 @@ struct ProfileEditorView: View {
     /// Called when the user removes a row — frees the on-disk file +
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
+    /// Agent sockets to offer in "Add from host agent…" (`hostAgentSocket`
+    /// values, "" first = SSH_AUTH_SOCK).
+    let hostAgentSockets: [String]
+    /// Lists the keys a host agent holds, ready to add. nil = not on the
+    /// host (remote clients) → the button is disabled.
+    let onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])?
     /// Returns the date this profile/preferences' Claude subscription was
     /// captured (nil = not registered). A closure (not a value) so it's
     /// re-read live after a register/forget. nil = no proxy engine → hide.
@@ -638,6 +657,8 @@ struct ProfileEditorView: View {
         onTitleChange: ((String) -> Void)? = nil,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
+        hostAgentSockets: [String] = [],
+        onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
         claudeReauthRequiredAt: (() -> Date?)? = nil,
         codexReauthRequiredAt: (() -> Date?)? = nil,
@@ -661,6 +682,8 @@ struct ProfileEditorView: View {
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
+        self.hostAgentSockets = hostAgentSockets
+        self.onListHostAgentKeys = onListHostAgentKeys
         self.claudeAccountSavedAt = claudeAccountSavedAt
         self.claudeReauthRequiredAt = claudeReauthRequiredAt
         self.codexReauthRequiredAt = codexReauthRequiredAt
@@ -832,6 +855,9 @@ struct ProfileEditorView: View {
         // propagating, producing an empty/white sheet.
         .sheet(item: $importSheet) { sheet in
             importSheetView(for: sheet)
+        }
+        .sheet(item: $hostAgentSheet) { _ in
+            hostAgentSheetView
         }
         .sheet(item: $credSheet) { sheet in
             credentialSheetView(sheet)
@@ -3271,8 +3297,18 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(onImportSSHKey == nil)
+                Button {
+                    openHostAgentSheet(socket: hostAgentSockets.first ?? "")
+                } label: {
+                    Label("From host agent…", systemImage: "key.radiowaves.forward")
+                }
+                .buttonStyle(.borderless)
+                .disabled(onListHostAgentKeys == nil)
             }
             Text("Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("A key that can't be copied — on a YubiKey, in gpg-agent, Secretive or 1Password — can be picked from that ssh-agent instead. The VM sees only the keys you pick, and their signatures are made by the agent on your Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -3286,11 +3322,18 @@ struct ProfileEditorView: View {
                 ForEach(Array(draft.importedSSHKeys.enumerated()), id: \.element.id) { (idx, key) in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Image(systemName: "key.horizontal.fill")
+                            Image(systemName: key.isFromHostAgent
+                                  ? "key.radiowaves.forward.fill" : "key.horizontal.fill")
                                 .foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
                                     Text(key.label).font(.callout)
+                                    if let socket = key.hostAgentSocket {
+                                        Text(Self.hostAgentSocketName(socket))
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .help("Signed by the ssh-agent on your Mac; never copied.")
+                                    }
                                     if key.hasPassphrase {
                                         Image(systemName: "lock.fill")
                                             .font(.caption2)
@@ -3373,6 +3416,120 @@ struct ProfileEditorView: View {
         }
         .padding(20)
         .frame(width: 480)
+    }
+
+    /// The "Add from host agent…" sheet: pick an agent socket, tick keys.
+    @ViewBuilder
+    private var hostAgentSheetView: some View {
+        let state = hostAgentSheet ?? HostAgentSheetState(socket: "")
+        let alreadyAdded = Set(draft.importedSSHKeys.compactMap { k in
+            k.isFromHostAgent ? Self.publicKeyBlobText(k.publicKeyText) : nil
+        })
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add keys from a host ssh-agent")
+                .font(.title3.bold())
+            HStack {
+                TextField("Agent socket", text: Binding(
+                    get: { hostAgentSheet?.socket ?? "" },
+                    set: { hostAgentSheet?.socket = $0; hostAgentSheet?.loaded = false }
+                ), prompt: Text("SSH_AUTH_SOCK"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout.monospaced())
+                    .onSubmit { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+                if hostAgentSockets.count > 1 {
+                    Menu {
+                        ForEach(hostAgentSockets, id: \.self) { socket in
+                            Button(Self.hostAgentSocketName(socket)) {
+                                openHostAgentSheet(socket: socket)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .fixedSize()
+                }
+                Button("Load") { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+            }
+            Text("Empty = Bromure's SSH_AUTH_SOCK (the macOS agent, unless Bromure was started from a shell). For a YubiKey behind gpg-agent, use ~/.gnupg/S.gpg-agent.ssh.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            if let err = state.error {
+                Text(err).font(.caption).foregroundStyle(.red)
+            } else if state.loaded && state.keys.isEmpty {
+                Text("This agent holds no keys. Plug in the security key, or check the socket.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(state.keys, id: \.publicKeyText) { key in
+                let added = alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText))
+                Toggle(isOn: Binding(
+                    get: { added || (hostAgentSheet?.selected.contains(key.publicKeyText) ?? false) },
+                    set: { on in
+                        if on { hostAgentSheet?.selected.insert(key.publicKeyText) }
+                        else { hostAgentSheet?.selected.remove(key.publicKeyText) }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(key.label).font(.callout)
+                        Text(key.publicKeyText.split(separator: " ").first.map(String.init) ?? "")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .disabled(added)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { hostAgentSheet = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    for key in state.keys where state.selected.contains(key.publicKeyText)
+                        && !alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText)) {
+                        draft.importedSSHKeys.append(key)
+                    }
+                    hostAgentSheet = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.selected.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    /// (Re)load the sheet's key list from `socket`, opening it if needed.
+    private func openHostAgentSheet(socket: String) {
+        guard let lister = onListHostAgentKeys else { return }
+        var state = HostAgentSheetState(socket: socket)
+        do {
+            state.keys = try lister(socket)
+        } catch {
+            state.error = error.localizedDescription
+        }
+        state.loaded = true
+        if hostAgentSheet == nil {
+            hostAgentSheet = state
+        } else {
+            hostAgentSheet?.socket = state.socket
+            hostAgentSheet?.keys = state.keys
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = state.error
+            hostAgentSheet?.loaded = true
+        }
+    }
+
+    /// "SSH_AUTH_SOCK" for "", else the path as stored.
+    static func hostAgentSocketName(_ socket: String) -> String {
+        socket.isEmpty ? "SSH_AUTH_SOCK" : socket
+    }
+
+    /// The base64 blob field of an OpenSSH public-key line — identity
+    /// without the comment.
+    static func publicKeyBlobText(_ line: String) -> String {
+        let parts = line.split(separator: " ")
+        return parts.count >= 2 ? String(parts[1]) : line
     }
 
     private func presentImportPicker() {
