@@ -103,23 +103,59 @@ struct SessionStartCoalescerTests {
         #expect(counter.withLock { $0 } == 2)
     }
 
-    @Test("a start that can't wait: dropped while the same one runs; its reply, id and all, answers the rest")
+    private func token(_ c: SessionStartCoalescer.Claim) -> UUID? {
+        if case .mine(let t) = c { return t }
+        return nil
+    }
+    private func underWay(_ c: SessionStartCoalescer.Claim) -> Bool {
+        if case .underWay = c { return true }
+        return false
+    }
+    private func doneID(_ c: SessionStartCoalescer.Claim) -> String? {
+        if case .done(let r) = c { return r["id"] as? String }
+        return nil
+    }
+
+    @Test("a start that can't wait: told to wait while the same one runs; its reply, id and all, answers the rest")
     func claim() {
         let c = SessionStartCoalescer()
         let now = Date()
-        let t1 = c.claim(key(), now: now)
+        let t1 = token(c.claim(key(), now: now))
         #expect(t1 != nil)
-        #expect(c.claim(key(), now: now + 30) == nil)   // still under way
+        #expect(underWay(c.claim(key(), now: now + 30)))   // still under way
         c.finish(key(), token: t1!, reply: nil, now: now + 31)   // it failed: a retry may go
-        let t2 = c.claim(key(), now: now + 32)
+        let t2 = token(c.claim(key(), now: now + 32))
         #expect(t2 != nil)
         // A stale finish (the first, again) can't touch the new attempt.
         c.finish(key(), token: t1!, reply: nil, now: now + 33)
-        #expect(c.claim(key(), now: now + 33) == nil)
+        #expect(underWay(c.claim(key(), now: now + 33)))
         c.finish(key(), token: t2!, reply: ["ok": true, "id": "M"], now: now + 34)
         // A client's same start through the hub gets the session's id.
         let r = c.run(key(), now: { now + 36 }) { ["ok": true, "id": "other"] }
         #expect(r["id"] as? String == "M")
+    }
+
+    /// Finding (CWE-670): a local Start clicked while the same start (a
+    /// client's, through the hub) had just finished was dropped — the window
+    /// stayed on the new-session screen instead of opening that session.
+    @Test("a local Start after the hub's same start: that session's id, to open")
+    func claimAfterHubStart() {
+        let c = SessionStartCoalescer()
+        let now = Date()
+        _ = c.run(key(), now: { now }) { ["ok": true, "id": "HUB"] }
+        #expect(doneID(c.claim(key(), now: now + 3)) == "HUB")
+        // The window's key for a start on a machine is the hub's for the
+        // same body — files and all.
+        let m = UUID()
+        let file = DroppedFile(name: "a.txt", data: Data("hello".utf8), isImage: false)
+        var req = AgentSessionRequest(profileID: UUID(), tool: .claude, cwd: "~")
+        req.openingMessage = "go"; req.instructions = "not sent"; req.attachments = [file]
+        let hub = SessionStartCoalescer.key(profile: m.uuidString, tool: "claude", cwd: "~", cloneURL: nil,
+                                            message: "go", instructions: nil, room: nil,
+                                            attachments: [SessionStartCoalescer.attachment(wire: file.wireDictionary)])
+        #expect(SessionStartCoalescer.machineKey(req, machine: m, room: nil) == hub)
+        // Past the window: a deliberate new one.
+        #expect(token(c.claim(key(), now: now + 11)) != nil)
     }
 
     @Test("the composer's file and a client's same file make the same key")

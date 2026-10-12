@@ -52,6 +52,18 @@ final class SessionStartCoalescer: @unchecked Sendable {
             attachments: req.attachments.map { attachment(name: $0.name, bytes: $0.data.count) })
     }
 
+    /// A start on an attached machine from this host's window, keyed on what
+    /// it sends (no instructions, no folders) — as the hub keys a client's
+    /// same start from its body, so the two share one slot.
+    static func machineKey(_ req: AgentSessionRequest, machine: UUID, room: UUID?) -> String {
+        var keyed = req
+        keyed.profileID = machine
+        keyed.roomID = room
+        keyed.instructions = nil
+        keyed.attachments = req.attachments.filter { $0.folder == nil }
+        return key(keyed)
+    }
+
     /// One dropped file in a key; a wire request's base64 is counted decoded,
     /// so the composer's and a client's same file match.
     static func attachment(name: String, bytes: Int) -> String { "\(name):\(bytes)" }
@@ -94,16 +106,27 @@ final class SessionStartCoalescer: @unchecked Sendable {
         return reply
     }
 
-    /// For a start that can't wait here (the main thread's async one): a
-    /// token to `finish` with, or nil — the same start is under way or just
-    /// done: drop this one.
-    func claim(_ key: String, now: Date = Date()) -> UUID? {
+    /// What `claim` found.
+    enum Claim {
+        /// Start it: `finish` with this token.
+        case mine(UUID)
+        /// The same start is under way (here or through the hub): ask again
+        /// in a moment.
+        case underWay
+        /// The same start finished within `window`: its reply (with the
+        /// session id) — open that session, don't start another.
+        case done([String: Any])
+    }
+
+    /// For a start that can't wait here (the main thread's async one).
+    func claim(_ key: String, now: Date = Date()) -> Claim {
         cond.lock(); defer { cond.unlock() }
         prune(now: now)
-        if let e = entries[key], e.reply == nil || finishedReply(key, now: now) != nil { return nil }
+        if let reply = finishedReply(key, now: now) { return .done(reply) }
+        if let e = entries[key], e.reply == nil { return .underWay }
         let token = UUID()
         entries[key] = Entry(token: token, startedAt: now)
-        return token
+        return .mine(token)
     }
 
     /// A claimed start's end: its reply (with the session id) is what the
