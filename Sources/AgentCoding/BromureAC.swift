@@ -2189,6 +2189,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Boots `launch` has started but not finished (see `BootsInFlight`).
     let bootsInFlight = BootsInFlight()
+    /// Workspaces with a launch question up (the base-image upgrade, the
+    /// compromise wipe). A second start of the same workspace meanwhile (a
+    /// double-clicked Start, a control-socket start the modal pumps) asks
+    /// nothing and boots nothing: the first one's answer decides, and its
+    /// launch boots. Two answers raced — a second "Yes" was told "wasn't
+    /// upgraded, start it again to be asked again" while the first's
+    /// upgrade was booting, or after the first's "No" was saved.
+    var launchQuestions = LaunchQuestionGate()
 
     /// A VM has (or is about to have) this workspace's disk and home open:
     /// it is running, or its boot is under way. Deleting, resetting or
@@ -11241,6 +11249,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Then: "No" and "Remind me later" are still recorded (they touch no
     /// disk); "Yes" is not carried out, and says so (`upgradeSkipped`).
     /// Either way that other boot owns the workspace: this launch stops.
+    /// One launch question (upgrade, wipe) up per workspace at a time.
+    struct LaunchQuestionGate {
+        private var up = Set<Profile.ID>()
+        /// False: this workspace already has one up — don't ask, don't boot.
+        mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
+        mutating func end(_ id: Profile.ID) { up.remove(id) }
+    }
+
     enum UpgradeAnswerOutcome: Equatable {
         case applied
         case diskInUse(upgradeSkipped: Bool)
@@ -11553,7 +11569,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Local NSAlert only: a remote-initiated launch resolved (and
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
-            if !confirmWipeAndProceed(profile: profile) {
+            guard launchQuestions.begin(profile.id) else { return }
+            let wiped = confirmWipeAndProceed(profile: profile)
+            launchQuestions.end(profile.id)
+            if !wiped {
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -11577,6 +11596,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } else {
                 // Local NSAlert only: a remote-initiated launch resolved this in
                 // the async preflight above and re-entered with preflightResolved.
+                // The same question already up for this workspace: that one decides.
+                guard launchQuestions.begin(profile.id) else { return }
                 let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
                 let alert = NSAlert()
                 alert.messageText = title
@@ -11588,6 +11609,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case .alertSecondButtonReturn: index = 1
                 default: index = 2
                 }
+                launchQuestions.end(profile.id)
                 // Another boot began during the modal: it owns the disk now.
                 if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
                                                                                current: current) {
@@ -13874,6 +13896,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func resolveRemoteLaunchPrompts(
         _ profile: Profile, detached: Bool, freshBootFallback: Bool, quiet: Bool = false) async {
         var profile = profile
+        // A question already up for this workspace (another start's): that
+        // one decides, and its launch boots.
+        guard launchQuestions.begin(profile.id) else { return }
+        var asking = true
+        defer { if asking { launchQuestions.end(profile.id) } }
         if SessionDisk.isCompromised(profile: profile, store: store) {
             guard await confirmWipeAndProceedAsync(profile: profile) else { return }
         }
@@ -13886,6 +13913,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
+            launchQuestions.end(profile.id); asking = false
             if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
                                                                            current: current) {
                 // The start already returned to the client: it hears it
