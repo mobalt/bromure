@@ -1223,6 +1223,16 @@ final class RunningSession {
     var kubeClusterID: UUID?
     /// When the VM booted — surfaced as uptime in `vm ls`.
     let startedAt: Date
+    /// The boot on a clock the Mac's own clock setting can't move (it runs
+    /// through sleep): what `uptime` counts from.
+    let startedClock = ContinuousClock.now
+    /// How long the VM has run. Not `now − startedAt`: a host clock step
+    /// moved that by the step while `bootedAt` stayed put, and a fat
+    /// client's boot date (`now − uptime` on its clock) followed it.
+    var uptime: TimeInterval {
+        let d = ContinuousClock.now - startedClock
+        return Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+    }
     /// Last tab snapshot, captured on detach so a reattaching window can
     /// rebuild its bar against the kittys still running inside the guest.
     var lastTabsSnapshot: SessionDisk.TabsState?
@@ -6187,7 +6197,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Snapshot of running VMs for `vm ls`.
     @MainActor private func automationVMList() -> [[String: Any]] {
-        let now = Date()
         return runningSessions.values.map { s in
             let stateStr: String
             switch s.sandbox.state {
@@ -6247,7 +6256,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // the machines list; the CLI can still `vm exec` it.
                 "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
-                "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                "uptimeSeconds": Int(s.uptime),
                 // The boot itself, on this host's clock: a client tells a
                 // reboot by this changing — never by uptime against its own
                 // clock, which a late reply (a slow relay) moved forward.

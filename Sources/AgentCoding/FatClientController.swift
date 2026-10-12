@@ -129,10 +129,41 @@ final class RemoteHostController {
     }
 
     /// The boot date shown for a host that stamps its boot: a moved stamp
-    /// takes the new sample; a stable one keeps the earlier of the two.
+    /// takes the new sample; a stable one keeps the earlier of the two —
+    /// unless it is earlier by more than a late reply explains: a host that
+    /// counts uptime on its wall clock (before it used a monotonic one) had
+    /// its clock stepped forward, and `min` then kept that date for the rest
+    /// of the boot.
     nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
-        stampMoved ? derived : min(prev, derived)
+        if stampMoved { return derived }
+        if prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
+        return min(prev, derived)
     }
+
+    /// Most a stable-stamp sample may come in earlier than the date kept.
+    /// Generous: a first sample minutes late (a slow relay) must still heal
+    /// on the next on-time one; only an older host's clock step goes past it
+    /// (a current host's uptime doesn't move with its clock at all).
+    nonisolated static let earlierSampleCap: TimeInterval = 300
+
+    /// This Mac's wall clock against a clock that setting it can't move:
+    /// a change between two snapshots is a clock step here, and every boot
+    /// date kept (on the wall clock) moves by it — or `now − uptime`
+    /// samples would sit off by the step (read as a reboot, or refused).
+    nonisolated static func wallClockOffset(now: Date = Date()) -> TimeInterval {
+        let d = monotonicAnchor.duration(to: .now)
+        let mono = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        return now.timeIntervalSince1970 - mono
+    }
+    private nonisolated static let monotonicAnchor = ContinuousClock.now
+
+    /// The step to apply to kept boot dates: the offset's change since the
+    /// last snapshot, or 0 within jitter.
+    nonisolated static func clockStep(last: TimeInterval?, now: TimeInterval) -> TimeInterval {
+        guard let last, abs(now - last) > 2 else { return 0 }
+        return now - last
+    }
+    private var lastWallClockOffset: TimeInterval?
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -940,6 +971,12 @@ final class RemoteHostController {
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
         var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
+        let offset = Self.wallClockOffset()
+        let step = Self.clockStep(last: lastWallClockOffset, now: offset)
+        lastWallClockOffset = offset
+        if step != 0 {
+            for (k, d) in bootTimes { bootTimes[k] = d.addingTimeInterval(step) }
+        }
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard

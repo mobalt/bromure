@@ -115,4 +115,54 @@ struct WorkspaceRebootDetectTests {
         push(uptime: 5, bootedAt: Date().timeIntervalSince1970 - 5)
         #expect(c.bootTimes[id]! > first!.addingTimeInterval(3000))
     }
+
+    /// Finding (CWE-682): a host that counted uptime on its wall clock had
+    /// it stepped forward; the boot date jumped earlier by the step and the
+    /// stable-stamp `min` kept it for the rest of the boot (the dashboard
+    /// uptime high by the step, the iPad transcript floor before the boot,
+    /// letting a stale pre-boot question through).
+    @Test("a host clock step neither drags the boot date earlier nor freezes it there")
+    @MainActor func hostClockStepIgnored() {
+        let prev = now.addingTimeInterval(-3600)
+        // A reply that came sooner than the last (even minutes sooner, after
+        // a first one held up on a slow relay): taken.
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-60),
+                                              stampMoved: false) == prev.addingTimeInterval(-60))
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-240),
+                                              stampMoved: false) == prev.addingTimeInterval(-240))
+        // Earlier by an hour with the same stamp: a clock step, not a reply.
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-3600),
+                                              stampMoved: false) == prev)
+
+        let id = UUID()
+        let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        let booted = Date().timeIntervalSince1970 - 3600
+        func push(uptime: Int) {
+            c.applyPushedSnapshot(["workspaces": [["id": id.uuidString, "name": "w", "tool": "claude",
+                                                   "authMode": "token", "state": "running"]],
+                                   "vms": [["id": id.uuidString, "state": "running", "uptimeSeconds": uptime,
+                                            "bootedAt": booted,
+                                            "tabs": [["index": 0, "title": "t", "active": true]]]],
+                                   "workspacesListed": true])
+        }
+        push(uptime: 3600)
+        let first = c.bootTimes[id]!
+        push(uptime: 3600 + 7200)   // the host's clock stepped 2 h forward
+        #expect(c.bootTimes[id] == first)
+        push(uptime: 3600)          // and back
+        #expect(c.bootTimes[id] == first)
+    }
+
+    /// This Mac's own clock stepping: every kept boot date moves with it,
+    /// so `now − uptime` samples keep matching it.
+    @Test("a client clock step moves the kept boot dates by the step, jitter doesn't")
+    func clientClockStep() {
+        #expect(RemoteHostController.clockStep(last: nil, now: 100) == 0)
+        #expect(RemoteHostController.clockStep(last: 100, now: 101.5) == 0)
+        #expect(RemoteHostController.clockStep(last: 100, now: 3700) == 3600)
+        #expect(RemoteHostController.clockStep(last: 3700, now: 100) == -3600)
+        // Stable while the clock isn't touched.
+        let a = RemoteHostController.wallClockOffset()
+        #expect(abs(RemoteHostController.wallClockOffset() - a) < 1)
+    }
 }
