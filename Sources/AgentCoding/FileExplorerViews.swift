@@ -428,6 +428,11 @@ struct FileExplorerPane: View {
                                 onCopyPath: { copyPath(item.node.path) })
                     }
                 }
+                if model.statusFailed {
+                    Text("Git status failed here — changed files aren't marked")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(8)
+                }
                 if model.truncated {
                     Text("Tree truncated — repo has too many files to list")
                         .font(.system(size: 10)).foregroundStyle(.tertiary)

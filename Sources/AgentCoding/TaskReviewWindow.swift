@@ -36,6 +36,9 @@ enum TaskLitter {
 struct TaskReviewData: Equatable, Sendable {
     var logLines: [String] = []
     var statusLines: [String] = []
+    /// The checkout's `git status` failed (`RepoGitPrograms.failedStatus`) —
+    /// and with it the whole-tree diff: an empty diff isn't "No changes".
+    var statusFailed: Bool { statusLines.contains(RepoGitPrograms.statusFailedLine) }
     var files: [TaskDiffFile] = []
 
     /// What a session's review compares against.

@@ -33,6 +33,9 @@ enum LandingCheck: Equatable, Sendable {
     case dirtyTarget
     case noTarget
     case noBranch
+    /// `git status` in the branch's checkout failed under `RepoGitPrograms`
+    /// (a filter it can't run safely): whether it's clean is unknown.
+    case statusFailed
     /// The machine answered nothing usable.
     case failed
 }
@@ -60,9 +63,10 @@ enum LandingVerification: Equatable, Sendable {
     /// The machine couldn't be asked.
     case unknown
 
-    /// The verify command's output.
+    /// The verify command's output. STATUSFAILED: the checkout's status
+    /// can't be read — not known, never "not there yet" for ever.
     static func parse(_ out: String?) -> LandingVerification {
-        guard let out else { return .unknown }
+        guard let out, !out.contains("STATUSFAILED") else { return .unknown }
         if out.contains("NOREMOTE") { return .remoteUnreachable }
         if out.contains("LANDED") { return .landed }
         if out.contains("PENDING") { return .pending }
@@ -245,7 +249,12 @@ extension CodingTaskEngine {
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
         if let src = sourceDir, !src.isEmpty {
-            cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo dirty-source; exit 0; fi; "
+            // A status that failed isn't uncommitted work: handing it to the
+            // agent (whose own git runs the repository's programs) for a
+            // clean checkout stalled the landing.
+            cmd += "if [ -d \(q(src)) ]; then s=$(\(TaskLitter.status(q(src)))); "
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo status-failed; exit 0; fi; "
+                + "if [ -n \"$s\" ]; then echo dirty-source; exit 0; fi; fi; "
         }
         cmd += "a=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
             + "b=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
@@ -278,6 +287,7 @@ extension CodingTaskEngine {
         case "dirty-target": return .dirtyTarget
         case "no-target": return .noTarget
         case "no-branch": return .noBranch
+        case "status-failed": return .statusFailed
         default: return .failed
         }
     }
@@ -293,7 +303,9 @@ extension CodingTaskEngine {
         guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo PENDING" }
         var cmd = RepoGitPrograms.off(q(root))
         if let src = sourceDir, !src.isEmpty {
-            cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
+            cmd += "if [ -d \(q(src)) ]; then s=$(\(TaskLitter.status(q(src)))); "
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo STATUSFAILED; exit 0; fi; "
+                + "if [ -n \"$s\" ]; then echo PENDING; exit 0; fi; fi; "
         }
         func inRef(_ t: String) -> String {
             // Revisions after --end-of-options: never an option, whatever
@@ -779,6 +791,9 @@ extension CodingTaskEngine {
                     "The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry.",
                     comment: "task landing"), target))
                 return nil
+            case .statusFailed:
+                needsYou(taskID, Self.statusFailedText)
+                return nil
             case .failed where out == nil && !delegated:
                 needsYou(taskID, NSLocalizedString("Couldn't reach the workspace — is it running?",
                                                    comment: "task landing"))
@@ -968,6 +983,10 @@ extension CodingTaskEngine {
             timeout: 30)
         return LandingVerification.parse(out)
     }
+
+    nonisolated static let statusFailedText = NSLocalizedString(
+        "Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done.",
+        comment: "task landing: git status fails with the repository's programs switched off")
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
     /// What a landing that stalled says (and how a batch's delivery tells a

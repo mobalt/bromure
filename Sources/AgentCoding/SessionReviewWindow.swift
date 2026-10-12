@@ -662,19 +662,28 @@ struct ReviewView: View {
     @ViewBuilder private func emptyState(_ data: TaskReviewData) -> some View {
         let turnHidden = !showAll && focus.files != nil && !data.files.isEmpty
         VStack(spacing: 12) {
-            ContentUnavailableView(
-                turnHidden ? NSLocalizedString("This turn's files have no changes here", comment: "review")
-                           : NSLocalizedString("No changes", comment: "review"),
-                systemImage: "checkmark.seal",
-                description: Text(emptyExplanation(turnHidden: turnHidden)))
-            HStack {
-                if turnHidden {
-                    Button(NSLocalizedString("Show All Changes", comment: "review")) { showAll = true }
-                }
-                if base == .uncommitted {
-                    Button(NSLocalizedString("Show the Last Commit", comment: "review")) {
-                        base = .lastCommit; baseChosen = true
-                        Task { await load() }
+            if data.statusFailed && data.files.isEmpty {
+                ContentUnavailableView(
+                    NSLocalizedString("Git couldn't read the changes", comment: "review: git status/diff failed"),
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(NSLocalizedString(
+                        "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal.",
+                        comment: "review: git status/diff failed")))
+            } else {
+                ContentUnavailableView(
+                    turnHidden ? NSLocalizedString("This turn's files have no changes here", comment: "review")
+                               : NSLocalizedString("No changes", comment: "review"),
+                    systemImage: "checkmark.seal",
+                    description: Text(emptyExplanation(turnHidden: turnHidden)))
+                HStack {
+                    if turnHidden {
+                        Button(NSLocalizedString("Show All Changes", comment: "review")) { showAll = true }
+                    }
+                    if base == .uncommitted {
+                        Button(NSLocalizedString("Show the Last Commit", comment: "review")) {
+                            base = .lastCommit; baseChosen = true
+                            Task { await load() }
+                        }
                     }
                 }
             }

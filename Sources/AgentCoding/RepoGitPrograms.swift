@@ -80,7 +80,17 @@ enum RepoGitPrograms {
     /// clean": a status that FAILS prints this line, so a failure is never
     /// the empty output a clean tree gives (which let a worktree holding
     /// edits be discarded as empty).
-    static let statusFailed = " || echo '!! (git status failed)'"
+    static let statusFailed = " || echo '\(statusFailedLine)'"
+    static let statusFailedLine = "!! (git status failed)"
+
+    /// Shell: true when `value` (a "$var" holding such a status) holds the
+    /// failure line. "Dirty" and "couldn't look" are told apart where it
+    /// matters: a status that fails under `off` (a repository filter whose
+    /// blank process is required — every stat-dirty path it covers is
+    /// fatal) is no reason to hand the work to an agent's own git.
+    static func failedStatus(_ value: String) -> String {
+        "printf '%s\\n' \(value) | grep -qxF '\(statusFailedLine)'"
+    }
 
     /// Shell printing ` M <path>` (NUL-ended with `nul`, else newline-ended)
     /// for every checked-out submodule under `dir` (already shell-quoted, or

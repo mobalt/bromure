@@ -292,6 +292,47 @@ struct RepoGitProgramsTests {
         #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
     }
 
+    /// Finding (CWE-754): the required blank process (above) makes `git
+    /// status` fatal once a path it filters is stat-dirty. The failure line
+    /// read as uncommitted work: Land handed a clean checkout to the agent's
+    /// own git, its verify stayed PENDING until "Landing stalled", and the
+    /// file pane and the review showed no changes at all.
+    @Test("a status that fails under the required blank process is told apart from a dirty checkout")
+    func failedStatusIsNotDirty() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgf-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", wt = home + "/wt", marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        let global = home + "/global.sh", gcfg = home + "/gitconfig"
+        let iso = "export GIT_CONFIG_GLOBAL=\(gcfg) GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh("set -e; mkdir -p \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); "
+               + "printf '#!/bin/sh\\ncat\\n' > \(global); chmod +x \(pwn) \(global); "
+               + "printf '[filter \"lfs\"]\\n\\tclean = \(global)\\n\\tsmudge = \(global)\\n' > \(gcfg); "
+               + iso + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; "
+               + "echo b > x.bin; echo a > plain.txt; git add .; git commit -qm a; "
+               + "git worktree add -q -b wt/t \(wt); cd \(wt); echo more >> plain.txt; git commit -qam t; "
+               + "git config filter.lfs.process \(pwn); git config filter.lfs.required false")
+        let check = { CodingTaskEngine.parseLandingCheck(self.sh(iso + CodingTaskEngine.landingCheckCommand(
+            root: root, branch: "wt/t", target: "main", sourceDir: wt, mode: .merge))) }
+        let verify = { self.sh(iso + CodingTaskEngine.landingVerifyCommand(
+            root: root, branch: "wt/t", target: "main", sourceDir: wt)) }
+        // The filtered file is stat-dirty (untouched content): status fails.
+        _ = sh("touch -t 202001010000 \(wt)/x.bin")
+        #expect(sh(iso + TaskLitter.status("'\(wt)'")).contains(RepoGitPrograms.statusFailedLine))
+        #expect(check() == .statusFailed)
+        #expect(LandingVerification.parse(verify()) == .unknown)
+        #expect(sh(iso + "git -C '\(root)' rev-parse main") != sh(iso + "git -C '\(root)' rev-parse wt/t"))
+        // The review and the file pane say so — not "no changes".
+        let review = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: wt, base: .uncommitted)))
+        #expect(review.statusFailed)
+        #expect(FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: RepoGitPrograms.statusFailedLine + "\0")]))
+        #expect(!FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: " M a.txt\0")]))
+        // A real edit, status readable again: dirty, the agent commits it.
+        _ = sh(iso + "cd \(wt) && git -c filter.lfs.process= update-index -q --refresh; echo edit >> plain.txt")
+        #expect(check() == .dirtySource)
+        #expect(LandingVerification.parse(verify()) == .pending)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
     /// Finding: the same hidden submodule edit passed the checks that gate
     /// `git worktree remove --force` — the landing's dirty-source check
     /// (a merged branch's worktree is removed) and Mark done's empty branch.
