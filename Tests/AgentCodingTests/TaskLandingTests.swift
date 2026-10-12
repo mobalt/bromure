@@ -368,6 +368,40 @@ struct TaskLandingTests {
         #expect(s.task(landing.id)?.stage == .testing)
     }
 
+    /// Finding (CWE-362): toReview checked for Done only before its
+    /// worktree lookup awaited; a card that landed meanwhile was written
+    /// back to Review. And "Back to In Progress" on such a card cleared its
+    /// landing, losing the merge.
+    @Test("a landed card is never put back in Review, and Back to In Progress finishes it")
+    func landedCardStaysLanded() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let t = reviewTask(s)
+        #expect(TaskDispatcher.mayReturnToReview(s.task(t.id)!))
+        // At work: a hand-in moves it. Taken back to the Backlog (Stop)
+        // during the lookup: it stays there.
+        s.mutate(t.id) { $0.stage = .inProgress }
+        #expect(TaskDispatcher.mayReturnToReview(s.task(t.id)!))
+        s.mutate(t.id) { $0.stage = .backlog }
+        #expect(!TaskDispatcher.mayReturnToReview(s.task(t.id)!))
+        s.mutate(t.id) { $0.stage = .testing }
+        s.mutate(t.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+            $0.completion = .merged(target: "main", verified: true, by: nil)
+        }
+        #expect(!TaskDispatcher.mayReturnToReview(s.task(t.id)!))
+        s.mutate(t.id) { $0.stage = .done }
+        #expect(!TaskDispatcher.mayReturnToReview(s.task(t.id)!))
+        s.mutate(t.id) { $0.stage = .testing }   // the stuck shape
+        engine.moveToInProgress(t.id)
+        #expect(s.task(t.id)?.stage == .done)
+        #expect(s.task(t.id)?.landing?.phase == .landed)
+        // A card that didn't land still goes back to work.
+        let other = reviewTask(s, branch: "wt/other")
+        engine.moveToInProgress(other.id)
+        #expect(s.task(other.id)?.stage == .inProgress)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

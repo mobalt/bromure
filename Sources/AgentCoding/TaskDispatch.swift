@@ -405,9 +405,18 @@ final class TaskDispatcher {
         return t
     }
 
+    /// Whether a hand-in may (still) put this card in Review: one at work,
+    /// or already in Review with no finished landing — never a Done card,
+    /// a landed one, or one taken back to the Backlog (Stop). Checked again
+    /// inside every write: the worktree lookup before it awaits (a guest
+    /// exec), and the card can land or be stopped meanwhile.
+    nonisolated static func mayReturnToReview(_ t: CodingTask) -> Bool {
+        t.stage == .inProgress || (t.stage == .testing && t.landing?.phase != .landed)
+    }
+
     private func toReview(_ taskID: UUID, delegation d: Delegation) async {
         // A Done card never goes back to Review on a late message.
-        guard let delegate, let task = delegate.codingTaskStore.task(taskID), task.stage != .done,
+        guard let delegate, let task = delegate.codingTaskStore.task(taskID), Self.mayReturnToReview(task),
               let slug = task.branchSlug else { return }
         let branch = "wt/\(slug)"
         // Where to look: the session that delivered, or — through a room —
@@ -440,6 +449,7 @@ final class TaskDispatcher {
                 profileID: s.profileID, branch: branch, repoPath: s.cwd)
             guard let dir = m.dir, let root = m.root else { continue }
             delegate.codingTaskStore.mutate(taskID) {
+                guard Self.mayReturnToReview($0) else { return }
                 $0.profileID = s.profileID
                 $0.repoPath = root
                 $0.branch = branch
@@ -455,6 +465,7 @@ final class TaskDispatcher {
             return
         }
         delegate.codingTaskStore.mutate(taskID) {
+            guard Self.mayReturnToReview($0) else { return }
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
