@@ -128,11 +128,56 @@ final class RemoteHostController {
         new - prev > 1
     }
 
-    /// The boot date shown for a host that stamps its boot: a moved stamp
-    /// takes the new sample; a stable one keeps the earlier of the two.
-    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
-        stampMoved ? derived : min(prev, derived)
+    /// The stamp moved BACKWARD and the uptime itself started over (well
+    /// below the last one reported): a new boot all the same — the host's
+    /// clock was set back between the two starts, so the new boot's stamp is
+    /// the earlier one. A backward stamp alone isn't one (an agent host
+    /// restarted after a clock change re-reads its Mac's boot time, moved by
+    /// the change), and the uptime is compared as reported, not as a boot
+    /// date: an agent host's uptime pauses through sleep, which moves its
+    /// derived date later without any reboot.
+    nonisolated static func bootStampWentBack(prev: Double, new: Double,
+                                              lastUptime: Int, uptime: Int) -> Bool {
+        prev - new > 1 && lastUptime - uptime > 20
     }
+
+    /// The boot date shown for a host that stamps its boot: a moved stamp
+    /// takes the new sample; a stable one keeps the earlier of the two —
+    /// unless the date kept is `confirmed` (a second sample agreed with it)
+    /// and this one is earlier by more than a late reply explains: a host
+    /// that counts uptime on its wall clock (before it used a monotonic one)
+    /// had its clock stepped forward, and `min` kept that date for the rest
+    /// of the boot. An unconfirmed date may be a first reply that came in
+    /// late (a stalled first connection): the on-time one corrects it.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool,
+                                     confirmed: Bool = false) -> Date {
+        if stampMoved { return derived }
+        if confirmed, prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
+        return min(prev, derived)
+    }
+
+    /// A sample within this of the date kept confirms it; one earlier than
+    /// a confirmed date by more is a clock step, not a sooner reply.
+    nonisolated static let earlierSampleCap: TimeInterval = 120
+
+    /// This Mac's wall clock against a clock that setting it can't move:
+    /// a change between two snapshots is a clock step here, and every boot
+    /// date kept (on the wall clock) moves by it — or `now − uptime`
+    /// samples would sit off by the step (read as a reboot, or refused).
+    nonisolated static func wallClockOffset(now: Date = Date()) -> TimeInterval {
+        let d = monotonicAnchor.duration(to: .now)
+        let mono = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        return now.timeIntervalSince1970 - mono
+    }
+    private nonisolated static let monotonicAnchor = ContinuousClock.now
+
+    /// The step to apply to kept boot dates: the offset's change since the
+    /// last snapshot, or 0 within jitter.
+    nonisolated static func clockStep(last: TimeInterval?, now: TimeInterval) -> TimeInterval {
+        guard let last, abs(now - last) > 2 else { return 0 }
+        return now - last
+    }
+    private var lastWallClockOffset: TimeInterval?
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -169,6 +214,10 @@ final class RemoteHostController {
     private(set) var bootTimes: [Profile.ID: Date] = [:]
     /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
     private var bootStamps: [Profile.ID: Double] = [:]
+    /// Each VM's last reported uptime, for `bootStampWentBack`.
+    private var lastUptimes: [Profile.ID: Int] = [:]
+    /// Boot dates a second sample agreed with (`bootTime`'s `confirmed`).
+    private var bootConfirmed = Set<Profile.ID>()
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -940,6 +989,12 @@ final class RemoteHostController {
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
         var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
+        let offset = Self.wallClockOffset()
+        let step = Self.clockStep(last: lastWallClockOffset, now: offset)
+        lastWallClockOffset = offset
+        if step != 0 {
+            for (k, d) in bootTimes { bootTimes[k] = d.addingTimeInterval(step) }
+        }
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard
@@ -964,10 +1019,19 @@ final class RemoteHostController {
                 if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
                     rebootedIDs.insert(id)
                     stampMoved = true
+                } else if let prev = bootStamps[id], let last = lastUptimes[id],
+                          let up = vm["uptimeSeconds"] as? Int,
+                          Self.bootStampWentBack(prev: prev, new: stamp, lastUptime: last, uptime: up) {
+                    // Before, `min` kept the previous boot's date for the
+                    // whole new boot (dashboard uptime, the iPad transcript
+                    // floor letting the last boot's questions through).
+                    rebootedIDs.insert(id)
+                    stampMoved = true
                 }
                 bootStamps[id] = stamp
             }
             if let up = vm["uptimeSeconds"] as? Int {
+                lastUptimes[id] = up
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
                 if stamp != nil, let prev = bootTimes[id] {
                     // The host stamps its boot: the date here (dashboard
@@ -976,7 +1040,13 @@ final class RemoteHostController {
                     // never later: a late reply (its uptime short by the
                     // delay) or a Mac that slept (awake-only uptime) moved
                     // it forward, cutting the uptime and the transcript.
-                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved)
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved,
+                                                  confirmed: bootConfirmed.contains(id))
+                    if stampMoved {
+                        bootConfirmed.remove(id)
+                    } else if abs(prev.timeIntervalSince(derived)) <= Self.earlierSampleCap {
+                        bootConfirmed.insert(id)
+                    }
                 } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
                         if stamp == nil { rebootedIDs.insert(id) }
@@ -987,6 +1057,7 @@ final class RemoteHostController {
                     // else stable — keep prev (dashboard uptime doesn't wobble)
                 } else {
                     bootTimes[id] = derived   // first sighting, never a reboot
+                    bootConfirmed.remove(id)
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
