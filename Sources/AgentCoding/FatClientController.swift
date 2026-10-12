@@ -127,6 +127,12 @@ final class RemoteHostController {
     nonisolated static func bootStampMoved(prev: Double, new: Double) -> Bool {
         new - prev > 1
     }
+
+    /// The boot date shown for a host that stamps its boot: a moved stamp
+    /// takes the new sample; a stable one keeps the earlier of the two.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
+        stampMoved ? derived : min(prev, derived)
+    }
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -953,15 +959,25 @@ final class RemoteHostController {
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
             let stamp = vm["bootedAt"] as? Double
+            var stampMoved = false
             if let stamp {
                 if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
                     rebootedIDs.insert(id)
+                    stampMoved = true
                 }
                 bootStamps[id] = stamp
             }
             if let up = vm["uptimeSeconds"] as? Int {
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
-                if let prev = bootTimes[id] {
+                if stamp != nil, let prev = bootTimes[id] {
+                    // The host stamps its boot: the date here (dashboard
+                    // uptime, the transcript floor) moves on a new boot only.
+                    // Otherwise only ever earlier — the most on-time sample —
+                    // never later: a late reply (its uptime short by the
+                    // delay) or a Mac that slept (awake-only uptime) moved
+                    // it forward, cutting the uptime and the transcript.
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved)
+                } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
                         if stamp == nil { rebootedIDs.insert(id) }
                         bootTimes[id] = derived
