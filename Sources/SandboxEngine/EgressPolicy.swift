@@ -41,7 +41,10 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
             case .any:
                 return true
             case .cidr(let net, let mask):
-                guard let ip else { return false }
+                // Proxy-layer callers (CONNECT 192.0.2.10:6443) pass no IP, only
+                // the target as a hostname — an IP literal there is the address.
+                guard let ip = ip ?? hostnames.lazy.compactMap(EgressPolicy.parseIPv4).first
+                else { return false }
                 return (ip & mask) == (net & mask)
             case .host(let domain, let apex):
                 for h in hostnames {
