@@ -370,20 +370,61 @@ struct DelegationTests {
         f.engine.tick()
         #expect(f.store.delegation(d.id)?.status == .working)
         #expect(f.store.delegation(d.id)?.goneFrom == nil && f.store.delegation(d.id)?.failure == nil)
-        // Gone again, and it delivers before it's seen: the delivery goes in.
-        f.sessions.remove(childID)
+        // Gone again; back, and it delivers — through its tool, no id (one
+        // delegation: the id is optional) — before the next tick sees it.
+        func goAway() async {
+            f.sessions.remove(childID)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+        }
+        await goAway()
+        #expect(f.store.delegation(d.id)?.status == .failed)
+        f.sessions.upsert(child)
+        let r = parse(await f.server.handle(line: call("deliver", ["summary": "done"]), branch: "w7"))
+        #expect(!isError(r), Comment(rawValue: text(r)))
+        #expect(f.store.delegation(d.id)?.status == .delivered)
+    }
+
+    /// Review: a gone delegation refused cancel/close ("already failed"),
+    /// and its revival then undid a cancel the parent was told of; and a
+    /// session back DELETED revived it.
+    @Test("a gone delegation can be cancelled for good; one whose session is deleted stays failed")
+    func goneSessionCancelOrDeleted() async throws {
+        let f = fixture()
+        let (d, childID) = await delegated(f)
+        f.engine.tick()
+        f.engine.absenceGrace = 0
+        let child = try #require(f.sessions.session(childID))
+        func goAway() async {
+            f.sessions.remove(childID)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+        }
+        await goAway()
+        try await f.engine.cancel(from: f.parentID, delegationKey: d.id.uuidString, reason: "not needed")
+        #expect(f.store.delegation(d.id)?.status == .cancelled && f.store.delegation(d.id)?.goneFrom == nil)
+        f.sessions.upsert(child)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .cancelled)
+
+        // Another, whose session comes back deleted: the end, no revival.
+        let (d2, child2ID) = await delegated(f, childWindow: 8)
+        f.engine.tick()
+        var gone = try #require(f.sessions.session(child2ID))
+        f.sessions.remove(child2ID)
         f.engine.tick()
         try? await Task.sleep(nanoseconds: 20_000_000)
         f.engine.tick()
-        #expect(f.store.delegation(d.id)?.status == .failed)
-        _ = try await f.engine.post(d.id, from: .child, kind: .deliver, text: "done")
-        #expect(f.store.delegation(d.id)?.status == .delivered)
-        f.sessions.upsert(child)
-        // A deleted session is still the end.
-        f.sessions.mutate(childID) { $0.deletedAt = Date() }
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        gone.deletedAt = Date()
+        f.sessions.upsert(gone)
         f.engine.tick()
-        #expect(f.store.delegation(d.id)?.status == .failed)
-        #expect(f.store.delegation(d.id)?.goneFrom == nil)
+        #expect(f.store.delegation(d2.id)?.status == .failed && f.store.delegation(d2.id)?.goneFrom == nil)
+        await #expect(throws: (any Error).self) {
+            try await f.engine.post(d2.id, from: .child, kind: .deliver, text: "done")
+        }
     }
 
     @Test("what the host owes a session is on the record, not in a queue")
