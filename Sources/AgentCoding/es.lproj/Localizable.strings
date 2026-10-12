@@ -4160,3 +4160,12 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "«%@» no se actualizó";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Se inició con su disco actual mientras la pregunta estaba abierta (lo lanzó una automatización). Apágalo y vuelve a iniciarlo para que se te pregunte de nuevo.";
+
+/* automation editor */
+"This workspace has no github.com token." = "Este espacio de trabajo no tiene token de github.com.";
+
+/* automation editor */
+"This workspace has no Linear key." = "Este espacio de trabajo no tiene clave de Linear.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "El host no pudo listarlos (HTTP %d).";

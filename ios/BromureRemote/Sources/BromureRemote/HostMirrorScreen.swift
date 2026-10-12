@@ -658,6 +658,7 @@ private struct AutomationEditorSheet: View {
                 credentials: { [controller] id in
                     controller.credentials(for: id).map { ($0.github, $0.linear) }
                 },
+                sources: controller.automationSources,
                 editing: editing,
                 onSave: { auto in
                     controller.upsertAutomation(auto)

@@ -38,6 +38,45 @@ extension ACAppDelegate {
         })?.token
     }
 
+    /// `POST /automation-sources` {profile, kind, repo?, branch?}: what a
+    /// fat client's editor would have fetched with the workspace's token.
+    /// {items: […]} (dirs: also `truncated`), or {error, code} (code 401: the
+    /// GitHub token was refused).
+    func automationSources(_ body: [String: Any]) async -> [String: Any] {
+        guard let pid = (body["profile"] as? String).flatMap(UUID.init(uuidString:)),
+              let kind = body["kind"] as? String else { return ["error": "profile and kind required"] }
+        let repo = body["repo"] as? String ?? ""
+        let branch = body["branch"] as? String ?? ""
+        do {
+            switch kind {
+            case "repos", "branches", "dirs":
+                guard let token = githubToken(profileID: pid), !token.isEmpty else {
+                    return ["error": NSLocalizedString("This workspace has no github.com token.", comment: "automation editor")]
+                }
+                if kind == "repos" { return ["items": try await GitHubPRPoller.fetchRepos(token: token)] }
+                guard GitHubPRPoller.isValidRepoSlug(repo) else { return ["error": "Bad repository"] }
+                if kind == "branches" {
+                    return ["items": try await GitHubPRPoller.fetchBranches(repo: repo, token: token)]
+                }
+                let dirs = try await GitHubPRPoller.fetchDirectories(repo: repo, token: token, branch: branch)
+                return ["items": dirs ?? [], "truncated": dirs == nil]
+            case "teams", "projects":
+                guard let key = profile(for: pid)?.linearToken, !key.isEmpty else {
+                    return ["error": NSLocalizedString("This workspace has no Linear key.", comment: "automation editor")]
+                }
+                if kind == "teams" {
+                    return ["items": try await LinearPoller.fetchTeams(token: key).map { ["key": $0.key, "name": $0.name] }]
+                }
+                return ["items": try await LinearPoller.fetchProjects(token: key).map { ["id": $0.id, "name": $0.name] }]
+            default:
+                return ["error": "Unknown kind"]
+            }
+        } catch {
+            let ns = error as NSError
+            return ["error": ns.localizedDescription, "code": ns.domain == "GitHubPoller" ? ns.code : 0]
+        }
+    }
+
     func fetchGitHubRepos(profileID: UUID) async throws -> [String] {
         guard let token = githubToken(profileID: profileID), !token.isEmpty else { return [] }
         return try await GitHubPRPoller.fetchRepos(token: token)

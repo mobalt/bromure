@@ -2276,6 +2276,26 @@ final class RemoteHostController {
     func deleteTask(_ id: UUID) {
         send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
     }
+
+    /// The automation / watch editors' token-backed lists, fetched by the
+    /// host with the workspace's own credentials (they aren't mirrored).
+    /// A refusal throws: a GitHub 401 as GitHubPoller/401 (the editors'
+    /// "token rejected"), anything else (an older host without the route
+    /// too) as an error the editor shows above its free-text field.
+    var automationSources: AutomationSources {
+        let host = self.host
+        return AutomationSources { body in
+            let resp = try await Task.detached(priority: .userInitiated) {
+                try RemoteTransport.client(for: host).request("POST", "/automation-sources", body: body)
+            }.value
+            if resp.status == 200, resp.json["error"] == nil { return resp.json }
+            let code = resp.json["code"] as? Int ?? 0
+            let msg = resp.json["error"] as? String
+                ?? String(format: NSLocalizedString("The host couldn't list them (HTTP %d).", comment: "automation editor"), resp.status)
+            throw NSError(domain: code != 0 ? "GitHubPoller" : "AutomationSources", code: code,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+    }
     func upsertTask(_ task: CodingTask) {
         guard let doc = ACAppDelegate.codableToDict(task) else { return }
         send("POST", "/tasks", body: doc)
@@ -4094,6 +4114,7 @@ final class RemoteHostWindow: NSWindow {
             credentials: { [controller] id in
                 controller.credentials(for: id).map { ($0.github, $0.linear) }
             },
+            sources: controller.automationSources,
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -4268,9 +4289,8 @@ final class RemoteHostWindow: NSWindow {
                         c.findingCommand(id, "duplicate", body: ["of": of.uuidString])
                     },
                     deleteFinding: { c.findingCommand($0, "") },
-                    // No remote repo listing: the editor falls back to typing
-                    // owner/name.
-                    fetchRepos: { _ in [] }))
+                    // Listed by the host, with the workspace's token.
+                    fetchRepos: { [controller = c] pid in try await controller.automationSources.repos(pid) }))
             let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false

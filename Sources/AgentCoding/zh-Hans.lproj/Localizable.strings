@@ -4158,3 +4158,12 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "“%@”未升级";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "在显示该问题时，它已使用当前磁盘启动（由自动化启动）。请将其关闭后重新启动，以再次询问。";
+
+/* automation editor */
+"This workspace has no github.com token." = "此工作区没有 github.com 令牌。";
+
+/* automation editor */
+"This workspace has no Linear key." = "此工作区没有 Linear 密钥。";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "主机无法列出它们（HTTP %d）。";

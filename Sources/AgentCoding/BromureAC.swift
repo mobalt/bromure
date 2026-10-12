@@ -5175,6 +5175,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onUpsertAutomation = { [weak self] doc in
             MainActor.assumeIsolated { self?.automationUpsertScheduled(doc) ?? false }
         }
+        server.onAutomationSources = { [weak self] body in
+            await self?.automationSources(body) ?? ["error": "no app"]
+        }
         server.onDeleteAutomation = { [weak self] id in
             MainActor.assumeIsolated {
                 guard let self, let uuid = UUID(uuidString: id) else { return false }

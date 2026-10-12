@@ -311,6 +311,46 @@ struct AutomationPrefill: Sendable {
 /// are available), Trigger, Task, unattended-run warnings, recent runs.
 /// Guardrail overrides and macOS notifications are follow-ups — the
 /// permissions section links to the workspace's settings instead.
+/// The lists a workspace's GitHub token or Linear key can see, for an
+/// editor that doesn't hold them: a fat client mirrors workspaces without
+/// their credentials, so it asks its host (`POST /automation-sources`).
+/// Without this the editor knew the token existed, never fetched, and
+/// spun on "loading repositories…" for good.
+struct AutomationSources {
+    /// {profile, kind, repo?, branch?} → the host's reply.
+    var call: (_ body: [String: Any]) async throws -> [String: Any]
+
+    private func items(_ profileID: UUID, _ kind: String, _ extra: [String: Any] = [:]) async throws -> [String: Any] {
+        var body = extra
+        body["profile"] = profileID.uuidString
+        body["kind"] = kind
+        return try await call(body)
+    }
+    func repos(_ pid: UUID) async throws -> [String] {
+        try await items(pid, "repos")["items"] as? [String] ?? []
+    }
+    func branches(_ pid: UUID, repo: String) async throws -> [String] {
+        try await items(pid, "branches", ["repo": repo])["items"] as? [String] ?? []
+    }
+    /// nil: the tree was too big to list (free text), as locally.
+    func directories(_ pid: UUID, repo: String, branch: String) async throws -> [String]? {
+        let r = try await items(pid, "dirs", ["repo": repo, "branch": branch])
+        return r["truncated"] as? Bool == true ? nil : (r["items"] as? [String] ?? [])
+    }
+    func teams(_ pid: UUID) async throws -> [LinearPoller.LinearTeam] {
+        ((try await items(pid, "teams")["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let k = $0["key"] as? String, let n = $0["name"] as? String else { return nil }
+            return LinearPoller.LinearTeam(key: k, name: n)
+        }
+    }
+    func projects(_ pid: UUID) async throws -> [LinearPoller.LinearProject] {
+        ((try await items(pid, "projects")["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let i = $0["id"] as? String, let n = $0["name"] as? String else { return nil }
+            return LinearPoller.LinearProject(id: i, name: n)
+        }
+    }
+}
+
 struct AutomationEditorView: View {
     var store: ScheduledAutomationStore
     /// Snapshot of the delegate's profiles at presentation time.
@@ -319,6 +359,9 @@ struct AutomationEditorView: View {
     /// client mirrors workspaces without their credentials). nil, or nil
     /// for a workspace: read the profile.
     let credentials: ((UUID) -> (github: Bool, linear: Bool)?)?
+    /// Where the token-backed lists come from when `profiles` has no token
+    /// (a fat client). nil: fetched here with the profile's token.
+    let sources: AutomationSources?
     let onSave: (ScheduledAutomation) -> Void
     let onRunNow: (ScheduledAutomation) -> Void
     let onDelete: (UUID) -> Void
@@ -423,6 +466,7 @@ struct AutomationEditorView: View {
     init(store: ScheduledAutomationStore,
          profiles: [Profile],
          credentials: ((UUID) -> (github: Bool, linear: Bool)?)? = nil,
+         sources: AutomationSources? = nil,
          editing id: UUID?,
          prefill: AutomationPrefill? = nil,
          initialTrigger: ScheduledAutomation.TriggerKind? = nil,
@@ -435,6 +479,7 @@ struct AutomationEditorView: View {
         self.store = store
         self.profiles = profiles
         self.credentials = credentials
+        self.sources = sources
         self.onSave = onSave
         self.onRunNow = onRunNow
         self.onDelete = onDelete
@@ -687,8 +732,10 @@ struct AutomationEditorView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 summaryStrip
-                triggerSection
+                // The workspace first: the trigger's repositories, branches
+                // and Linear teams are the ones its tokens can see.
                 workspaceSection
+                triggerSection
                 taskSection
                 finishSection
                 if !askLabels.isEmpty { unattendedWarning }
@@ -810,9 +857,14 @@ struct AutomationEditorView: View {
         repoChoices = nil; repoLoadError = nil
         teamChoices = nil; teamLoadError = nil
         guard let profile = selectedProfile else { return }
-        if let token = githubToken, !token.isEmpty {
+        let localToken = githubToken.flatMap { $0.isEmpty ? nil : $0 }
+        if localToken != nil || (sources != nil && hasGitHubToken) {
             do {
-                repoChoices = try await GitHubPRPoller.fetchRepos(token: token)
+                if let localToken {
+                    repoChoices = try await GitHubPRPoller.fetchRepos(token: localToken)
+                } else if let sources {
+                    repoChoices = try await sources.repos(profile.id)
+                }
                 // Prefilled from a terminal tab: if the folder name matches
                 // one of the token's repos, preselect it.
                 if draft.githubRepo.isEmpty {
@@ -830,6 +882,10 @@ struct AutomationEditorView: View {
             do { teamChoices = try await LinearPoller.fetchTeams(token: profile.linearToken) }
             catch { teamLoadError = error.localizedDescription }
             projectChoices = try? await LinearPoller.fetchProjects(token: profile.linearToken)
+        } else if let sources, hasLinearToken {
+            do { teamChoices = try await sources.teams(profile.id) }
+            catch { teamLoadError = error.localizedDescription }
+            projectChoices = try? await sources.projects(profile.id)
         }
     }
 
@@ -838,16 +894,21 @@ struct AutomationEditorView: View {
     private func loadRepoDetails() async {
         branchChoices = nil; dirChoices = nil
         guard draft.trigger.isGitHub,
-              GitHubPRPoller.isValidRepoSlug(draft.githubRepo),
-              let token = githubToken, !token.isEmpty else { return }
-        branchChoices = (try? await GitHubPRPoller.fetchBranches(
-            repo: draft.githubRepo, token: token)) ?? []
-        if draft.trigger == .githubCommit {
-            // nil result (tree truncated) or a throw → empty, which the
-            // subfolder field reads as "fall back to free text".
-            dirChoices = ((try? await GitHubPRPoller.fetchDirectories(
-                repo: draft.githubRepo, token: token,
-                branch: draft.filters.commitBranch)) ?? nil) ?? []
+              GitHubPRPoller.isValidRepoSlug(draft.githubRepo) else { return }
+        let repo = draft.githubRepo, branch = draft.filters.commitBranch
+        if let token = githubToken, !token.isEmpty {
+            branchChoices = (try? await GitHubPRPoller.fetchBranches(repo: repo, token: token)) ?? []
+            if draft.trigger == .githubCommit {
+                // nil result (tree truncated) or a throw → empty, which the
+                // subfolder field reads as "fall back to free text".
+                dirChoices = ((try? await GitHubPRPoller.fetchDirectories(
+                    repo: repo, token: token, branch: branch)) ?? nil) ?? []
+            }
+        } else if let sources, hasGitHubToken, let pid = selectedProfile?.id {
+            branchChoices = (try? await sources.branches(pid, repo: repo)) ?? []
+            if draft.trigger == .githubCommit {
+                dirChoices = ((try? await sources.directories(pid, repo: repo, branch: branch)) ?? nil) ?? []
+            }
         }
     }
 

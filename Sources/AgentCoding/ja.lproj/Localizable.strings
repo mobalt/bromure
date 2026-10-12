@@ -4158,3 +4158,12 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "「%@」はアップグレードされませんでした";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "質問の表示中に現在のディスクで起動しました（オートメーションが起動しました）。シャットダウンしてから再度起動すると、もう一度確認されます。";
+
+/* automation editor */
+"This workspace has no github.com token." = "このワークスペースには github.com のトークンがありません。";
+
+/* automation editor */
+"This workspace has no Linear key." = "このワークスペースには Linear のキーがありません。";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "ホストで一覧を取得できませんでした（HTTP %d）。";
