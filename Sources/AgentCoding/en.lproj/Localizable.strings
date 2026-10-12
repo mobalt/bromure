@@ -4190,3 +4190,6 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "“%@” wasn't upgraded";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Looking for the worktree…";

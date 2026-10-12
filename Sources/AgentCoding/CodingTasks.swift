@@ -300,6 +300,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return Date().timeIntervalSince(at) < Self.locateWindow
     }
     static let locateWindow: TimeInterval = 600
+    static var locatingText: String {
+        NSLocalizedString("Looking for the worktree…", comment: "task card: Review is still looking for a delivered branch's checkout")
+    }
 
     /// A delivered card in Review whose worktree wasn't found when it came
     /// in (and isn't landed): the review window looks for it again

@@ -380,8 +380,17 @@ final class TaskReviewWindowManager {
                     // meanwhile — the card pointing at a worktree now is what
                     // counts (the banner also reloads when it gains one later,
                     // e.g. the host's search outlasting a fat client's wait).
-                    if task.awaitsRelocation, await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
-                        _ = await c.relocate(task)
+                    if task.awaitsRelocation {
+                        if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
+                            _ = await c.relocate(task)
+                        }
+                        // Another look may still be under way (a second
+                        // window's, the host's for a fat client): its outcome
+                        // is this load's — not "can't reach the machine".
+                        let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
+                        while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                        }
                         if let now = t(), !(now.worktreeDir ?? "").isEmpty {
                             await MainActor.run { self?.reload(id) }
                             return nil
@@ -711,7 +720,14 @@ struct TaskReviewBanner: View {
 
     @ViewBuilder private func actions(_ t: CodingTask) -> some View {
         let landing = t.landing != nil && t.landing?.phase != .needsYou
-        if noCode {
+        if t.isLocating {
+            // Still looking for the worktree: nothing to merge yet, and not
+            // "no code" either — Mark Done asks first.
+            ProgressView().controlSize(.small)
+            Text(CodingTask.locatingText)
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            markDoneButton(t)
+        } else if noCode {
             Button { markDone(t) } label: {
                 Label(NSLocalizedString("Mark Done", comment: "review"), systemImage: "checkmark.circle.fill")
             }
