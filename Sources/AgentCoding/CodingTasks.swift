@@ -300,6 +300,18 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return Date().timeIntervalSince(at) < Self.locateWindow
     }
     static let locateWindow: TimeInterval = 600
+    /// A fat client waiting on the host's look, at its `polls`-th look at
+    /// the mirror (2 a second): found (true), over (false), or keep waiting
+    /// (nil) — for as long as the host shows it looking; 20 s for a host that
+    /// never does (older). A fixed 20 s gave up while the host was still
+    /// trying the next session, each up to 15 s.
+    static func locateOutcome(_ t: CodingTask?, sawLocating: Bool, polls: Int) -> Bool? {
+        guard let t else { return false }
+        if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+        if t.isLocating { return nil }
+        return sawLocating || polls >= 40 ? false : nil
+    }
+
     static var locatingText: String {
         NSLocalizedString("Looking for the worktree…", comment: "task card: Review is still looking for a delivered branch's checkout")
     }

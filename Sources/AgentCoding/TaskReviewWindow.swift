@@ -396,7 +396,8 @@ final class TaskReviewWindowManager {
                             return nil
                         }
                     }
-                    return await c.fetchReview(task, base)
+                    // The card as it is now, not as it was before any wait.
+                    return await c.fetchReview(t() ?? task, base)
                 },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },
                 removeComment: { c.removeComment(id, $0) },

@@ -4380,10 +4380,9 @@ final class RemoteHostWindow: NSWindow {
                 while Date() < deadline {
                     i += 1
                     try? await Task.sleep(nanoseconds: 500_000_000)
-                    guard let t = self.controller.taskStore.task(task.id) else { return false }
-                    if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
-                    if t.isLocating { sawLocating = true }
-                    else if sawLocating || i >= 40 { return false }
+                    let t = self.controller.taskStore.task(task.id)
+                    if t?.isLocating == true { sawLocating = true }
+                    if let done = CodingTask.locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
                     if i % 6 == 0 { self.controller.foregroundKick() }
                 }
                 return false

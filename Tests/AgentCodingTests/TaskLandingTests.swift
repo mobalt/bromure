@@ -470,6 +470,30 @@ struct TaskLandingTests {
         #expect(!t.isLocating && !t.isNoCode)
     }
 
+    /// Finding (CWE-670): a fat client gave up on the host's look after a
+    /// fixed 20 s, while the host was still trying sessions one after
+    /// another (up to 15 s each) — and never showed the worktree found.
+    @Test("a fat client keeps waiting while the host is looking, and stops when it ends")
+    func fatClientWaitsForTheLook() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        t.locatingSince = Date()
+        // Still looking at 2 min: wait.
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 240) == nil)
+        // The look ended with no find: over.
+        t.locatingSince = nil
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 241) == false)
+        // An older host never shows the stamp: 20 s.
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 39) == nil)
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 40) == false)
+        // Found.
+        t.worktreeDir = "/w"
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 3) == true)
+        #expect(CodingTask.locateOutcome(nil, sawLocating: true, polls: 3) == false)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
