@@ -70,6 +70,53 @@ struct MachineLinkTests {
         #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-open", body: ["profile": UUID().uuidString]) == nil)
     }
 
+    /// Finding (CWE-362): a session start's call was bounded piecewise — the
+    /// wait for a link, then an unbounded body write, then a read timer that
+    /// each trickled byte restarts — so it outlived the coalescer's wait and
+    /// a repeated Send started a second session. With `total`, the whole
+    /// call ends by then.
+    @Test("a call with a total deadline ends by it, however slowly the machine answers or reads")
+    func totalDeadline() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        var fds: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+        let far = fds[1]
+        var one: Int32 = 1
+        setsockopt(far, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        let farDone = DispatchSemaphore(value: 0)
+        defer { farDone.wait(); close(far); _ = hub.detach(id: id, owner: nil) }
+        #expect(hub.park(fd: fds[0], id: id, name: "M", owner: nil))
+        // A reply that trickles: a byte every 0.2 s never trips a 1 s read
+        // timeout on its own.
+        Thread.detachNewThread {
+            var buf = [UInt8](repeating: 0, count: 65536)
+            _ = read(far, &buf, buf.count)
+            _ = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".withCString { write(far, $0, strlen($0)) }
+            for _ in 0..<40 {
+                Thread.sleep(forTimeInterval: 0.2)
+                if write(far, "x", 1) != 1 { break }
+            }
+            farDone.signal()
+        }
+        var t0 = Date()
+        _ = hub.request(id, "POST", "/agent-sessions/start", body: [:], timeout: 1, total: 1.5)
+        #expect(Date().timeIntervalSince(t0) < 3)
+
+        // A machine that never reads a large body (files): the write is cut
+        // off at the deadline too.
+        var fds2: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds2)
+        defer { close(fds2[1]) }
+        #expect(hub.park(fd: fds2[0], id: id, name: "M", owner: nil))
+        let big = String(repeating: "a", count: 8 << 20)
+        t0 = Date()
+        let r = hub.request(id, "POST", "/agent-sessions/start", body: ["data": big], timeout: 1, total: 1.5)
+        #expect(r == nil)
+        #expect(Date().timeIntervalSince(t0) < 3)
+        #expect(SessionStartCoalescer.machineStartBudget < SessionStartCoalescer.pendingWait)
+    }
+
     /// A machine end that answers and then never closes (an SSH link whose
     /// close doesn't arrive): the reply must still come through at once.
     private static func silentMachine(reply: String) -> (fd: Int32, keepOpen: Int32) {

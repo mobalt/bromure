@@ -16,9 +16,14 @@ final class SessionStartCoalescer: @unchecked Sendable {
     static let shared = SessionStartCoalescer()
     /// How long a finished start answers the same request.
     static let window: TimeInterval = 10
-    /// Longest wait for a start still under way (an attached machine's
-    /// control call allows 60 s).
+    /// Longest wait for a start still under way. Longer than any attempt
+    /// may run (`machineStartBudget`): a repeat that gave up first started a
+    /// second session while the first was still being made.
     static let pendingWait: TimeInterval = 75
+    /// The whole of an attached machine's start — the wait for a link, the
+    /// body's write (files and all) and the reply. Each bounded on its own,
+    /// they added up past `pendingWait` on a slow link.
+    static let machineStartBudget: TimeInterval = 70
 
     private let cond = NSCondition()
     private var entries: [String: Entry] = [:]
