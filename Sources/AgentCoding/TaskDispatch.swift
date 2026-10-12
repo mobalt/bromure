@@ -444,11 +444,19 @@ final class TaskDispatcher {
         }
         delegate.codingTaskStore.mutate(taskID) {
             guard Self.mayReturnToReview($0) else { return }
-            $0.stage = .testing
-            $0.testingAt = Date()
-            $0.branch = branch
-            $0.lastError = Self.noWorktreeText(branch)
+            Self.deliveredWithoutFind(&$0, branch: branch)
         }
+    }
+
+    /// A delivery whose look found no worktree: to Review, saying so — unless
+    /// the card has its checkout already (the review window's look, or an
+    /// earlier delivery's, found it while this one's exec failed): a miss
+    /// says nothing about a checkout someone else found.
+    nonisolated static func deliveredWithoutFind(_ t: inout CodingTask, branch: String) {
+        t.stage = .testing
+        t.testingAt = Date()
+        t.branch = branch
+        if (t.worktreeDir ?? "").isEmpty { t.lastError = noWorktreeText(branch) }
     }
 
     /// A delivered card in Review whose worktree wasn't found when it came
