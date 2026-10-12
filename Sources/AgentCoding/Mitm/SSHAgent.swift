@@ -147,7 +147,7 @@ public final class SSHAgentServer: @unchecked Sendable {
 
             switch msgType {
             case AgentMsg.requestIdentities.rawValue:
-                let resp = try handleRequestIdentities(profileID: profileID)
+                let resp = try await handleRequestIdentities(profileID: profileID)
                 try writeFrame(fd: fd, payload: resp)
             case AgentMsg.signRequest.rawValue:
                 let resp = try await handleSignRequest(body: body, profileID: profileID)
@@ -161,7 +161,7 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     // MARK: - Message handlers
 
-    private func handleRequestIdentities(profileID: UUID) throws -> Data {
+    private func handleRequestIdentities(profileID: UUID) async throws -> Data {
         FileHandle.standardError.write(Data(
             "[ssh-agent] REQUEST_IDENTITIES from VM\n".utf8))
         let profileKeys = self.keys(for: profileID)
@@ -201,7 +201,10 @@ public final class SSHAgentServer: @unchecked Sendable {
         for socket in Set(picked.values) {
             guard let path = HostAgentClient.resolveHostSocket(socket) else { continue }
             let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout)
-            for ident in client.identities()
+            // Off the cooperative pool. This runs on every guest ssh, and a
+            // socket that accepts and then stays silent would pin a thread
+            // for hostAgentTimeout.
+            for ident in await client.identitiesDetached()
                 where picked[ident.blob] == socket && !seen.contains(ident.blob)
             {
                 seen.insert(ident.blob)

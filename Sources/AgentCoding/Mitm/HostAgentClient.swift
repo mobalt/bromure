@@ -20,9 +20,10 @@ import Foundation
 /// ever advertises and signs with the picked keys' blobs.
 final class HostAgentClient: @unchecked Sendable {
     let socketPath: String
-    /// Per-read/write timeout; nil = block. Set for host agents, where a
-    /// sign can wait on a hardware touch or a pinentry dialog — bounded so
-    /// an agent that never answers doesn't hold the VM's connection open.
+    /// Deadline for one RPC, from `connect` through the last byte. nil =
+    /// block. A host-agent sign can wait on a touch or a pinentry; the
+    /// same budget caps a connect that never finishes and a peer that
+    /// dribbles one byte at a time.
     let timeout: TimeInterval?
 
     /// One client PER WORKSPACE, registered by MitmEngine when it spawns
@@ -94,6 +95,20 @@ final class HostAgentClient: @unchecked Sendable {
         return out
     }
 
+    /// Same scan as `candidateHostSockets`, off the main thread. `gpgconf`
+    /// can stall on a lock; the editor must not wait for it.
+    static func candidateHostSocketsDetached() async -> [String] {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: candidateHostSockets())
+            }
+        }
+    }
+
+    /// `gpgconf` with no deadline beachballs whoever called it. Two seconds,
+    /// then SIGTERM and SIGKILL.
+    private static let gpgconfTimeout: TimeInterval = 2
+
     private static func gpgconfSSHSocket() -> String? {
         for bin in ["/opt/homebrew/bin/gpgconf", "/usr/local/bin/gpgconf",
                     "/usr/local/MacGPG2/bin/gpgconf"]
@@ -104,11 +119,20 @@ final class HostAgentClient: @unchecked Sendable {
             let out = Pipe()
             p.standardOutput = out
             p.standardError = FileHandle.nullDevice
+            let done = DispatchSemaphore(value: 0)
+            p.terminationHandler = { _ in done.signal() }
             guard (try? p.run()) != nil else { continue }
-            p.waitUntilExit()
+            if done.wait(timeout: .now() + gpgconfTimeout) == .timedOut {
+                p.terminate()
+                if done.wait(timeout: .now() + 0.5) == .timedOut, p.isRunning {
+                    kill(p.processIdentifier, SIGKILL)
+                    done.wait()
+                }
+            }
+            guard !p.isRunning, p.terminationStatus == 0 else { continue }
             let path = String(data: out.fileHandleForReading.readDataToEndOfFile(),
                               encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if p.terminationStatus == 0, !path.isEmpty { return path }
+            if !path.isEmpty { return path }
         }
         return nil
     }
@@ -116,7 +140,18 @@ final class HostAgentClient: @unchecked Sendable {
     /// REQUEST_IDENTITIES: the agent's keys as (wire blob, comment). Empty
     /// on I/O failure or protocol mismatch.
     func identities() -> [(blob: Data, comment: String)] {
-        guard let resp = request(Data([11])), !resp.isEmpty, resp[0] == 12 else { return [] }
+        parsedIdentities(request(Data([11])))
+    }
+
+    /// `identities()` off the Swift concurrency pool. Listing runs on every
+    /// guest `ssh`, and a silent socket would otherwise pin a cooperative
+    /// thread for the whole `timeout`.
+    func identitiesDetached() async -> [(blob: Data, comment: String)] {
+        parsedIdentities(await requestDetached(Data([11])))
+    }
+
+    private func parsedIdentities(_ resp: Data?) -> [(blob: Data, comment: String)] {
+        guard let resp, !resp.isEmpty, resp[0] == 12 else { return [] }
         var cursor = 1
         func u32() -> Int? {
             guard cursor + 4 <= resp.count else { return nil }
@@ -138,8 +173,8 @@ final class HostAgentClient: @unchecked Sendable {
         return result
     }
 
-    /// `request` off the Swift concurrency pool: a host agent's sign can
-    /// block for as long as `timeout` waiting on a touch.
+    /// `request` off the Swift concurrency pool. A host agent can block
+    /// for the whole `timeout` (a touch, or a socket that never answers).
     func requestDetached(_ payload: Data) async -> Data? {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -151,10 +186,19 @@ final class HostAgentClient: @unchecked Sendable {
     /// Send a single ssh-agent-protocol request frame, return the
     /// response frame (without the 4-byte length prefix). nil on
     /// any I/O failure — caller falls back to its own behaviour.
+    ///
+    /// With a `timeout`, the socket is non-blocking and one deadline
+    /// covers connect, both writes, and the body read.
     func request(_ payload: Data) -> Data? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
+
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
+        if deadline != nil {
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
+        }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -172,52 +216,77 @@ final class HostAgentClient: @unchecked Sendable {
                 connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        if connectStatus < 0 { return nil }
-        if let timeout {
-            var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        if connectStatus < 0 {
+            let waiting = errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK
+            guard waiting, let deadline,
+                  waitSocket(fd: fd, events: POLLOUT, deadline: deadline) else { return nil }
+            var soErr: Int32 = 0
+            var len = socklen_t(MemoryLayout<Int32>.size)
+            if getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &len) != 0 || soErr != 0 { return nil }
         }
 
         // Frame: 4-byte big-endian length + payload.
         var lenBE = UInt32(payload.count).bigEndian
         let lenData = Data(bytes: &lenBE, count: 4)
-        guard writeAll(fd: fd, data: lenData),
-              writeAll(fd: fd, data: payload) else { return nil }
+        guard writeAll(fd: fd, data: lenData, deadline: deadline),
+              writeAll(fd: fd, data: payload, deadline: deadline) else { return nil }
 
         // Read response length, then body.
-        guard let lenBuf = readExact(fd: fd, count: 4) else { return nil }
+        guard let lenBuf = readExact(fd: fd, count: 4, deadline: deadline) else { return nil }
         let respLen = Int(UInt32(bigEndian: lenBuf.withUnsafeBytes { $0.load(as: UInt32.self) }))
         guard respLen > 0, respLen <= 256 * 1024 else { return nil }
-        return readExact(fd: fd, count: respLen)
+        return readExact(fd: fd, count: respLen, deadline: deadline)
     }
 }
 
-private func writeAll(fd: Int32, data: Data) -> Bool {
+/// Poll until `events` or `deadline`. The remaining time shrinks, so a
+/// peer that writes one byte at a time cannot extend the call.
+private func waitSocket(fd: Int32, events: Int32, deadline: Date) -> Bool {
+    while true {
+        let remain = deadline.timeIntervalSinceNow
+        if remain <= 0 { return false }
+        var pfd = pollfd(fd: fd, events: Int16(events), revents: 0)
+        let ms = Int32(min(remain * 1000, Double(Int32.max)))
+        let n = poll(&pfd, 1, max(ms, 0))
+        // A hangup can still leave bytes in the buffer; the read or write
+        // that follows reports the real error.
+        if n > 0 { return true }
+        if n == 0 { return false }
+        if errno == EINTR { continue }
+        return false
+    }
+}
+
+private func writeAll(fd: Int32, data: Data, deadline: Date?) -> Bool {
     return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
         var sent = 0
         while sent < data.count {
+            if let deadline, !waitSocket(fd: fd, events: POLLOUT, deadline: deadline) { return false }
             let n = write(fd, raw.baseAddress!.advanced(by: sent), data.count - sent)
             if n < 0 {
                 if errno == EINTR { continue }
+                if deadline != nil, errno == EAGAIN || errno == EWOULDBLOCK { continue }
                 return false
             }
+            if n == 0 { return false }
             sent += n
         }
         return true
     }
 }
 
-private func readExact(fd: Int32, count: Int) -> Data? {
+private func readExact(fd: Int32, count: Int, deadline: Date?) -> Data? {
     var buf = [UInt8](repeating: 0, count: count)
     var got = 0
     while got < count {
+        if let deadline, !waitSocket(fd: fd, events: POLLIN, deadline: deadline) { return nil }
         let n = buf.withUnsafeMutableBufferPointer { ptr -> Int in
             read(fd, ptr.baseAddress!.advanced(by: got), count - got)
         }
         if n == 0 { return nil }
         if n < 0 {
             if errno == EINTR { continue }
+            if deadline != nil, errno == EAGAIN || errno == EWOULDBLOCK { continue }
             return nil
         }
         got += n

@@ -9165,8 +9165,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // File import stays off here (a key file is copied into ONE
             // workspace's folder; the template has none), but a host-agent
             // key is only a public key + socket, so new workspaces can
-            // inherit it.
-            hostAgentSockets: HostAgentClient.candidateHostSockets(),
+            // inherit it. The editor discovers sockets off the main thread.
             onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             claudeReauthRequiredAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: nil) },
@@ -9829,7 +9828,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
             },
-            hostAgentSockets: HostAgentClient.candidateHostSockets(),
+            // Socket discovery runs off the main thread inside the editor.
             onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             consentGrants: editing.flatMap { p in
                 mitmEngine.map { Self.consentGrantControls($0.consent, profileID: p.id) }

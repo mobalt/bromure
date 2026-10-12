@@ -531,6 +531,8 @@ struct ProfileEditorView: View {
     @State private var importError: String?
     /// Sheet state for "Add from host agent…".
     @State private var hostAgentSheet: HostAgentSheetState?
+    /// Filled off the main thread when the caller did not pass a list.
+    @State private var discoveredHostSockets: [String] = []
     /// This workspace's live consent decisions (Guardrails badges), polled
     /// from `consentGrants` while the pane is open.
     @State private var liveGrants: [String: ConsentGrantStatus] = [:]
@@ -603,6 +605,9 @@ struct ProfileEditorView: View {
         var selected: Set<String> = []
         var error: String?
         var loaded = false
+        /// A list is in flight. Distinct from `loaded` so editing the socket
+        /// field does not show a spinner.
+        var loading = false
     }
 
     let onSave: (Profile, _ generateSSH: Bool) -> Void
@@ -620,11 +625,12 @@ struct ProfileEditorView: View {
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
     /// Agent sockets to offer in "Add from host agent…" (`hostAgentSocket`
-    /// values, "" first = SSH_AUTH_SOCK).
+    /// values, "" first = SSH_AUTH_SOCK). Empty means the editor discovers
+    /// them off the main thread when `onListHostAgentKeys` is set.
     let hostAgentSockets: [String]
     /// Lists the keys a host agent holds, ready to add. nil = not on the
     /// host (remote clients) → the button is disabled.
-    let onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])?
+    let onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])?
     let consentGrants: ConsentGrantControls?
     /// Returns the date this profile/preferences' Claude subscription was
     /// captured (nil = not registered). A closure (not a value) so it's
@@ -681,7 +687,7 @@ struct ProfileEditorView: View {
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
         hostAgentSockets: [String] = [],
-        onListHostAgentKeys: ((_ socket: String) throws -> [ImportedSSHKey])? = nil,
+        onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])? = nil,
         consentGrants: ConsentGrantControls? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
         claudeReauthRequiredAt: (() -> Date?)? = nil,
@@ -884,6 +890,7 @@ struct ProfileEditorView: View {
         .sheet(item: $hostAgentSheet) { _ in
             hostAgentSheetView
         }
+        .task { await loadHostAgentSocketChoices() }
         .sheet(item: $credSheet) { sheet in
             credentialSheetView(sheet)
         }
@@ -3323,7 +3330,7 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .disabled(onImportSSHKey == nil)
                 Button {
-                    openHostAgentSheet(socket: hostAgentSockets.first ?? "")
+                    openHostAgentSheet(socket: hostSocketChoices.first ?? "")
                 } label: {
                     Label("From host agent…", systemImage: "key.radiowaves.forward")
                 }
@@ -3456,14 +3463,18 @@ struct ProfileEditorView: View {
             HStack {
                 TextField("Agent socket", text: Binding(
                     get: { hostAgentSheet?.socket ?? "" },
-                    set: { hostAgentSheet?.socket = $0; hostAgentSheet?.loaded = false }
+                    set: {
+                        hostAgentSheet?.socket = $0
+                        hostAgentSheet?.loaded = false
+                        hostAgentSheet?.loading = false
+                    }
                 ), prompt: Text("SSH_AUTH_SOCK"))
                     .textFieldStyle(.roundedBorder)
                     .font(.callout.monospaced())
                     .onSubmit { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
-                if hostAgentSockets.count > 1 {
+                if hostSocketChoices.count > 1 {
                     Menu {
-                        ForEach(hostAgentSockets, id: \.self) { socket in
+                        ForEach(hostSocketChoices, id: \.self) { socket in
                             Button(Self.hostAgentSocketName(socket)) {
                                 openHostAgentSheet(socket: socket)
                             }
@@ -3479,7 +3490,10 @@ struct ProfileEditorView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
-            if let err = state.error {
+            if state.loading {
+                Text("Loading keys…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let err = state.error {
                 Text(err).font(.caption).foregroundStyle(.red)
             } else if state.loaded && state.keys.isEmpty {
                 Text("This agent holds no keys. Plug in the security key, or check the socket.")
@@ -3524,24 +3538,51 @@ struct ProfileEditorView: View {
         .frame(width: 520)
     }
 
+    /// Passed-in sockets, or the list discovered in the background.
+    private var hostSocketChoices: [String] {
+        hostAgentSockets.isEmpty ? discoveredHostSockets : hostAgentSockets
+    }
+
+    /// `gpgconf` and `stat` stay off the main thread. Remote editors pass
+    /// no lister, so they never scan this Mac.
+    private func loadHostAgentSocketChoices() async {
+        guard onListHostAgentKeys != nil, hostAgentSockets.isEmpty else { return }
+        let found = await HostAgentClient.candidateHostSocketsDetached()
+        if !Task.isCancelled { discoveredHostSockets = found }
+    }
+
     /// (Re)load the sheet's key list from `socket`, opening it if needed.
+    /// The agent query blocks (bounded); it runs off the main thread.
     private func openHostAgentSheet(socket: String) {
         guard let lister = onListHostAgentKeys else { return }
-        var state = HostAgentSheetState(socket: socket)
-        do {
-            state.keys = try lister(socket)
-        } catch {
-            state.error = error.localizedDescription
-        }
-        state.loaded = true
         if hostAgentSheet == nil {
+            var state = HostAgentSheetState(socket: socket)
+            state.loading = true
             hostAgentSheet = state
         } else {
-            hostAgentSheet?.socket = state.socket
-            hostAgentSheet?.keys = state.keys
+            hostAgentSheet?.socket = socket
+            hostAgentSheet?.keys = []
             hostAgentSheet?.selected = []
-            hostAgentSheet?.error = state.error
+            hostAgentSheet?.error = nil
+            hostAgentSheet?.loaded = false
+            hostAgentSheet?.loading = true
+        }
+        Task {
+            let outcome = await withCheckedContinuation { (cont: CheckedContinuation<([ImportedSSHKey], String?), Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        cont.resume(returning: (try lister(socket), nil))
+                    } catch {
+                        cont.resume(returning: ([], error.localizedDescription))
+                    }
+                }
+            }
+            guard hostAgentSheet?.socket == socket else { return }
+            hostAgentSheet?.keys = outcome.0
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = outcome.1
             hostAgentSheet?.loaded = true
+            hostAgentSheet?.loading = false
         }
     }
 
