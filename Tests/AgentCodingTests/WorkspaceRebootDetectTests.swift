@@ -185,4 +185,43 @@ struct WorkspaceRebootDetectTests {
         let a = RemoteHostController.wallClockOffset()
         #expect(abs(RemoteHostController.wallClockOffset() - a) < 1)
     }
+
+    /// Finding (CWE-682): a reboot whose boot stamp moved backward (the
+    /// host's clock set back between the two starts) kept the previous
+    /// boot's date: the dashboard counted from it and the iPad transcript
+    /// floor let that boot's questions through as live ones.
+    @Test("a reboot with an earlier stamp is a new boot; an earlier stamp alone isn't")
+    @MainActor func backwardStampReboot() {
+        let prevBoot = now.addingTimeInterval(-7200)
+        let stamp = now.timeIntervalSince1970 - 7200
+        // Clock set back 3 h, then a reboot: earlier stamp, uptime 5 s.
+        #expect(RemoteHostController.bootStampWentBack(prev: stamp, new: stamp - 3 * 3600,
+                                                       prevBoot: prevBoot, derived: now.addingTimeInterval(-5)))
+        // An agent host restarted after a clock change: the stamp moved, the
+        // boot (uptime) didn't.
+        #expect(!RemoteHostController.bootStampWentBack(prev: stamp, new: stamp - 30,
+                                                        prevBoot: prevBoot, derived: prevBoot))
+
+        let id = UUID()
+        let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        var reboots = 0
+        c.onWorkspaceRebooted = { _ in reboots += 1 }
+        func push(uptime: Int, bootedAt: Double) {
+            c.applyPushedSnapshot(["workspaces": [["id": id.uuidString, "name": "w", "tool": "claude",
+                                                   "authMode": "token", "state": "running"]],
+                                   "vms": [["id": id.uuidString, "state": "running", "uptimeSeconds": uptime,
+                                            "bootedAt": bootedAt,
+                                            "tabs": [["index": 0, "title": "t", "active": true]]]],
+                                   "workspacesListed": true])
+        }
+        push(uptime: 7200, bootedAt: stamp)
+        push(uptime: 7200, bootedAt: stamp)
+        push(uptime: 5, bootedAt: stamp - 3 * 3600)
+        #expect(abs(c.bootTimes[id]!.timeIntervalSinceNow + 5) < 3)
+        #expect(reboots == 1)
+        // And the new boot's date then holds (a later sample, same boot).
+        push(uptime: 5, bootedAt: stamp - 3 * 3600)
+        #expect(abs(c.bootTimes[id]!.timeIntervalSinceNow + 5) < 3)
+        #expect(reboots == 1)
+    }
 }

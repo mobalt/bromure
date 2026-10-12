@@ -128,6 +128,17 @@ final class RemoteHostController {
         new - prev > 1
     }
 
+    /// The stamp moved BACKWARD and the uptime started over: a new boot all
+    /// the same — the host's clock was set back between the two starts, so
+    /// the new boot's stamp is the earlier one. A backward stamp alone isn't
+    /// one (an agent host restarted after a clock change re-reads its Mac's
+    /// boot time, moved by the change); nor is an uptime reset alone (a
+    /// reply that came late). Both together are.
+    nonisolated static func bootStampWentBack(prev: Double, new: Double,
+                                              prevBoot: Date, derived: Date) -> Bool {
+        prev - new > 1 && uptimeDidReset(prevBoot: prevBoot, newBoot: derived)
+    }
+
     /// The boot date shown for a host that stamps its boot: a moved stamp
     /// takes the new sample; a stable one keeps the earlier of the two —
     /// unless the date kept is `confirmed` (a second sample agreed with it)
@@ -1002,6 +1013,15 @@ final class RemoteHostController {
             var stampMoved = false
             if let stamp {
                 if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
+                    rebootedIDs.insert(id)
+                    stampMoved = true
+                } else if let prev = bootStamps[id], let prevBoot = bootTimes[id],
+                          let up = vm["uptimeSeconds"] as? Int,
+                          Self.bootStampWentBack(prev: prev, new: stamp, prevBoot: prevBoot,
+                                                 derived: Date(timeIntervalSinceNow: TimeInterval(-up))) {
+                    // Before, `min` kept the previous boot's date for the
+                    // whole new boot (dashboard uptime, the iPad transcript
+                    // floor letting the last boot's questions through).
                     rebootedIDs.insert(id)
                     stampMoved = true
                 }
