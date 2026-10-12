@@ -20,7 +20,8 @@ import Foundation
 /// and a blank `process` (there is no no-op one) makes the filter not
 /// required (`git lfs install --local` sets `required`) — unless the user
 /// has a global/system clean or smudge for it, which the blank process
-/// shadows: then a required filter fails rather than pass raw bytes.
+/// shadows: then the filter is made required, so it fails rather than pass
+/// raw bytes (whatever the repository's own `required` says).
 /// A diff runs its programs only with `--no-ext-diff --no-textconv` off.
 enum RepoGitPrograms {
     /// The config keys whose value is a program git runs on its own.
@@ -57,11 +58,12 @@ enum RepoGitPrograms {
             // at all for that filter: not required, the content passes
             // through unchanged, as `cat` would. With a global/system clean
             // or smudge, the blank process still shadows it (git can't unset
-            // a key from the environment) — `required` is left as it is, so
-            // git fails loudly instead of storing or writing raw bytes.
-            + "(filter.*.process) _bv=; _bd=${_bx%.process}; "
-            + #"[ -n "$( { _bg "$_bd.clean" || :; _bg "$_bd.smudge" || :; } )" ] "#
-            + "|| { export \"GIT_CONFIG_KEY_$_bn=$_bd.required\" \"GIT_CONFIG_VALUE_$_bn=false\"; _bn=$((_bn + 1)); } ;; "
+            // a key from the environment): required, set here — leaving it
+            // to the merged config let the repository's own `required=false`
+            // (or nobody's, false by default) store and write raw bytes.
+            + "(filter.*.process) _bv=; _bd=${_bx%.process}; _br=false; "
+            + #"if [ -n "$( { _bg "$_bd.clean" || :; _bg "$_bd.smudge" || :; } )" ]; then _br=true; fi; "#
+            + "export \"GIT_CONFIG_KEY_$_bn=$_bd.required\" \"GIT_CONFIG_VALUE_$_bn=$_br\"; _bn=$((_bn + 1)) ;; "
             + "(*) _bv= ;; esac; "
             + "export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=$_bv\"; _bn=$((_bn + 1)); done; "
             + "IFS=$_bo; set +f; export GIT_CONFIG_COUNT=$_bn; "

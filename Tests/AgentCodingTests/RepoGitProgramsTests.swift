@@ -145,6 +145,21 @@ struct RepoGitProgramsTests {
         let viaIncludeIf = sh(iso + RepoGitPrograms.off("'\(root)'")
                               + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
         #expect(viaIncludeIf.contains("REFUSED"))
+        // Finding (CWE-754): the repository says its filter isn't required,
+        // or nobody says either way (false by default): still refused —
+        // the blank process shadows the user's driver whatever it says.
+        _ = sh("git -C '\(root)' reset -q; mv \(inc) \(gcfg); git -C '\(root)' config filter.lfs.required false")
+        let localNotRequired = sh(iso + RepoGitPrograms.off("'\(root)'")
+                                  + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(localNotRequired.contains("REFUSED"))
+        _ = sh("git -C '\(root)' config --unset filter.lfs.required; "
+               + "printf '[filter \"lfs\"]\\n\\tclean = \(global)\\n\\tsmudge = \(global)\\n' > \(gcfg)")
+        let nobodyRequired = sh(iso + RepoGitPrograms.off("'\(root)'")
+                                + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(nobodyRequired.contains("REFUSED"))
+        #expect(sh(iso + "git -C '\(root)' ls-files b.bin").isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        _ = sh("git -C '\(root)' config filter.lfs.required true")
         // Only a global smudge, under `set -e` (dash): still a user driver.
         _ = sh("git -C '\(root)' reset -q; printf '[filter \"lfs\"]\\n\\tsmudge = \(global)\\n\\trequired = true\\n' > \(gcfg)")
         let smudgeOnly = sh("set -e; " + iso + RepoGitPrograms.off("'\(root)'")
@@ -156,6 +171,11 @@ struct RepoGitProgramsTests {
         let passthrough = sh(iso + RepoGitPrograms.off("'\(root)'")
                              + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
         #expect(passthrough.contains("ADDED"))
+        // …and under `set -e` (dash) too: no driver isn't a failure.
+        _ = sh("git -C '\(root)' reset -q")
+        let strict = sh("set -e; " + iso + RepoGitPrograms.off("'\(root)'")
+                        + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(strict.contains("ADDED"))
         #expect(!FileManager.default.fileExists(atPath: marker))
     }
 
