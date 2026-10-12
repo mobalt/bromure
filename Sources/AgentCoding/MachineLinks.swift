@@ -324,7 +324,8 @@ final class MachineLinkHub: @unchecked Sendable {
             return left > 0 ? min(limit, left) : nil
         }
         func setTimeout(_ fd: Int32, _ option: Int32, _ t: TimeInterval) {
-            let us = Int(t * 1_000_000)
+            // Never zero: a zero timeval waits for ever.
+            let us = max(1000, Int(t * 1_000_000))
             var tv = timeval(tv_sec: us / 1_000_000, tv_usec: Int32(us % 1_000_000))
             setsockopt(fd, SOL_SOCKET, option, &tv, socklen_t(MemoryLayout<timeval>.size))
         }
