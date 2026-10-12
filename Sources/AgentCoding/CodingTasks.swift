@@ -119,6 +119,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// The host is looking for this delivered card's worktree (since then):
+    /// `TaskDispatcher.relocateDelivery`. Not "no code" meanwhile.
+    var locatingSince: Date?
     /// What the assignee said when it merged the task on acceptance.
     var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
@@ -283,9 +286,20 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// against its target. Review offers Mark Done, not git.
     var isNoCode: Bool {
         if branch == nil && branchSlug == nil { return true }
-        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return true }
+        // While the host still looks for it, the worktree may well be there:
+        // "no code" then offered a one-click Mark Done that closed the card
+        // and made the look's find be dropped.
+        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return !isLocating }
         return codeChanges == 0
     }
+
+    /// The host is still looking for the worktree (a look that never ended —
+    /// the app quit mid-way — counts for `locateWindow` at most).
+    var isLocating: Bool {
+        guard awaitsRelocation, let at = locatingSince else { return false }
+        return Date().timeIntervalSince(at) < Self.locateWindow
+    }
+    static let locateWindow: TimeInterval = 600
 
     /// A delivered card in Review whose worktree wasn't found when it came
     /// in (and isn't landed): the review window looks for it again

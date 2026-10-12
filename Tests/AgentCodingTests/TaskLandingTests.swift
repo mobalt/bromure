@@ -445,6 +445,31 @@ struct TaskLandingTests {
         #expect(!v.awaitsRelocation)
     }
 
+    /// Finding (CWE-670): while Review looked for a delivered card's
+    /// worktree, the card read as "no code" — the window said there was no
+    /// diff and offered Mark Done in one click (⌘⏎), which closed the card
+    /// and made the look drop the checkout it found.
+    @Test("a delivered card is not 'no code' while its worktree is being looked for")
+    func locatingIsNotNoCode() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        #expect(t.awaitsRelocation && t.isNoCode && !t.isLocating)
+        t.locatingSince = Date()
+        #expect(t.isLocating && !t.isNoCode)
+        // The look ended without a find: no code (Mark Done, the report).
+        t.locatingSince = nil
+        #expect(t.isNoCode)
+        // A look that never ended (the app quit mid-way) stops counting.
+        t.locatingSince = Date().addingTimeInterval(-CodingTask.locateWindow - 1)
+        #expect(!t.isLocating && t.isNoCode)
+        // Found: neither.
+        t.locatingSince = Date()
+        t.worktreeDir = "/w"
+        #expect(!t.isLocating && !t.isNoCode)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

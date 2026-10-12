@@ -460,6 +460,15 @@ final class TaskDispatcher {
         let branch = "wt/\(slug)"
         let child = task.delegationID
             .flatMap { delegate.delegationEngine.store.delegation(matching: $0.uuidString) }?.childSessionID
+        // Looking: the card isn't "no code" until this ends (no one-click
+        // Mark Done while the worktree may yet turn up).
+        let started = Date()
+        delegate.codingTaskStore.mutate(taskID) { $0.locatingSince = started }
+        defer {
+            delegate.codingTaskStore.mutate(taskID) {
+                if $0.locatingSince == started { $0.locatingSince = nil }
+            }
+        }
         guard let found = await findDelivery(task, branch: branch, childSessionID: child) else { return false }
         var moved = false
         delegate.codingTaskStore.mutate(taskID) {
