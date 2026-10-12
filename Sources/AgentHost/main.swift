@@ -102,7 +102,9 @@ if args.count >= 2 {
 // link dropped after a garbled request, a relay leg gone) killed the app,
 // with no crash report and nothing in its log. Ignored, the write returns
 // EPIPE and that one connection ends. (Not for the subcommands above: a
-// `find` shim piped into `head` should still stop when the pipe closes.)
+// `find` shim piped into `head` should still stop when the pipe closes. An
+// ignored signal survives exec, so what this process spawns in a terminal
+// gets the default back: `PTYSpawn`.)
 signal(SIGPIPE, SIG_IGN)
 
 MainActor.assumeIsolated {
