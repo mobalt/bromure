@@ -2196,6 +2196,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// boot remedy and the fresh VM's prepare()/start() own the disk until it
     /// registers. Marks it booting (in use) until the returned release runs —
     /// which leaves a mark it didn't set alone.
+    /// `work` with the workspace's disk held (booting): an await a boot
+    /// makes before `launch` claims the disk itself. Returns a stop asked
+    /// for meanwhile (Shutdown on the booting row, a clone's cleanup — kept
+    /// for the boot's registration, which this boot hasn't reached): the
+    /// caller then doesn't boot at all. Ending the hold would otherwise
+    /// drop it, and the boot that followed stayed up.
+    @discardableResult
+    func whileHoldingDisk(_ id: Profile.ID, _ work: () async -> Void) async -> Profile.CloseAction? {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        await work()
+        let stop = claimed ? bootsInFlight.takeStop(id) : nil
+        if claimed { bootsInFlight.end(id) }
+        refreshSidebar()
+        return stop
+    }
+
     func holdDiskForRelaunch(_ id: Profile.ID) -> () -> Void {
         let claimed = bootsInFlight.begin(id)
         refreshSidebar()
@@ -11418,9 +11435,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // /models with the real credential first (a second or two, once per
         // credential; the result is stored on the record), then re-enter.
         if !kimiProvisioned, kimiNeedsProvisioning(profile) {
+            // The disk is held (booting) through the provisioning — up to
+            // 30 s on the network, before this launch claims it below: a
+            // delete, reset or revert in that gap went through and the
+            // re-entered launch booted whatever was left (a detached reboot
+            // had just dropped its own mark to call us). Released in the
+            // same turn as the re-entry, which claims it again.
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                let stop = await self.whileHoldingDisk(profile.id) {
+                    await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                }
+                // Stopped while it provisioned: it stays off.
+                guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else { return }
                 self.launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                             remoteInitiated: remoteInitiated, preflightResolved: preflightResolved,
                             unattended: unattended, quiet: quiet, kimiProvisioned: true)
@@ -13817,6 +13844,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
             guard applyBaseImageUpgradeAnswer(index, profile: &profile, current: current) else { return }
         }
+        // Deleted while the prompts were up: nothing to boot.
+        guard profiles.contains(where: { $0.id == profile.id }) else { return }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true, quiet: quiet)
     }
@@ -14701,10 +14730,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let remedy {
                     // In use while the remedy works on the disk; handed to
                     // launch's own mark (it refuses while one is set).
-                    let release = holdDiskForRelaunch(profileID)
                     Task { @MainActor in
-                        await self.executeBootRemedy(remedy, profile: profile, pane: nil)
-                        release()
+                        // Held while the remedy works on the disk; a stop
+                        // asked meanwhile leaves the workspace off.
+                        let stop = await self.whileHoldingDisk(profileID) {
+                            await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        }
+                        guard stop == nil else { return }
                         self.launch(profile, detached: true)
                     }
                 } else {
