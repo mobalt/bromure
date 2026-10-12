@@ -1478,6 +1478,13 @@ final class RemoteHostController {
         }
     }
 
+    /// How long a Start waits for the server's answer. An attached machine's
+    /// start runs up to 60 s on the server, and a repeated Send waits there
+    /// for the first one (`SessionStartCoalescer.pendingWait`, 75 s) before
+    /// running its own: with the 12 s default the client gave up while the
+    /// session was still being made, and the user's next click raced it.
+    nonisolated static let sessionStartTimeout = 150
+
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
@@ -1513,6 +1520,7 @@ final class RemoteHostController {
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request(
                 "POST", "/agent-sessions/start", body: body,
+                recvTimeoutSeconds: Self.sessionStartTimeout,
                 extraHeaders: [("X-Bromure-Console-Idle-Ms", idle)])
         }.value
         pollOnce()
