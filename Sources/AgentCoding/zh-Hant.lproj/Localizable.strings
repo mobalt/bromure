@@ -4155,3 +4155,7 @@
 "Delete workspace “%@”?" = "刪除工作區「%@」？";
 "Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "將刪除其磁碟、設定和 SSH 金鑰。掛載的主機檔案夾不受影響。";
 "Couldn't delete “%@”" = "無法刪除「%@」";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "「%@」未升級";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "在顯示此問題時，它已使用目前的磁碟啟動（由自動化啟動）。請將其關閉後重新啟動，以再次詢問。";

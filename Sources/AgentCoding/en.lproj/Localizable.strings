@@ -4186,3 +4186,7 @@
 "Delete workspace “%@”?" = "Delete workspace “%@”?";
 "Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Removes its disk, settings, and SSH key. The mounted host folder is untouched.";
 "Couldn't delete “%@”" = "Couldn't delete “%@”";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "“%@” wasn't upgraded";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.";
