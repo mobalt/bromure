@@ -161,3 +161,60 @@ enum TurnRelayTransport {
         return (rest, 3478, transport)
     }
 }
+
+/// The peer addresses a relay allocation lets in. An address counts as
+/// installed only once CreatePermission succeeded — only those are renewed
+/// with the allocation (coturn drops a permission after 5 minutes). One
+/// that failed (at allocation, added later, or at a renewal) stays queued
+/// and is tried again on the next pass, up to `maxTries`: dropped, or
+/// marked done before it was, it left the far relay refusing the dialer.
+/// Not thread-safe: its listener guards it with its lock, and runs the
+/// (blocking) CreatePermission calls outside that lock.
+struct RelayPermits {
+    static let maxTries = 6
+    private(set) var installed: [String]
+    private(set) var pending: [(ip: String, tries: Int)] = []
+
+    init(installed: [String], pending: [String] = []) {
+        self.installed = installed
+        for ip in pending { add(ip) }
+    }
+
+    /// A new address to let in (no-op when it already is, or is queued).
+    mutating func add(_ ip: String) {
+        guard !installed.contains(ip), !pending.contains(where: { $0.ip == ip }) else { return }
+        pending.append((ip, 0))
+    }
+
+    /// The queued addresses to try now (taken off the queue).
+    mutating func take() -> [(ip: String, tries: Int)] {
+        defer { pending.removeAll() }
+        return pending
+    }
+
+    /// The next queued address to try (taken off the queue).
+    mutating func takeOne() -> (ip: String, tries: Int)? {
+        pending.isEmpty ? nil : pending.removeFirst()
+    }
+
+    /// How a try went. A failure is queued again until `maxTries`; true
+    /// when it is (false: given up).
+    @discardableResult
+    mutating func record(_ ip: String, tries: Int, ok: Bool) -> Bool {
+        if ok {
+            if !installed.contains(ip) { installed.append(ip) }
+            return false
+        }
+        guard tries + 1 < Self.maxTries, !pending.contains(where: { $0.ip == ip }) else { return false }
+        pending.append((ip, tries + 1))
+        return true
+    }
+
+    /// A renewal that failed: tried again a couple more times (it stays
+    /// installed meanwhile — coturn still holds it until it expires).
+    mutating func renewalFailed(_ ip: String) {
+        guard !pending.contains(where: { $0.ip == ip }) else { return }
+        pending.append((ip, Self.maxTries - Self.renewalTries))
+    }
+    static let renewalTries = 3
+}

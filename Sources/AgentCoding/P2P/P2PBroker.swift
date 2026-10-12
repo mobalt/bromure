@@ -180,6 +180,18 @@ final class P2PBroker: @unchecked Sendable {
 
     /// Run blocking transport work (socket dials, TURN transactions) on a real
     /// thread so it never parks the cooperative pool.
+    /// `blocking`, but given up on after `seconds` (nil): the thread runs
+    /// on, its result unused — for a call that can hang past its own
+    /// timeout (getaddrinfo).
+    static func blocking<T: Sendable>(within seconds: TimeInterval,
+                                      _ work: @escaping @Sendable () -> T) async -> T? {
+        await withCheckedContinuation { (cont: CheckedContinuation<T?, Never>) in
+            let once = P2POnce(cont)
+            Thread.detachNewThread { once.resume(work()) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { once.resume(nil) }
+        }
+    }
+
     private static func blocking<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { cont in
             Thread.detachNewThread { cont.resume(returning: work()) }
@@ -481,6 +493,7 @@ final class P2PBroker: @unchecked Sendable {
             FatClientLog.log("p2p: dialer sent no srflx — relay rung skipped")
             return
         }
+        let firstSrflx = Date()
         let grace = Date().addingTimeInterval(1.5)
         while Date() < grace { try? await Task.sleep(nanoseconds: 150_000_000) }
         let permitIPs = srflxIPs()
@@ -517,19 +530,33 @@ final class P2PBroker: @unchecked Sendable {
                 try? await session.send(.candidate, payload: P2PSignalPayload(candidate: udpInfo.relay), via: ch)
             }
         }
-        // A dialer address that arrives late (a far relay answered slowly)
-        // is permitted too, while the grant's signalling is open.
-        var known = Set(permitIPs)
-        let lateUntil = Date().addingTimeInterval(12)
-        while Date() < lateUntil {
-            for ip in srflxIPs() where !known.contains(ip) {
-                known.insert(ip)
-                FatClientLog.log("p2p: dialer also seen from \(ip) — permitted")
+        // A dialer address that arrives late (a far relay answered slowly,
+        // or its DNS did) is let in too. Waited for HERE, before this
+        // returns: the caller's `connected` report then closes the grant,
+        // and the control plane rejects any frame after it. The dialer's
+        // bindings all end within `stunBudget` of its first one (plus
+        // signalling slack). The listeners install and retry each address
+        // (RelayPermits); this only hands each one over, once.
+        // Measured from now too: the allocation above can itself outlast
+        // that window (slow CreatePermissions), and what arrived meanwhile
+        // must still be handed over. Scanned once more after the last sleep.
+        var handed = Set(permitIPs)
+        let lateUntil = max(firstSrflx.addingTimeInterval(Self.stunBudget + 2), Date().addingTimeInterval(2))
+        while true {
+            for ip in srflxIPs() where !handed.contains(ip) {
+                handed.insert(ip)
+                FatClientLog.log("p2p: dialer also seen from \(ip) — letting it in")
                 permitters.forEach { $0(ip) }
             }
+            guard Date() < lateUntil else { break }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
     }
+    /// How many more times the dialer tries a relay candidate that refused it.
+    static let relayRedials = 4
+    /// The dialer's whole STUN binding, DNS included: `publicAddress`'s own
+    /// budget starts after getaddrinfo, which can hang on its own.
+    static let stunBudget: TimeInterval = 6
 
     private func register(listener: P2PRelaySession, for grantID: String) {
         listener.onStopped = { [weak self, weak listener] in
@@ -805,9 +832,9 @@ final class P2PBroker: @unchecked Sendable {
             await withTaskGroup(of: (String, (ip: String, port: Int)?).self) { group in
                 for stun in stuns {
                     group.addTask {
-                        (stun.host, await Self.blocking {
+                        (stun.host, await Self.blocking(within: Self.stunBudget) {
                             TurnTCPClient.publicAddress(host: stun.host, port: stun.port, timeout: 4)
-                        })
+                        } ?? nil)
                     }
                 }
                 for await (host, pub) in group {
@@ -815,10 +842,17 @@ final class P2PBroker: @unchecked Sendable {
                         FatClientLog.log("p2p: STUN binding to \(host) failed")
                         continue
                     }
-                    guard sent.insert(pub.ip).inserted else { continue }
+                    guard !sent.contains(pub.ip) else { continue }
                     FatClientLog.log("p2p: our public address (via \(host)) is \(pub.ip):\(pub.port)")
                     let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: pub.ip, port: pub.port)
-                    try? await session.send(.candidate, payload: P2PSignalPayload(candidate: srflx), via: ch)
+                    // Counted only once it went: a failed send leaves it for
+                    // the next relay that sees the same exit.
+                    do {
+                        try await session.send(.candidate, payload: P2PSignalPayload(candidate: srflx), via: ch)
+                        sent.insert(pub.ip)
+                    } catch {
+                        FatClientLog.log("p2p: sending our address \(pub.ip) failed: \(error)")
+                    }
                 }
             }
         }
@@ -830,9 +864,20 @@ final class P2PBroker: @unchecked Sendable {
         let t0 = Date()
         let deadline = Date().addingTimeInterval(timeout)
         var tried = Set<P2PCandidate>()
+        // A relay refuses us until the listener's permission for our exit is
+        // in — which can come after our first try (an address from a far
+        // relay sent late, a CreatePermission the listener retries). A relay
+        // candidate that didn't connect is dialed again every couple of
+        // seconds, a few times, while the deadline allows.
+        var relayTries: [P2PCandidate: (count: Int, last: Date)] = [:]
         var win: P2PDirectDialer.Win?
         while win == nil && Date() < deadline {
-            let fresh = session.candidates.filter { !tried.contains($0) }
+            var fresh = session.candidates.filter { !tried.contains($0) }
+            if fresh.isEmpty {
+                fresh = relayTries.filter {
+                    $0.value.count < Self.relayRedials + 1 && Date().timeIntervalSince($0.value.last) >= 2
+                }.map(\.key)
+            }
             guard !fresh.isEmpty else {
                 // Tight: the answer's host bundle usually lands within a few
                 // signalling round-trips, and every poll interval spent asleep
@@ -841,6 +886,9 @@ final class P2PBroker: @unchecked Sendable {
                 continue
             }
             tried.formUnion(fresh)
+            for c in fresh where c.kind == .relay {
+                relayTries[c] = ((relayTries[c]?.count ?? 0) + 1, Date())
+            }
             FatClientLog.log("p2p: peer candidates: " + fresh.map {
                 "\($0.kind.rawValue) \($0.ip):\($0.port) prio=\($0.prio)" }.joined(separator: " | "))
             // Bound each batch. The dialer races the whole batch in parallel, so
@@ -849,8 +897,9 @@ final class P2PBroker: @unchecked Sendable {
             // covers the dialer's impatient pass plus its patient retry; a batch
             // that connects returns as soon as it does, well inside this.
             let batchDeadline = min(deadline, Date().addingTimeInterval(4.5))
+            let batch = fresh
             win = await Self.blocking {
-                P2PDirectDialer.dial(candidates: fresh, overallDeadline: batchDeadline)
+                P2PDirectDialer.dial(candidates: batch, overallDeadline: batchDeadline)
             }
         }
         guard let win else {
@@ -877,5 +926,16 @@ final class P2PBroker: @unchecked Sendable {
 
         FatClientLog.log("p2p: peer \(peerDeviceID.prefix(8)) path=\(win.path.uiLabel) via \(win.candidate.ip):\(win.candidate.port) → 127.0.0.1:\(shim.port)")
         return ResolvedEndpoint(host: "127.0.0.1", port: shim.port, path: win.path, peerDeviceID: peerDeviceID)
+    }
+}
+
+/// A continuation resumed by whichever comes first.
+private final class P2POnce<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<T?, Never>?
+    init(_ c: CheckedContinuation<T?, Never>) { cont = c }
+    func resume(_ v: T?) {
+        let c: CheckedContinuation<T?, Never>? = lock.withLock { defer { cont = nil }; return cont }
+        c?.resume(returning: v)
     }
 }

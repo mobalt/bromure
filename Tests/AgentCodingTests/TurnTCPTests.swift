@@ -34,6 +34,10 @@ struct TurnTCPTests {
         private var pendingPeers: [UInt32: Int32] = [:]
         private(set) var permitted: [String] = []
         private(set) var sawUnauthenticatedAllocate = false
+        /// Refuse this many CreatePermissions for an address (403), then
+        /// grant them — a permission that fails once.
+        private var refusals: [String: Int] = [:]
+        func refusePermission(_ ip: String, times: Int) { lock.withLock { refusals[ip] = times } }
 
         init?(username: String, password: String) {
             self.username = username
@@ -91,10 +95,19 @@ struct TurnTCPTests {
                     resp.addXorAddress(STUNMessage.attrXorMappedAddress, ip: "203.0.113.7", port: 42424)
                     resp.add(STUNMessage.attrLifetime, u32: 600)
                 case STUNMessage.createPermissionRequest where authed(req):
-                    if let peer = req.xorAddress(STUNMessage.attrXorPeerAddress) {
-                        lock.lock(); permitted.append(peer.ip); lock.unlock()
+                    let peer = req.xorAddress(STUNMessage.attrXorPeerAddress)
+                    let refuse: Bool = lock.withLock {
+                        guard let ip = peer?.ip, let n = refusals[ip], n > 0 else { return false }
+                        refusals[ip] = n - 1
+                        return true
                     }
-                    resp = STUNMessage(type: STUNMessage.createPermissionSuccess, txid: req.txid)
+                    if refuse {
+                        resp = STUNMessage(type: 0x0118, txid: req.txid)   // CreatePermission error
+                        resp.add(STUNMessage.attrErrorCode, [0, 0, 4, 3])  // 403
+                    } else {
+                        if let peer { lock.lock(); permitted.append(peer.ip); lock.unlock() }
+                        resp = STUNMessage(type: STUNMessage.createPermissionSuccess, txid: req.txid)
+                    }
                 case STUNMessage.refreshRequest where authed(req):
                     resp = STUNMessage(type: STUNMessage.refreshSuccess, txid: req.txid)
                     resp.add(STUNMessage.attrLifetime, u32: 600)
@@ -382,6 +395,82 @@ struct TurnTCPTests {
                     "turn:turn-a.us.example:3478?transport=tcp", "stun:turn-a.eu.example:3478"]
         #expect(TurnRelayTransport.stunEndpointsPerHost(urls).map { "\($0.host):\($0.port)" }
                 == ["turn-a.sg.example:3478", "turn-a.us.example:3478", "turn-a.eu.example:3478"])
+    }
+
+    /// Finding (CWE-755): a permission that failed (at allocation, or added
+    /// later) was dropped — never retried, never renewed — and the far
+    /// relay kept refusing the dialer from that exit.
+    @Test("a permission refused (at allocation and on a retry) is retried until it is installed, and the dialer then gets through")
+    func refusedPermissionRetried() throws {
+        let turn = try #require(FakeCoturn(username: "1893456000:conn-under-test", password: "s3cr3t"))
+        defer { turn.stop() }
+        let sshd = try #require(EchoServer())
+        defer { sshd.stop() }
+        turn.refusePermission("127.0.0.1", times: 2)   // at allocation, and its first retry
+        let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
+                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port)
+        let (listener, info) = try #require(started)
+        defer { listener.stop() }
+        let deadline = Date().addingTimeInterval(8)
+        while !turn.permittedIPs.contains("127.0.0.1") && Date() < deadline { usleep(100_000) }
+        #expect(turn.permittedIPs.contains("127.0.0.1"))
+        let peer = try #require(P2PTCP.connect(ip: info.relay.ip, port: info.relay.port, timeout: 5))
+        defer { Darwin.close(peer) }
+        let probe = [UInt8]("again".utf8)
+        #expect(probe.withUnsafeBytes { Darwin.write(peer, $0.baseAddress, probe.count) } == probe.count)
+        var got = [UInt8](), buf = [UInt8](repeating: 0, count: 16)
+        let until = Date().addingTimeInterval(8)
+        while got.count < probe.count && Date() < until {
+            var pfd = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
+            guard poll(&pfd, 1, 500) > 0 else { continue }
+            let n = Darwin.read(peer, &buf, buf.count)
+            guard n > 0 else { break }
+            got += buf[0..<n]
+        }
+        #expect(got == probe)
+    }
+
+    /// Review: with EVERY address refused at allocation the listener gave
+    /// up (closed, nil) — the relay rung was lost for the grant.
+    @Test("every permission refused at allocation: the relay is kept and retried")
+    func allRefusedStillRetried() throws {
+        let turn = try #require(FakeCoturn(username: "1893456000:conn-under-test", password: "s3cr3t"))
+        defer { turn.stop() }
+        let sshd = try #require(EchoServer())
+        defer { sshd.stop() }
+        turn.refusePermission("127.0.0.1", times: 2)
+        let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
+                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port)
+        let (listener, _) = try #require(started)
+        defer { listener.stop() }
+        let deadline = Date().addingTimeInterval(10)
+        while !turn.permittedIPs.contains("127.0.0.1") && Date() < deadline { usleep(100_000) }
+        #expect(turn.permittedIPs.contains("127.0.0.1"))
+    }
+
+    @Test("RelayPermits: installed only on success, a failure retried up to the cap, renewals of what's installed")
+    func relayPermitsBookkeeping() {
+        var p = RelayPermits(installed: ["a"], pending: ["b"])
+        p.add("a"); p.add("b"); p.add("c")
+        #expect(p.pending.map(\.ip) == ["b", "c"])
+        let first = p.take()
+        #expect(p.pending.isEmpty)
+        let bAgain = p.record("b", tries: first[0].tries, ok: true)
+        let cAgain = p.record("c", tries: first[1].tries, ok: false)
+        #expect(!bAgain)
+        #expect(cAgain)   // queued again
+        #expect(p.installed == ["a", "b"])
+        var tries = 0
+        while let c = p.take().first {
+            tries += 1
+            if !p.record(c.ip, tries: c.tries, ok: false) { break }
+        }
+        #expect(tries == RelayPermits.maxTries - 1)   // given up at the cap
+        #expect(p.pending.isEmpty && !p.installed.contains("c"))
+        p.renewalFailed("a")
+        #expect(p.pending.map(\.ip) == ["a"] && p.installed.contains("a"))
+        #expect(p.pending.first?.tries == RelayPermits.maxTries - RelayPermits.renewalTries)
+        #expect(p.takeOne()?.ip == "a" && p.takeOne() == nil)
     }
 
     @Test("an unpermitted peer never reaches the listener")

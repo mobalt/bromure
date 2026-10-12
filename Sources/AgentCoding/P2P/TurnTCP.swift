@@ -391,8 +391,7 @@ final class TurnRelayListener: @unchecked Sendable {
     private let sshPort: Int
     private let lifetime: UInt32
     private let lock = NSLock()
-    private var permitted: [String]
-    private var pendingPermits: [String] = []
+    private var permits: RelayPermits
     private var stopped = false
     /// Called (once, off-main) when the service loop exits for any reason.
     var onStopped: (() -> Void)?
@@ -421,27 +420,29 @@ final class TurnRelayListener: @unchecked Sendable {
         // Every address the dialer was seen from (one per relay it asked):
         // a network with several exits reaches THIS relay from any of them.
         let permitted = permitIPs.filter { client.createPermission(peerIP: $0) }
-        guard !permitted.isEmpty else {
-            FatClientLog.log("p2p: TURN permission for \(permitIPs.joined(separator: ", ")) refused")
-            client.close()
-            return nil
+        // The ones that failed are retried by the service loop — all of
+        // them when none went through (the allocation is kept for that).
+        let retry = permitIPs.filter { !permitted.contains($0) }
+        if permitted.isEmpty {
+            FatClientLog.log("p2p: TURN permission for \(permitIPs.joined(separator: ", ")) refused — retrying")
         }
         FatClientLog.log("p2p: TURN relay allocated \(alloc.relayIP):\(alloc.relayPort) "
             + "over \(tls ? "TLS" : "TCP") \(host):\(port) "
             + "(lifetime \(alloc.lifetime)s, permit \(permitted.joined(separator: ", ")))")
         let listener = TurnRelayListener(client: client, sshPort: sshPort,
-                                         lifetime: alloc.lifetime, permitted: permitted)
+                                         lifetime: alloc.lifetime,
+                                            permits: RelayPermits(installed: permitted, pending: retry))
         Thread.detachNewThread { listener.serviceLoop() }
         let relay = P2PCandidate(kind: .relay, proto: .tcp,
                                  ip: alloc.relayIP, port: alloc.relayPort, ttl: Int(alloc.lifetime))
         return (listener, Started(relay: relay, mappedIP: alloc.mappedIP))
     }
 
-    private init(client: TurnTCPClient, sshPort: Int, lifetime: UInt32, permitted: [String]) {
+    private init(client: TurnTCPClient, sshPort: Int, lifetime: UInt32, permits: RelayPermits) {
         self.client = client
         self.sshPort = sshPort
         self.lifetime = lifetime
-        self.permitted = permitted
+        self.permits = permits
     }
 
     /// An allocation with no spliced leg for this long is an orphan — the
@@ -461,7 +462,7 @@ final class TurnRelayListener: @unchecked Sendable {
     /// loop within a tick.
     func permit(ip: String) {
         lock.lock(); defer { lock.unlock() }
-        if !permitted.contains(ip) && !pendingPermits.contains(ip) { pendingPermits.append(ip) }
+        permits.add(ip)
     }
 
     func stop() {
@@ -480,12 +481,16 @@ final class TurnRelayListener: @unchecked Sendable {
         var nextAllocRefresh = Date().addingTimeInterval(Double(max(60, lifetime / 2)))
         var nextPermRefresh = Date().addingTimeInterval(240)
         while !isStopped {
+            // One queued address per pass, on a short timeout: on the TCP
+            // relay this thread also reads the ConnectionAttempts.
             lock.lock()
-            let newPermits = pendingPermits
-            pendingPermits.removeAll()
+            let toTry = permits.takeOne()
             lock.unlock()
-            for ip in newPermits where client.createPermission(peerIP: ip) {
-                lock.lock(); permitted.append(ip); lock.unlock()
+            if let (ip, tries) = toTry {
+                let ok = client.createPermission(peerIP: ip, timeout: 2)
+                lock.lock(); let again = permits.record(ip, tries: tries, ok: ok); lock.unlock()
+                FatClientLog.log("p2p: TURN permission for \(ip) "
+                    + (ok ? "installed" : again ? "failed — retrying" : "failed — giving up"))
             }
 
             if let ev = client.readEvent(timeout: 1.0),
@@ -516,8 +521,10 @@ final class TurnRelayListener: @unchecked Sendable {
                 nextAllocRefresh = Date().addingTimeInterval(Double(max(60, granted / 2)))
             }
             if Date() >= nextPermRefresh {
-                lock.lock(); let ips = permitted; lock.unlock()
-                for ip in ips { client.createPermission(peerIP: ip) }
+                lock.lock(); let ips = permits.installed; lock.unlock()
+                for ip in ips where !client.createPermission(peerIP: ip) {
+                    lock.lock(); permits.renewalFailed(ip); lock.unlock()
+                }
                 nextPermRefresh = Date().addingTimeInterval(240)
             }
         }
