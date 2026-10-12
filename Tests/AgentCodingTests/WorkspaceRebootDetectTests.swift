@@ -192,15 +192,15 @@ struct WorkspaceRebootDetectTests {
     /// floor let that boot's questions through as live ones.
     @Test("a reboot with an earlier stamp is a new boot; an earlier stamp alone isn't")
     @MainActor func backwardStampReboot() {
-        let prevBoot = now.addingTimeInterval(-7200)
         let stamp = now.timeIntervalSince1970 - 7200
-        // Clock set back 3 h, then a reboot: earlier stamp, uptime 5 s.
+        // Clock set back 3 h, then a reboot: earlier stamp, uptime 2 h → 5 s.
         #expect(RemoteHostController.bootStampWentBack(prev: stamp, new: stamp - 3 * 3600,
-                                                       prevBoot: prevBoot, derived: now.addingTimeInterval(-5)))
-        // An agent host restarted after a clock change: the stamp moved, the
-        // boot (uptime) didn't.
+                                                       lastUptime: 7200, uptime: 5))
+        // An agent host restarted after a clock change: the stamp moved, its
+        // uptime (awake-only, so its boot date drifted later through sleep)
+        // didn't go down.
         #expect(!RemoteHostController.bootStampWentBack(prev: stamp, new: stamp - 30,
-                                                        prevBoot: prevBoot, derived: prevBoot))
+                                                        lastUptime: 5000, uptime: 5003))
 
         let id = UUID()
         let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
