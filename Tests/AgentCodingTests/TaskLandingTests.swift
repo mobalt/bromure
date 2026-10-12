@@ -476,6 +476,26 @@ struct TaskLandingTests {
         let end = CodingTask.rank(dropping: cards[2].id, before: nil, in: s.backlogTasks())
         s.mutate(cards[2].id) { $0.queueRank = end }
         #expect(s.backlogTasks().map(\.title) == ["T1", "T0", "T2"])
+
+        // Review: cards created the same second leave no room in between —
+        // the midpoint equals a neighbour and the card would snap back. The
+        // column is respaced instead.
+        let s2 = store()
+        var same: [CodingTask] = []
+        for i in 0..<3 {
+            var t = CodingTask(title: "S\(i)", profileID: UUID(), tool: .claude)
+            t.createdAt = t0
+            s2.upsert(t)
+            same.append(t)
+        }
+        let column = s2.backlogTasks()
+        let moving = column[2].id, target = column[1].id
+        let r = CodingTask.rank(dropping: moving, before: target, in: column)
+        #expect(!CodingTask.fits(r, dropping: moving, in: column))
+        for (id, rank) in CodingTask.respaced(dropping: moving, before: target, in: column) {
+            s2.mutate(id) { $0.queueRank = rank }
+        }
+        #expect(s2.backlogTasks().map(\.id) == [column[0].id, moving, column[1].id])
     }
 
     /// Board report: a bulk review gave the designated agent one message

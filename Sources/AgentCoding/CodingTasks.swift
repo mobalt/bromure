@@ -287,9 +287,13 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// Its place in the Backlog and in its assignee's queue: top runs first.
     var backlogRank: Double { queueRank ?? createdAt.timeIntervalSince1970 }
 
-    /// Backlog order: by rank, oldest first among equals.
+    /// Backlog order: by rank, oldest first among equals, then by id — a
+    /// total order, so cards created the same second don't swap places
+    /// between redraws (Swift's sort isn't stable).
     static func backlogOrder(_ a: CodingTask, _ b: CodingTask) -> Bool {
-        a.backlogRank != b.backlogRank ? a.backlogRank < b.backlogRank : a.createdAt < b.createdAt
+        if a.backlogRank != b.backlogRank { return a.backlogRank < b.backlogRank }
+        if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+        return a.id.uuidString < b.id.uuidString
     }
 
     /// The rank that puts a card dropped on `target` just above it — or at
@@ -303,6 +307,29 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         let after = others[i].backlogRank
         guard i > 0 else { return after - 1 }
         return (others[i - 1].backlogRank + after) / 2
+    }
+
+    /// New ranks for the whole column, one apart, with `moving` just above
+    /// `target` (nil: at the bottom) — when there's no room left between two
+    /// neighbours (cards created the same second, or many drags into one
+    /// gap): the midpoint would equal one of them and the card would snap
+    /// back. Only the cards whose rank changes.
+    static func respaced(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask]) -> [(UUID, Double)] {
+        guard let card = ordered.first(where: { $0.id == moving }) else { return [] }
+        var order = ordered.filter { $0.id != moving }
+        let at = target.flatMap { t in order.firstIndex { $0.id == t } } ?? order.count
+        order.insert(card, at: at)
+        let base = (ordered.map(\.backlogRank).min() ?? 0).rounded(.down)
+        return order.enumerated().compactMap { i, t in
+            let r = base + Double(i)
+            return t.backlogRank == r ? nil : (t.id, r)
+        }
+    }
+
+    /// Whether `rank` lands between its new neighbours (it doesn't once the
+    /// gap is used up).
+    static func fits(_ rank: Double, dropping moving: UUID, in ordered: [CodingTask]) -> Bool {
+        !ordered.contains { $0.id != moving && $0.backlogRank == rank }
     }
 
     var isNoCode: Bool {
