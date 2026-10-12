@@ -81,4 +81,38 @@ struct WorkspaceRebootDetectTests {
         push(uptime: 5, bootedAt: Date().timeIntervalSince1970 - 5)
         #expect(reboots == 1)
     }
+
+    /// Finding (CWE-682): with a stable boot stamp, a late reply or a Mac
+    /// that slept (awake-only uptime) still moved the boot date forward —
+    /// the dashboard's uptime dropped and the iPad transcript lost
+    /// everything before the new date.
+    @Test("a stable boot stamp keeps the boot date from moving later")
+    @MainActor func stableStampKeepsBootDate() {
+        let prev = now.addingTimeInterval(-3600)
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(1800),
+                                              stampMoved: false) == prev)
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-2),
+                                              stampMoved: false) == prev.addingTimeInterval(-2))
+        #expect(RemoteHostController.bootTime(prev: prev, derived: now, stampMoved: true) == now)
+
+        let id = UUID()
+        let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        let booted = Date().timeIntervalSince1970 - 7200
+        func push(uptime: Int, bootedAt: Double) {
+            c.applyPushedSnapshot(["workspaces": [["id": id.uuidString, "name": "w", "tool": "claude",
+                                                   "authMode": "token", "state": "running"]],
+                                   "vms": [["id": id.uuidString, "state": "running", "uptimeSeconds": uptime,
+                                            "bootedAt": bootedAt,
+                                            "tabs": [["index": 0, "title": "t", "active": true]]]],
+                                   "workspacesListed": true])
+        }
+        push(uptime: 3600, bootedAt: booted)
+        let first = c.bootTimes[id]
+        // Slept 30 min (awake-only uptime), or a reply 30 min late.
+        push(uptime: 1800, bootedAt: booted)
+        #expect(c.bootTimes[id] == first)
+        // A real reboot moves it.
+        push(uptime: 5, bootedAt: Date().timeIntervalSince1970 - 5)
+        #expect(c.bootTimes[id]! > first!.addingTimeInterval(3000))
+    }
 }
