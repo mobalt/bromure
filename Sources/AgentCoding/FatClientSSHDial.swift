@@ -844,6 +844,12 @@ final class SSHConnection: @unchecked Sendable {
                 let handler = try ch.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
                 handler.createChannel(promise, channelType: .session) { child, _ in
                     child.eventLoop.makeCompletedFuture {
+                        // The open timed out first and closed the pump end:
+                        // its number may already be someone else's socket.
+                        // A handler on it read (and later closed) that
+                        // stream — two links on one, a Sidecar slot seeing
+                        // `POST …` for its verb. This channel is dropped.
+                        guard !pumpClosed else { throw ChannelError.ioOnClosedChannel }
                         try child.pipeline.syncOperations.addHandler(
                             ExecFDPumpHandler(command: verb, fd: pumpFD))
                         handlerOwnsPump = true
