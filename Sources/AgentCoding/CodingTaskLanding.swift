@@ -671,6 +671,15 @@ extension CodingTaskEngine {
         lead?.landing?.phase == .agentLanding
     }
 
+    /// A lead that moved on during a steer that then failed: what it shows
+    /// stays (the question), the steer's own error goes, and it is no longer
+    /// "handing over" — left set, the sweep never watched it again, and a
+    /// merge the assignee didn't report kept it on Needs you for good.
+    nonisolated static func settleFailedSteer(_ t: inout CodingTask, steerError: String?) {
+        if let steerError, t.lastError == steerError { t.lastError = nil }
+        if t.landing != nil { t.landing?.handingOver = nil }
+    }
+
     /// `batched`: part of a batch landing — what needs an agent comes back
     /// (to go, with the others, to one agent) instead of being handed over.
     @discardableResult
@@ -842,7 +851,7 @@ extension CodingTaskEngine {
                 // reach it): its question is on every card — the steer's
                 // error must not replace it, nor sit beside it.
                 guard Self.stillHandingOver(store.task(taskID)) else {
-                    if let steerError { store.mutate(taskID) { if $0.lastError == steerError { $0.lastError = nil } } }
+                    store.mutate(taskID) { Self.settleFailedSteer(&$0, steerError: steerError) }
                     return
                 }
                 let why = steerError ?? NSLocalizedString(

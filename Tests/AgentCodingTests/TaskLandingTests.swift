@@ -461,6 +461,18 @@ struct TaskLandingTests {
         // The assignee asked during the steer: Needs you, with its question.
         s.mutate(lead.id) { $0.landing?.phase = .needsYou; $0.landing?.detail = "Which branch?" }
         #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        // What the failed steer then does to it: the question stays, the
+        // steer's error goes, and it's watchable again (not handing over).
+        var asked = s.task(lead.id)!
+        asked.landing?.handingOver = true
+        asked.lastError = "steer failed"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.landing?.phase == .needsYou && asked.landing?.detail == "Which branch?")
+        #expect(asked.lastError == nil && asked.landing?.handingOver == nil)
+        // Someone else's error isn't the steer's to clear.
+        asked.lastError = "something else"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.lastError == "something else")
         s.mutate(lead.id) { $0.landing?.phase = .landed }
         #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
         #expect(!CodingTaskEngine.stillHandingOver(nil))
