@@ -654,11 +654,19 @@ struct HubOverviewTab: View {
                     attention
                     recentScans
                 }
+                // A pick whose watch is gone: back to all repositories, so
+                // the picker doesn't sit on a blank selection.
+                .onAppear { dropStalePick() }
+                .onChange(of: findingStore.watches.map(\.repo)) { _, _ in dropStalePick() }
                 .padding(16)
                 .frame(maxWidth: 1400)
                 .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    private func dropStalePick() {
+        if hub.pipelineRepo != nil, overviewRepo == nil { hub.pipelineRepo = nil }
     }
 
     private var tiles: some View {
@@ -707,7 +715,18 @@ struct HubOverviewTab: View {
 
     /// The repository the overview is narrowed to (its picker, above the
     /// pipeline): the lists under it follow it too, not only the graph.
-    private var overviewRepo: String? { hub.pipelineRepo }
+    private var overviewRepo: String? {
+        Self.pickedRepo(hub.pipelineRepo, watched: findingStore.watches.map(\.repo))
+    }
+
+    /// A pick still among the watched repositories, else none: a watch
+    /// deleted after it was picked left its name behind — with the picker
+    /// hidden once one watch is left, nothing could clear it, and the
+    /// lists showed nothing of the repositories still watched.
+    static func pickedRepo(_ picked: String?, watched: [String]) -> String? {
+        guard let picked, watched.contains(picked) else { return nil }
+        return picked
+    }
 
     /// Automation runs of the overview's repository — its watch's — or every
     /// run when none is picked.
@@ -1107,8 +1126,7 @@ struct HubPipelineCard: View {
     @Binding var selectedRepo: String?
 
     private var scoped: [RepoFinding] {
-        guard let r = selectedRepo else { return findings }
-        return findings.filter { $0.repo == r }
+        HubOverviewTab.findings(findings, of: HubOverviewTab.pickedRepo(selectedRepo, watched: repos))
     }
 
     var body: some View {

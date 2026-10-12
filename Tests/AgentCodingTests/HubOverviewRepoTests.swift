@@ -31,4 +31,16 @@ struct HubOverviewRepoTests {
         #expect(HubOverviewTab.findings(fs, of: "o/b").map(\.repo) == ["o/b"])
         #expect(HubOverviewTab.findings(fs, of: nil).count == 3)
     }
+
+    /// Review: a pick whose watch was deleted kept narrowing the lists to
+    /// nothing, with the picker hidden once a single watch was left.
+    @Test("a picked repository that's no longer watched is no pick")
+    func stalePick() {
+        #expect(HubOverviewTab.pickedRepo("o/a", watched: ["o/a", "o/b"]) == "o/a")
+        #expect(HubOverviewTab.pickedRepo("o/a", watched: ["o/b"]) == nil)
+        #expect(HubOverviewTab.pickedRepo("o/a", watched: []) == nil)
+        #expect(HubOverviewTab.pickedRepo(nil, watched: ["o/a"]) == nil)
+        // A single watch, picked: still that one (the picker is hidden).
+        #expect(HubOverviewTab.pickedRepo("o/a", watched: ["o/a"]) == "o/a")
+    }
 }
