@@ -152,6 +152,10 @@ struct Delegation: Identifiable, Codable, Equatable, Sendable {
     /// Mac rebooting, the Sidecar restarting): the status it had then. The
     /// session coming back — seen again, or speaking — picks it up there.
     var goneFrom: Status?
+    /// Over (cancelled, closed) while its delegate's session was out of
+    /// view: that session is put away when it comes back — else it showed
+    /// up active again, its agent still at work on a cancelled task.
+    var retireWhenBack: Bool?
     /// The parent was told the delegate's agent ended without delivering
     /// (once per ending — the delegation stays open, a steer resumes it).
     var childEndedNotedAt: Date?
