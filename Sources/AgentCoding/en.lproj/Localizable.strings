@@ -4204,3 +4204,6 @@
 
 /* task card: Merge/Send Back on a card whose branch isn't known yet */
 "The branch is still being recorded — try again in a moment." = "The branch is still being recorded — try again in a moment.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Looking for the worktree…";

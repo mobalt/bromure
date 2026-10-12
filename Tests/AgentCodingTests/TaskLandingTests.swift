@@ -622,6 +622,55 @@ struct TaskLandingTests {
         #expect(armed.moved(sent))
     }
 
+    /// Finding (CWE-670): while Review looked for a delivered card's
+    /// worktree, the card read as "no code" — the window said there was no
+    /// diff and offered Mark Done in one click (⌘⏎), which closed the card
+    /// and made the look drop the checkout it found.
+    @Test("a delivered card is not 'no code' while its worktree is being looked for")
+    func locatingIsNotNoCode() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        #expect(t.awaitsRelocation && t.isNoCode && !t.isLocating)
+        t.locatingSince = Date()
+        #expect(t.isLocating && !t.isNoCode)
+        // The look ended without a find: no code (Mark Done, the report).
+        t.locatingSince = nil
+        #expect(t.isNoCode)
+        // A look that never ended (the app quit mid-way) stops counting.
+        t.locatingSince = Date().addingTimeInterval(-CodingTask.locateWindow - 1)
+        #expect(!t.isLocating && t.isNoCode)
+        // Found: neither.
+        t.locatingSince = Date()
+        t.worktreeDir = "/w"
+        #expect(!t.isLocating && !t.isNoCode)
+    }
+
+    /// Finding (CWE-670): a fat client gave up on the host's look after a
+    /// fixed 20 s, while the host was still trying sessions one after
+    /// another (up to 15 s each) — and never showed the worktree found.
+    @Test("a fat client keeps waiting while the host is looking, and stops when it ends")
+    func fatClientWaitsForTheLook() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        t.locatingSince = Date()
+        // Still looking at 2 min: wait.
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 240) == nil)
+        // The look ended with no find: over.
+        t.locatingSince = nil
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 241) == false)
+        // An older host never shows the stamp: 20 s.
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 39) == nil)
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 40) == false)
+        // Found.
+        t.worktreeDir = "/w"
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 3) == true)
+        #expect(CodingTask.locateOutcome(nil, sawLocating: true, polls: 3) == false)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

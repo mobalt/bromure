@@ -325,6 +325,17 @@ final class TaskReviewWindowManager {
         self.context = context
     }
 
+    /// Per task: the last reload — the fetch and the banner may both ask
+    /// for one when the card gains its worktree; one does.
+    private var reloadedAt: [UUID: Date] = [:]
+
+    /// Load the open window again on its default base (now `.branch(parent)`).
+    func reload(_ id: UUID) {
+        if let at = reloadedAt[id], Date().timeIntervalSince(at) < 1 { return }
+        reloadedAt[id] = Date()
+        host.reload(id)
+    }
+
     private func mayTryRelocate(_ id: UUID) -> Bool {
         if let at = relocateTried[id], Date().timeIntervalSince(at) < 15 { return false }
         relocateTried[id] = Date()
@@ -365,12 +376,28 @@ final class TaskReviewWindowManager {
                     // Delivered while the assignee's machine was out of
                     // reach: look for the worktree now. Found, the window
                     // loads again on the base it would have opened on.
-                    if task.awaitsRelocation, await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }),
-                       await c.relocate(task) {
-                        await MainActor.run { self?.host.reload(id) }
-                        return nil
+                    // Whoever found it — this look, a delivery that came in
+                    // meanwhile — the card pointing at a worktree now is what
+                    // counts (the banner also reloads when it gains one later,
+                    // e.g. the host's search outlasting a fat client's wait).
+                    if task.awaitsRelocation {
+                        if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
+                            _ = await c.relocate(task)
+                        }
+                        // Another look may still be under way (a second
+                        // window's, the host's for a fat client): its outcome
+                        // is this load's — not "can't reach the machine".
+                        let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
+                        while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                        }
+                        if let now = t(), !(now.worktreeDir ?? "").isEmpty {
+                            await MainActor.run { self?.reload(id) }
+                            return nil
+                        }
                     }
-                    return await c.fetchReview(task, base)
+                    // The card as it is now, not as it was before any wait.
+                    return await c.fetchReview(t() ?? task, base)
                 },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },
                 removeComment: { c.removeComment(id, $0) },
@@ -389,7 +416,8 @@ final class TaskReviewWindowManager {
                 banner: { [weak self] in
                     AnyView(TaskReviewBanner(
                         task: t, context: c, request: request,
-                        close: { self?.host.close(id) }))
+                        close: { self?.host.close(id) },
+                        reload: { self?.reload(id) }))
                 })
         }
     }
@@ -414,6 +442,8 @@ struct TaskReviewBanner: View {
     let context: TaskReviewWindowManager.Context
     let request: ReviewLandingRequest
     let close: () -> Void
+    /// The window loads again from scratch (its default base re-read).
+    var reload: () -> Void = {}
 
     @State private var summary: TaskReviewSummary?
     @State private var summaryFailed = false
@@ -464,6 +494,12 @@ struct TaskReviewBanner: View {
             .overlay(alignment: .bottom) { Divider() }
             .task(id: t.id.uuidString + (t.landingTarget ?? "") + "#\(request.reloads)") { await load(t) }
             .onChange(of: request.generation) { _, _ in consumeRequest() }
+            .onChange(of: t.worktreeDir ?? "") { old, new in
+                // A delivered card found its worktree while open (however it
+                // was found): the window opened on "Uncommitted" with no
+                // parent — load the branch's diff now.
+                if old.isEmpty, !new.isEmpty { reload() }
+            }
             .onChange(of: t.stage) { old, new in
                 // Landed (or sent back, marked done elsewhere): the window's
                 // job is over — close it, as Mark Done does.
@@ -685,7 +721,14 @@ struct TaskReviewBanner: View {
 
     @ViewBuilder private func actions(_ t: CodingTask) -> some View {
         let landing = t.landing != nil && t.landing?.phase != .needsYou
-        if noCode {
+        if t.isLocating {
+            // Still looking for the worktree: nothing to merge yet, and not
+            // "no code" either — Mark Done asks first.
+            ProgressView().controlSize(.small)
+            Text(CodingTask.locatingText)
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            markDoneButton(t)
+        } else if noCode {
             Button { markDone(t) } label: {
                 Label(NSLocalizedString("Mark Done", comment: "review"), systemImage: "checkmark.circle.fill")
             }

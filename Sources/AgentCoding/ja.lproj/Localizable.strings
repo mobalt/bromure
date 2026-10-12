@@ -4170,3 +4170,6 @@
 
 /* task card: Merge/Send Back on a card whose branch isn't known yet */
 "The branch is still being recorded — try again in a moment." = "ブランチをまだ記録中です。少ししてからもう一度お試しください。";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "ワークツリーを探しています…";

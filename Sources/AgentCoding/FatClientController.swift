@@ -4463,10 +4463,20 @@ final class RemoteHostWindow: NSWindow {
                 // mirror shows what it found.
                 guard let self, await self.controller.taskCommandReply(task.id, "locate", body: [:]) != nil
                 else { return false }
-                for i in 1...40 {
+                // The mirror shows the host looking (`isLocating`) at once.
+                self.controller.foregroundKick()
+                // Until the host's look ends (it tries one session after
+                // another): as long as the mirror shows it looking, within
+                // `locateWindow`; 20 s for a host that never shows it (older).
+                var sawLocating = false
+                let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
+                var i = 0
+                while Date() < deadline {
+                    i += 1
                     try? await Task.sleep(nanoseconds: 500_000_000)
-                    guard let t = self.controller.taskStore.task(task.id) else { return false }
-                    if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+                    let t = self.controller.taskStore.task(task.id)
+                    if t?.isLocating == true { sawLocating = true }
+                    if let done = CodingTask.locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
                     if i % 6 == 0 { self.controller.foregroundKick() }
                 }
                 return false

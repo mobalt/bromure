@@ -1065,7 +1065,7 @@ struct CodingKanbanView: View {
     /// A Review card that can go in a batch merge: something to merge, not
     /// landing already.
     private func batchable(_ t: CodingTask) -> Bool {
-        !t.isNoCode && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
+        !t.isNoCode && !t.isLocating && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
     }
 
     private func toggleReview(_ id: UUID) {
@@ -1168,7 +1168,7 @@ struct CodingKanbanView: View {
                 toggleReview(task.id)
             })
         }
-        if !task.isNoCode, landable {
+        if !task.isNoCode, !task.isLocating, landable {
             d.append(.init(title: String(format: NSLocalizedString("Merge into %@…", comment: "kanban menu"),
                                          task.landingTarget ?? NSLocalizedString("parent", comment: "kanban menu"))) {
                 requestMerge(task)
@@ -2512,7 +2512,8 @@ private struct TestingTaskCard: View {
         .modifier(CardAccessibility(
             label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
                     TaskLandingText.line(for: task)
-                        ?? (task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                        ?? (task.isLocating ? CodingTask.locatingText
+                            : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                           : NSLocalizedString("Ready to land", comment: "task card")),
                     unsent > 0 ? TaskPlurals.comments(unsent) : nil,
                     task.lastError].compactMap { $0 }.joined(separator: ", "),
@@ -2589,7 +2590,8 @@ private struct TestingTaskCard: View {
                     quickDone
                 }
             }
-        } else if let err = task.lastError {
+        } else if let err = task.lastError, !task.isLocating {
+            // (While the look runs, its "no worktree" error is out of date.)
             HStack(alignment: .top, spacing: 6) {
                 CardErrorLine(text: err)
                 Spacer(minLength: 0)
@@ -2599,7 +2601,8 @@ private struct TestingTaskCard: View {
             // The state on its own row, the actions below it: side by side
             // at the narrowest column they wrapped mid-word.
             VStack(alignment: .leading, spacing: 6) {
-                Text(task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                Text(task.isLocating ? CodingTask.locatingText
+                     : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                    : NSLocalizedString("Ready to land", comment: "task card"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
