@@ -664,6 +664,13 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "landing needs you: \(why)")
     }
 
+    /// A hand-over that failed may still say so: the lead is still landing.
+    /// Moved on during the await — the assignee asked (Needs you, its
+    /// question on every card), or it was cancelled or landed — it stays.
+    nonisolated static func stillHandingOver(_ lead: CodingTask?) -> Bool {
+        lead?.landing?.phase == .agentLanding
+    }
+
     /// `batched`: part of a batch landing — what needs an agent comes back
     /// (to go, with the others, to one agent) instead of being handed over.
     @discardableResult
@@ -830,7 +837,15 @@ extension CodingTaskEngine {
         }
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.steerLanding(taskID, text: prompt) else {
-                let why = store.task(taskID)?.lastError ?? NSLocalizedString(
+                let steerError = store.task(taskID)?.lastError
+                // The assignee asked while the steer awaited (the brief did
+                // reach it): its question is on every card — the steer's
+                // error must not replace it, nor sit beside it.
+                guard Self.stillHandingOver(store.task(taskID)) else {
+                    if let steerError { store.mutate(taskID) { if $0.lastError == steerError { $0.lastError = nil } } }
+                    return
+                }
+                let why = steerError ?? NSLocalizedString(
                     "Couldn't reach the session that did the task.", comment: "task landing")
                 needsYou(taskID, why)
                 batchNeedsYou(taskID, why)
@@ -843,7 +858,7 @@ extension CodingTaskEngine {
             // you" with the reason right away, not after the stall timeout.
             let before = await lastAgentLine(task)
             guard await deliverToConversation(taskID, branch: branch, text: prompt) else {
-                guard store.task(taskID)?.landing?.phase == .agentLanding else { return }
+                guard Self.stillHandingOver(store.task(taskID)) else { return }
                 let why = store.task(taskID)?.lastError ?? String(format: NSLocalizedString(
                     "The landing brief didn't reach %@.", comment: "task landing"), task.workerName)
                 store.mutate(taskID) { $0.lastError = nil }
