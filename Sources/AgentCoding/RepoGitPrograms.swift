@@ -18,31 +18,50 @@ import Foundation
 /// filter's clean/smudge becomes `cat` — never blank, which fails a
 /// `filter.<x>.required` filter and with it `git status` and the merge —
 /// and a blank `process` (there is no no-op one) makes the filter not
-/// required (`git lfs install --local` sets `required`).
+/// required (`git lfs install --local` sets `required`) — unless the user
+/// has a global/system clean or smudge for it, which the blank process
+/// shadows: then a required filter fails rather than pass raw bytes.
 /// A diff runs its programs only with `--no-ext-diff --no-textconv` off.
 enum RepoGitPrograms {
     /// The config keys whose value is a program git runs on its own.
     static let programKeys = #"^(filter\..*\.(clean|smudge|process)|merge\..*\.driver|gpg\.([^.]*\.)?program)$"#
 
     /// Shell that sets this shell's git environment (GIT_CONFIG_COUNT/KEY/
-    /// VALUE) for every git after it: what `dirs` (already shell-quoted, or
-    /// a "$var") configure locally switched off. Names reach git through
+    /// VALUE) for every git after it: what `dir` (already shell-quoted, or
+    /// a "$var") configures locally switched off. Names reach git through
     /// the environment, never the command line, so no name is read as an
     /// option or split by the shell.
-    static func off(_ dirs: String...) -> String {
-        let read = dirs.map { "git -C \($0) config --show-scope --name-only --get-regexp '\(programKeys)'" }
-            .joined(separator: "; ")
-        return "_bk=$( { \(read); } 2>/dev/null "
+    /// ONE checkout: what the user's config gives a key can differ between
+    /// checkouts of one repository (includeIf onbranch:/gitdir:), so the
+    /// git commands after it must run in that checkout — another one gets
+    /// its own `off`, in a subshell.
+    static func off(_ dir: String) -> String {
+        let read = "git -C \(dir) config --show-scope --name-only --get-regexp '\(programKeys)'"
+        // `_bg key`: the user's own (global or system) value of `key`, as
+        // git reads it IN the repository — includes, the XDG file and
+        // `includeIf gitdir:` all count, which `cd / && git config --global
+        // --get` missed (an included driver read as none). Local, worktree
+        // and command-line (a previous `off`) values never count. Fails
+        // when there is none.
+        let userValue = "_bg() { git -C \(dir) config --show-scope --get-all \"$1\" 2>/dev/null "
+            + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "global" || s == "system") { v = $0; sub(/^[^\t]*\t/, "", v); f = 1 } } END { if (f) print v; exit !f }'; }; "#
+        return userValue + "_bk=$( { \(read); } 2>/dev/null "
             + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "local" || s == "worktree") { sub(/^[^\t]*\t/, ""); print } }'); "#
             + "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null "
             + "GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false; _bn=2; "
             + "set -f; _bo=$IFS; IFS=$(printf '\\n_'); IFS=${IFS%_}; "
             + "for _bx in $_bk; do "
-            + #"_bv=$(cd / && { git config --global --get "$_bx" || git config --system --get "$_bx"; } 2>/dev/null) "#
+            + #"_bv=$(_bg "$_bx") "#
             + "|| case \"$_bx\" in (filter.*.clean|filter.*.smudge) _bv=cat ;; "
-            // A blank process filter fails to start: not required, the
-            // content passes through unchanged, as `cat` would.
-            + "(filter.*.process) _bv=; export \"GIT_CONFIG_KEY_$_bn=${_bx%.process}.required\" \"GIT_CONFIG_VALUE_$_bn=false\"; _bn=$((_bn + 1)) ;; "
+            // A blank process filter fails to start. With no user driver
+            // at all for that filter: not required, the content passes
+            // through unchanged, as `cat` would. With a global/system clean
+            // or smudge, the blank process still shadows it (git can't unset
+            // a key from the environment) — `required` is left as it is, so
+            // git fails loudly instead of storing or writing raw bytes.
+            + "(filter.*.process) _bv=; _bd=${_bx%.process}; "
+            + #"[ -n "$( { _bg "$_bd.clean" || :; _bg "$_bd.smudge" || :; } )" ] "#
+            + "|| { export \"GIT_CONFIG_KEY_$_bn=$_bd.required\" \"GIT_CONFIG_VALUE_$_bn=false\"; _bn=$((_bn + 1)); } ;; "
             + "(*) _bv= ;; esac; "
             + "export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=$_bv\"; _bn=$((_bn + 1)); done; "
             + "IFS=$_bo; set +f; export GIT_CONFIG_COUNT=$_bn; "
