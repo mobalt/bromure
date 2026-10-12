@@ -349,7 +349,7 @@ remote vpn.example 1194
         text = "client\n<connection>\n%s\n<ca>\n%s\n</ca>\n</connection>\n" % (remote, cert)
         lines, dropped = config.sanitize_ovpn(text)
         self.assertIn(remote, lines)
-        self.assertIn("A" * 254, lines)     # split: see the test below
+        self.assertIn(cert, lines)          # right before </ca>: nothing to glue, kept whole
         self.assertNotIn("(an overlong line)", dropped)
         # 256 bytes: buf_parse splits it (and loses a byte) — still dropped,
         # in the body and in a block nested in it.
@@ -386,6 +386,31 @@ remote vpn.example 1194
         lines, _ = config.sanitize_ovpn("<ca>\n%s\n-----END CERTIFICATE-----\n</ca>\n" % pem_line)
         self.assertIn(pem_line, lines)
         self.assertEqual(config._split_utf8("é" * 200, 254), ["é" * 127, "é" * 73])
+
+    def test_a_255_byte_proxy_credential_inside_connection_is_not_split(self):
+        # <http-proxy-user-pass> is two records (username, password), not
+        # base64: a split cut a 255-byte password to 254 bytes, or turned
+        # a 255-byte username's tail into the password.
+        pw = "p" * 255
+        text = ("<connection>\nremote vpn.example 1194\n<http-proxy-user-pass>\nalice\n%s\n"
+                "</http-proxy-user-pass>\n</connection>\n" % pw)
+        lines, dropped = config.sanitize_ovpn(text)
+        self.assertEqual(dropped, [])
+        i = lines.index("alice")
+        self.assertEqual(lines[i:i + 3], ["alice", pw, "</http-proxy-user-pass>"])
+        user = "u" * 255
+        text = ("<connection>\nremote vpn.example 1194\n<http-proxy-user-pass>\n%s\nsecret\n"
+                "</http-proxy-user-pass>\n</connection>\n" % user)
+        lines, _ = config.sanitize_ovpn(text)
+        i = lines.index(user)
+        self.assertEqual(lines[i + 1], "secret")
+        # A key line followed by its footer is still split (the earlier fix).
+        key_line = "0123456789abcdef" * 15 + "0123456789abcde"
+        text = ("<connection>\nremote vpn.example 1194\n<tls-crypt>\n%s\n-----END OpenVPN Static key V1-----\n"
+                "</tls-crypt>\n</connection>\n" % key_line)
+        lines, _ = config.sanitize_ovpn(text)
+        self.assertIn(key_line[:254], lines)
+        self.assertNotIn(key_line, lines)
 
 if __name__ == "__main__":
     unittest.main()
