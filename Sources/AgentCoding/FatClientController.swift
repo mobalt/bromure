@@ -2286,7 +2286,10 @@ final class RemoteHostController {
         let host = self.host
         return AutomationSources { body in
             let resp = try await Task.detached(priority: .userInitiated) {
-                try RemoteTransport.client(for: host).request("POST", "/automation-sources", body: body)
+                // The host is silent until GitHub / Linear answer (it waits
+                // up to 60 s): the default 12 s of quiet gave up first.
+                try RemoteTransport.client(for: host).request("POST", "/automation-sources", body: body,
+                                                              recvTimeoutSeconds: 75)
             }.value
             if resp.status == 200, resp.json["error"] == nil { return resp.json }
             let code = resp.json["code"] as? Int ?? 0
