@@ -286,15 +286,24 @@ final class TaskDispatcher {
         let store = delegate.codingTaskStore
         switch m.kind {
         case .ask:
+            // Landing, or already Needs you (stalled): either way the
+            // question is what the user now has to answer.
+            let landing = task.stage == .testing
+                && (task.landing?.phase == .agentLanding || task.landing?.phase == .needsYou)
             store.mutate(task.id) {
                 $0.pendingQuestion = m.text
                 $0.pendingAskID = m.id
-                // Asked while landing: it's stuck on something — the user decides.
-                if $0.stage == .testing, $0.landing?.phase == .agentLanding {
+                // Asked while landing (or after it stalled): it's stuck on
+                // something — the question is what the card says now.
+                if $0.stage == .testing,
+                   $0.landing?.phase == .agentLanding || $0.landing?.phase == .needsYou {
                     $0.landing?.phase = .needsYou
                     $0.landing?.detail = m.text
                 }
             }
+            // A batch's brief says to ask about the branches that aren't in:
+            // the question is about all of its cards.
+            if landing { delegate.codingTaskEngine.batchNeedsYou(task.id, m.text) }
         case .report:
             store.mutate(task.id) { $0.assigneeNote = m.text }
         case .deliver where task.stage == .done:

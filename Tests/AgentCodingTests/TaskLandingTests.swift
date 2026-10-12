@@ -493,6 +493,39 @@ struct TaskLandingTests {
         #expect(s.task(follower.id)?.completion == .merged(target: "main", verified: false, by: "Claude Code"))
     }
 
+    /// Finding (CWE-670): a delegated batch's ask, a brief that didn't
+    /// reach the session, or a report after the stall reached the lead
+    /// only — the other cards sat on "Landing…" or stayed Needs you.
+    @Test("a delegated batch's question reaches every card, and a late report still closes them")
+    func delegatedBatchOutcomesFanOut() async {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let lead = reviewTask(s, branch: "wt/a"), follower = reviewTask(s, branch: "wt/b")
+        let stranger = reviewTask(s, branch: "wt/c")
+        for t in [lead, follower, stranger] { s.mutate(t.id) { $0.delegationID = UUID() } }
+        s.mutate(lead.id) {
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .needsYou, startedAt: Date())
+            $0.landing?.batch = [follower.id]
+        }
+        for t in [follower, stranger] {
+            s.mutate(t.id) {
+                $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+            }
+        }
+        s.mutate(follower.id) { $0.landing?.batchLead = lead.id }
+        engine.batchNeedsYou(lead.id, "wt/b conflicts in Package.swift")
+        #expect(s.task(follower.id)?.landing?.phase == .needsYou)
+        #expect(s.task(follower.id)?.landing?.detail == "wt/b conflicts in Package.swift")
+        #expect(s.task(stranger.id)?.landing?.phase == .agentLanding)
+        #expect(CodingTaskEngine.stalledText.hasPrefix("Landing stalled"))
+        // The agent fixes it and reports: the follower, Needs you by now,
+        // is closed with the lead (unverifiable here: on its word).
+        s.mutate(lead.id) { $0.landing?.phase = .agentLanding }
+        let r = await engine.reportLanding(lead.id, status: "merged", summary: "all in", prURL: nil)
+        #expect(r.ok)
+        #expect(s.task(follower.id)?.stage == .done)
+    }
+
     /// Finding (CWE-807): with no landing under way, an assignee's
     /// "merged" closed the card as a verified merge into the parent its own
     /// machine reported — no approval, and a parent like `--diff-filter=A`

@@ -623,9 +623,16 @@ extension CodingTaskEngine {
                                       why: @escaping (CodingTask) -> String) async {
         guard let ids = store.task(leadID)?.landing?.batch else { return }
         for id in ids {
-            guard let t = store.task(id), t.stage == .testing, t.landing?.phase == .agentLanding,
+            // Needs you too: the stall (or an ask) may have got there first,
+            // and the agent's report still settles it.
+            guard let t = store.task(id), t.stage == .testing,
+                  t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou,
                   t.landing?.batchLead == leadID else { continue }
             let seen = await landingVerified(t)
+            // The look awaited: still this batch's card, still waiting? (A
+            // Retry meanwhile replaced its landing — not this report's.)
+            guard let now = store.task(id), now.stage == .testing, now.landing?.batchLead == leadID,
+                  now.landing?.phase == .agentLanding || now.landing?.phase == .needsYou else { continue }
             if seen == true {
                 finishLanding(id, verified: true, by: nil)
             } else if seen == nil, reportedMerged, t.delegationID != nil {
@@ -633,6 +640,17 @@ extension CodingTaskEngine {
             } else {
                 needsYou(id, why(t))
             }
+        }
+    }
+
+    /// What stops a batch's lead (the agent asks, its brief didn't reach
+    /// it) stops the other cards of its batch the same way, with the same
+    /// words — not a generic stall twenty minutes later.
+    func batchNeedsYou(_ leadID: UUID, _ why: String) {
+        for id in store.task(leadID)?.landing?.batch ?? [] {
+            guard let t = store.task(id), t.stage == .testing, t.landing?.batchLead == leadID,
+                  t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou else { continue }
+            needsYou(id, why)
         }
     }
 
@@ -812,8 +830,10 @@ extension CodingTaskEngine {
         }
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.steerLanding(taskID, text: prompt) else {
-                needsYou(taskID, store.task(taskID)?.lastError ?? NSLocalizedString(
-                    "Couldn't reach the session that did the task.", comment: "task landing"))
+                let why = store.task(taskID)?.lastError ?? NSLocalizedString(
+                    "Couldn't reach the session that did the task.", comment: "task landing")
+                needsYou(taskID, why)
+                batchNeedsYou(taskID, why)
                 return
             }
         } else {
@@ -828,17 +848,38 @@ extension CodingTaskEngine {
                     "The landing brief didn't reach %@.", comment: "task landing"), task.workerName)
                 store.mutate(taskID) { $0.lastError = nil }
                 needsYou(taskID, why)
+                batchNeedsYou(taskID, why)
                 return
             }
             landingBaselineLine[taskID] = before
             BACDebug.log("tasks", "“\(task.title)”: landing brief delivered")
         }
-        // Landing proper starts now: the stall clock and the live line too.
+        // Landing proper starts now: the stall clock and the live line too —
+        // the batch's other cards' clocks with it (theirs started when the
+        // batch began, before the fast path and the hand-over).
         store.mutate(taskID) {
             guard $0.landing?.phase == .agentLanding else { return }
             $0.landing?.handingOver = nil
             $0.landing?.startedAt = Date()
             $0.lastError = nil
+        }
+        // Only while the lead is still landing: a question that came in
+        // during the hand-over (the steer awaited) stays on every card.
+        let leadLanding = store.task(taskID)?.landing?.phase == .agentLanding
+        for id in leadLanding ? (store.task(taskID)?.landing?.batch ?? []) : [] {
+            store.mutate(id) {
+                guard $0.stage == .testing, $0.landing?.batchLead == taskID else { return }
+                if $0.landing?.phase == .agentLanding {
+                    $0.landing?.startedAt = Date()
+                } else if $0.landing?.phase == .needsYou, $0.landing?.detail == Self.stalledText {
+                    // Stalled before the brief even reached the agent (the
+                    // fast path and the hand-over took that long): landing
+                    // again now. A card with its own question keeps it.
+                    $0.landing?.phase = .agentLanding
+                    $0.landing?.detail = nil
+                    $0.landing?.startedAt = Date()
+                }
+            }
         }
         watchLanding(taskID)
     }
@@ -877,6 +918,13 @@ extension CodingTaskEngine {
     }
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
+    /// What a landing that stalled says (and how a batch's delivery tells a
+    /// stalled card from one with its own question).
+    nonisolated static var stalledText: String {
+        NSLocalizedString(
+            "Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel.",
+            comment: "task landing")
+    }
     private static let landingPollInterval: UInt64 = 10_000_000_000
     /// A landing flagged "Needs you" is still looked at, less often, for
     /// this long after it started.
@@ -917,10 +965,11 @@ extension CodingTaskEngine {
                     self.landingBaselineLine[taskID] = nil
                     self.store.mutate(taskID) { if $0.landing?.agentLine != line { $0.landing?.agentLine = line } }
                 }
-                if l.phase == .agentLanding, Date().timeIntervalSince(l.startedAt) > Self.landingStallTimeout {
-                    self.needsYou(taskID, NSLocalizedString(
-                        "Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel.",
-                        comment: "task landing"))
+                // Read again: the look above awaited, and the clock may have
+                // been restarted meanwhile (the batch's brief delivered).
+                if let now = self.store.task(taskID)?.landing, now.phase == .agentLanding,
+                   Date().timeIntervalSince(now.startedAt) > Self.landingStallTimeout {
+                    self.needsYou(taskID, Self.stalledText)
                 }
             }
         }
