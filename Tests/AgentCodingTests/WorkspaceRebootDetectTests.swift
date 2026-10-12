@@ -124,15 +124,15 @@ struct WorkspaceRebootDetectTests {
     @Test("a host clock step neither drags the boot date earlier nor freezes it there")
     @MainActor func hostClockStepIgnored() {
         let prev = now.addingTimeInterval(-3600)
-        // A reply that came sooner than the last (even minutes sooner, after
-        // a first one held up on a slow relay): taken.
+        // A reply that came sooner than the last: taken.
         #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-60),
-                                              stampMoved: false) == prev.addingTimeInterval(-60))
-        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-240),
-                                              stampMoved: false) == prev.addingTimeInterval(-240))
-        // Earlier by an hour with the same stamp: a clock step, not a reply.
+                                              stampMoved: false, confirmed: true) == prev.addingTimeInterval(-60))
+        // Earlier by an hour than a confirmed date: a clock step, not a reply.
         #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-3600),
-                                              stampMoved: false) == prev)
+                                              stampMoved: false, confirmed: true) == prev)
+        // Unconfirmed, it may be a first reply that came in late: corrected.
+        #expect(RemoteHostController.bootTime(prev: prev, derived: prev.addingTimeInterval(-3600),
+                                              stampMoved: false) == prev.addingTimeInterval(-3600))
 
         let id = UUID()
         let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
@@ -146,11 +146,31 @@ struct WorkspaceRebootDetectTests {
                                    "workspacesListed": true])
         }
         push(uptime: 3600)
+        push(uptime: 3600)          // a second sample agrees: confirmed
         let first = c.bootTimes[id]!
         push(uptime: 3600 + 7200)   // the host's clock stepped 2 h forward
         #expect(c.bootTimes[id] == first)
         push(uptime: 3600)          // and back
         #expect(c.bootTimes[id] == first)
+
+        // A first reply held up 10 min (a stalled first connection), then
+        // on-time ones: the boot date settles on the on-time sample.
+        let late = UUID()
+        func pushLate(uptime: Int) {
+            c.applyPushedSnapshot(["workspaces": [["id": late.uuidString, "name": "l", "tool": "claude",
+                                                   "authMode": "token", "state": "running"]],
+                                   "vms": [["id": late.uuidString, "state": "running", "uptimeSeconds": uptime,
+                                            "bootedAt": booted,
+                                            "tabs": [["index": 0, "title": "t", "active": true]]]],
+                                   "workspacesListed": true])
+        }
+        pushLate(uptime: 3000)      // 600 s short
+        pushLate(uptime: 3600)
+        let settled = c.bootTimes[late]!
+        #expect(abs(settled.timeIntervalSince(Date(timeIntervalSince1970: booted))) < 5)
+        pushLate(uptime: 3600)      // confirmed; a host clock step now is refused
+        pushLate(uptime: 3600 + 7200)
+        #expect(c.bootTimes[late] == settled)
     }
 
     /// This Mac's own clock stepping: every kept boot date moves with it,

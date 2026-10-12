@@ -130,21 +130,22 @@ final class RemoteHostController {
 
     /// The boot date shown for a host that stamps its boot: a moved stamp
     /// takes the new sample; a stable one keeps the earlier of the two —
-    /// unless it is earlier by more than a late reply explains: a host that
-    /// counts uptime on its wall clock (before it used a monotonic one) had
-    /// its clock stepped forward, and `min` then kept that date for the rest
-    /// of the boot.
-    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
+    /// unless the date kept is `confirmed` (a second sample agreed with it)
+    /// and this one is earlier by more than a late reply explains: a host
+    /// that counts uptime on its wall clock (before it used a monotonic one)
+    /// had its clock stepped forward, and `min` kept that date for the rest
+    /// of the boot. An unconfirmed date may be a first reply that came in
+    /// late (a stalled first connection): the on-time one corrects it.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool,
+                                     confirmed: Bool = false) -> Date {
         if stampMoved { return derived }
-        if prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
+        if confirmed, prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
         return min(prev, derived)
     }
 
-    /// Most a stable-stamp sample may come in earlier than the date kept.
-    /// Generous: a first sample minutes late (a slow relay) must still heal
-    /// on the next on-time one; only an older host's clock step goes past it
-    /// (a current host's uptime doesn't move with its clock at all).
-    nonisolated static let earlierSampleCap: TimeInterval = 300
+    /// A sample within this of the date kept confirms it; one earlier than
+    /// a confirmed date by more is a clock step, not a sooner reply.
+    nonisolated static let earlierSampleCap: TimeInterval = 120
 
     /// This Mac's wall clock against a clock that setting it can't move:
     /// a change between two snapshots is a clock step here, and every boot
@@ -200,6 +201,8 @@ final class RemoteHostController {
     private(set) var bootTimes: [Profile.ID: Date] = [:]
     /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
     private var bootStamps: [Profile.ID: Double] = [:]
+    /// Boot dates a second sample agreed with (`bootTime`'s `confirmed`).
+    private var bootConfirmed = Set<Profile.ID>()
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -1013,7 +1016,13 @@ final class RemoteHostController {
                     // never later: a late reply (its uptime short by the
                     // delay) or a Mac that slept (awake-only uptime) moved
                     // it forward, cutting the uptime and the transcript.
-                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved)
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved,
+                                                  confirmed: bootConfirmed.contains(id))
+                    if stampMoved {
+                        bootConfirmed.remove(id)
+                    } else if abs(prev.timeIntervalSince(derived)) <= Self.earlierSampleCap {
+                        bootConfirmed.insert(id)
+                    }
                 } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
                         if stamp == nil { rebootedIDs.insert(id) }
@@ -1024,6 +1033,7 @@ final class RemoteHostController {
                     // else stable — keep prev (dashboard uptime doesn't wobble)
                 } else {
                     bootTimes[id] = derived   // first sighting, never a reboot
+                    bootConfirmed.remove(id)
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
