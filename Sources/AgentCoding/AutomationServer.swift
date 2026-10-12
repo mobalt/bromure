@@ -272,6 +272,10 @@ final class ACAutomationServer {
     var onListAutomations: (() -> [String: Any])?
     /// Upsert / delete / run-now / toggle a scheduled automation.
     var onUpsertAutomation: ((_ doc: [String: Any]) -> Bool)?
+    /// A fat client's automation / watch editor: the lists a workspace's
+    /// GitHub token or Linear key can see (`AutomationSources`), fetched
+    /// here — the credentials never leave this host.
+    var onAutomationSources: ((_ body: [String: Any]) async -> [String: Any])?
     var onDeleteAutomation: ((_ id: String) -> Bool)?
     var onRunAutomation: ((_ id: String) -> Bool)?
     var onToggleAutomation: ((_ id: String) -> Bool)?
@@ -861,6 +865,18 @@ final class ACAutomationServer {
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let list = DispatchQueue.main.sync { self.onListAutomations?() ?? ["automations": [], "runs": []] }
             sendResponse(fd: fd, status: 200, body: list)
+
+        case ("POST", "/automation-sources"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            // A GitHub / Linear round trip, bridged onto this request's thread.
+            let sem = DispatchSemaphore(value: 0)
+            var reply: [String: Any] = ["error": "timed out"]
+            Task { @MainActor [weak self] in
+                if let r = await self?.onAutomationSources?(bodyJSON) { reply = r }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 60)
+            sendResponse(fd: fd, status: reply["error"] == nil ? 200 : 400, body: reply)
 
         case ("POST", "/automations"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
