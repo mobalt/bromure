@@ -498,6 +498,39 @@ struct TaskLandingTests {
         #expect(s2.backlogTasks().map(\.id) == [column[0].id, moving, column[1].id])
     }
 
+    /// Finding (CWE-670): a delegated batch's landing steer that failed
+    /// after the assignee had asked — its question already on every card —
+    /// replaced that question everywhere with "Couldn't reach the session",
+    /// and Retry then sent another brief to an agent waiting on an answer.
+    @Test("a failed hand-over says so only while the lead is still landing")
+    func failedHandOverKeepsQuestion() {
+        let s = store()
+        let lead = reviewTask(s)
+        s.mutate(lead.id) {
+            $0.delegationID = UUID()
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+        }
+        #expect(CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        // The assignee asked during the steer: Needs you, with its question.
+        s.mutate(lead.id) { $0.landing?.phase = .needsYou; $0.landing?.detail = "Which branch?" }
+        #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        // What the failed steer then does to it: the question stays, the
+        // steer's error goes, and it's watchable again (not handing over).
+        var asked = s.task(lead.id)!
+        asked.landing?.handingOver = true
+        asked.lastError = "steer failed"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.landing?.phase == .needsYou && asked.landing?.detail == "Which branch?")
+        #expect(asked.lastError == nil && asked.landing?.handingOver == nil)
+        // Someone else's error isn't the steer's to clear.
+        asked.lastError = "something else"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.lastError == "something else")
+        s.mutate(lead.id) { $0.landing?.phase = .landed }
+        #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        #expect(!CodingTaskEngine.stillHandingOver(nil))
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
