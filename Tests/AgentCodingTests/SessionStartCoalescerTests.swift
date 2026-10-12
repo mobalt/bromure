@@ -158,6 +158,17 @@ struct SessionStartCoalescerTests {
         #expect(token(c.claim(key(), now: now + 11)) != nil)
     }
 
+    /// Finding (CWE-362): the fat client read the start's reply with the 12 s
+    /// default while the server held it up to a minute (an attached
+    /// machine's call), so the client gave up and the next click raced the
+    /// first start. The client now waits as long as the server can hold it:
+    /// a repeat's wait for the first, then its own machine call (up to 10 s
+    /// waiting for a parked link, then 60 s for the answer).
+    @Test("a client's Start waits as long as the server may hold it")
+    func clientOutlastsServer() {
+        #expect(TimeInterval(RemoteHostController.sessionStartTimeout) > SessionStartCoalescer.pendingWait + 10 + 60)
+    }
+
     @Test("the composer's file and a client's same file make the same key")
     func attachmentsMatch() {
         let data = Data("hello".utf8)
