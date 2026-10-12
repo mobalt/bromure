@@ -2031,7 +2031,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
                 var req = req
                 if let room { req.roomID = room }
-                let id = delegate.agentSessionEngine.start(req)
+                // The same start asked for again within seconds (Send
+                // clicked twice): the one already started.
+                let r = SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                    ["ok": true, "id": delegate.agentSessionEngine.start(req).uuidString]
+                }
+                guard let id = (r["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
                 // Started from a room: back to its grid, where it launches.
                 if let room, delegate.agentRoomStore.room(room) != nil {
                     self.showRoom(room)
@@ -2316,13 +2321,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if let m = req.openingMessage, !m.isEmpty { body["message"] = m }
         let wire = req.attachments.filter { $0.folder == nil }.map(\.wireDictionary)
         if !wire.isEmpty { body["attachments"] = wire }
+        // Send clicked again while the machine starts it: one session.
+        var keyed = req
+        keyed.profileID = machine.id
+        keyed.roomID = room
+        let key = SessionStartCoalescer.key(keyed)
+        guard let token = SessionStartCoalescer.shared.claim(key) else { return }
         Task { @MainActor [weak self, weak machine] in
             guard let machine,
                   let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
                   let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
                 NSSound.beep()
                 return
             }
+            // The id too: a client's same start through this host gets it.
+            SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
             // Started from a room ("Add to Room"): into it, and back to its grid.
             if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
                 delegate.assignMachineRoom(id, room)

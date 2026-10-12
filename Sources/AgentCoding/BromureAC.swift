@@ -5285,14 +5285,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {room}: started from a room's "New Session".
                     let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
                         .flatMap { self.agentRoomStore.room($0)?.id }
-                    let sid = self.agentSessionEngine.start(.init(
+                    let req = AgentSessionEngine.NewSessionRequest(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
                         attachments: attachments, roomID: room,
-                        instructions: body["instructions"] as? String), remotely: true)
-                    return ["ok": true, "id": sid.uuidString]
+                        instructions: body["instructions"] as? String)
+                    // Send clicked again while the reply crossed a slow link:
+                    // the session already started, not another one.
+                    return SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                        ["ok": true, "id": self.agentSessionEngine.start(req, remotely: true).uuidString]
+                    }
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
                     // clicked its row: {profile?} picks the workspace.
