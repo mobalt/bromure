@@ -2322,21 +2322,37 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let wire = req.attachments.filter { $0.folder == nil }.map(\.wireDictionary)
         if !wire.isEmpty { body["attachments"] = wire }
         // Send clicked again while the machine starts it: one session.
-        var keyed = req
-        keyed.profileID = machine.id
-        keyed.roomID = room
-        let key = SessionStartCoalescer.key(keyed)
-        guard let token = SessionStartCoalescer.shared.claim(key) else { return }
+        let key = SessionStartCoalescer.machineKey(req, machine: machine.id, room: room)
         Task { @MainActor [weak self, weak machine] in
-            guard let machine,
-                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
-                  let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
-                SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
-                NSSound.beep()
-                return
+            // The same start under way (a click before, or a client's through
+            // the hub): wait for it, then open its session — dropping this
+            // click left the window on the new-session screen.
+            var claim = SessionStartCoalescer.shared.claim(key)
+            let giveUp = Date().addingTimeInterval(SessionStartCoalescer.pendingWait)
+            while case .underWay = claim, Date() < giveUp {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                claim = SessionStartCoalescer.shared.claim(key)
             }
-            // The id too: a client's same start through this host gets it.
-            SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
+            let id: UUID
+            switch claim {
+            case .underWay:
+                return
+            case .done(let reply):
+                guard let started = (reply["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+                id = started
+            case .mine(let token):
+                guard let machine,
+                      let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
+                      let started = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
+                    NSSound.beep()
+                    return
+                }
+                id = started
+                // The id too: a client's same start through this host gets it.
+                SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
+            }
+            guard let machine else { return }
             // Started from a room ("Add to Room"): into it, and back to its grid.
             if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
                 delegate.assignMachineRoom(id, room)
