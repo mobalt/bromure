@@ -400,10 +400,18 @@ final class TurnRelayListener: @unchecked Sendable {
     /// (≤ ~10 s), call on a background thread. The permission is in place
     /// before this returns, so the relay candidate can be advertised without
     /// racing the dialer's connect.
-    static func start(creds: TurnCredentials, permitIPs: [String], sshPort: Int)
+    static func start(creds: TurnCredentials, permitIPs requested: [String], sshPort: Int,
+                      admit: @escaping (String) -> Bool = RelayPermits.isPublicUnicast)
         -> (listener: TurnRelayListener, started: Started)? {
         guard let (host, port, tls) = TurnRelayTransport.preferredRelayEndpoint(creds.urls) else {
             FatClientLog.log("p2p: no turn(s):…?transport=tcp URL in credentials")
+            return nil
+        }
+        // Nobody to let in (no public address among the requested): no
+        // allocation either.
+        let permitIPs = RelayPermits.admissible(requested, admit: admit)
+        guard !permitIPs.isEmpty else {
+            FatClientLog.log("p2p: no public address to let in (\(requested.joined(separator: ", "))) — relay skipped")
             return nil
         }
         let client = TurnTCPClient(host: host, port: port, tls: tls,
@@ -419,7 +427,12 @@ final class TurnRelayListener: @unchecked Sendable {
         }
         // Every address the dialer was seen from (one per relay it asked):
         // a network with several exits reaches THIS relay from any of them.
-        let permitted = permitIPs.filter { client.createPermission(peerIP: $0) }
+        // Only public unicast addresses, a few at most (RelayPermits); each
+        // on a short timeout, so a refusal can't hold the relay up long.
+        if permitIPs.count < requested.count {
+            FatClientLog.log("p2p: TURN permits only \(permitIPs.joined(separator: ", ")) of \(requested.joined(separator: ", "))")
+        }
+        let permitted = permitIPs.filter { client.createPermission(peerIP: $0, timeout: 2) }
         // The ones that failed are retried by the service loop — all of
         // them when none went through (the allocation is kept for that).
         let retry = permitIPs.filter { !permitted.contains($0) }
@@ -431,7 +444,7 @@ final class TurnRelayListener: @unchecked Sendable {
             + "(lifetime \(alloc.lifetime)s, permit \(permitted.joined(separator: ", ")))")
         let listener = TurnRelayListener(client: client, sshPort: sshPort,
                                          lifetime: alloc.lifetime,
-                                            permits: RelayPermits(installed: permitted, pending: retry))
+                                            permits: RelayPermits(installed: permitted, pending: retry, admit: admit))
         Thread.detachNewThread { listener.serviceLoop() }
         let relay = P2PCandidate(kind: .relay, proto: .tcp,
                                  ip: alloc.relayIP, port: alloc.relayPort, ttl: Int(alloc.lifetime))
@@ -462,7 +475,9 @@ final class TurnRelayListener: @unchecked Sendable {
     /// loop within a tick.
     func permit(ip: String) {
         lock.lock(); defer { lock.unlock() }
-        permits.add(ip)
+        if !permits.add(ip) {
+            FatClientLog.log("p2p: TURN relay won't let \(ip) in (not a public address, or \(RelayPermits.maxAddresses) already)")
+        }
     }
 
     func stop() {
