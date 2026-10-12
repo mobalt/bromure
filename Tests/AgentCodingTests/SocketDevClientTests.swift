@@ -60,8 +60,19 @@ struct SocketDevClientTests {
             ["type": "pypi", "name": "six", "version": "1.17.0", "inputPurl": purl,
              "alerts": [["key": "socket-pending-scan", "type": "pendingScan", "severity": "low"]]],
         ]), purl: purl) == nil)
+        // A package socket.dev can't resolve (a new upload): an artifact
+        // line with a notFound alert — no verdict, not a clean one.
+        #expect(SocketDevClient.parsePURLResponse(ndjson([
+            ["type": "pypi", "name": "six", "version": "1.17.0", "inputPurl": purl,
+             "alerts": [["type": "notFound", "severity": "low"]]],
+        ]), purl: purl) == nil)
         #expect(SocketDevClient.parsePURLResponse(ndjson([
             ["_type": "purlError", "value": ["inputPurl": purl, "error": "not found", "retryable": false]],
         ]), purl: purl) == nil)
+        // A JSON array of the same is read alike.
+        let array = try! JSONSerialization.data(withJSONObject: [
+            ["type": "pypi", "name": "six", "version": "1.17.0", "inputPurl": purl,
+             "alerts": [["type": "malware", "severity": "high"]]]])
+        #expect(SocketDevClient.parsePURLResponse(array, purl: purl)?.compromised.first?.type == "malware")
     }
 }

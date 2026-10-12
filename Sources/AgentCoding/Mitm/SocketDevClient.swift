@@ -411,6 +411,7 @@ public actor SocketDevClient {
             req.httpMethod = "POST"
             Self.authorize(&req, apiKey: apiKey)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
             req.httpBody = body
             req.timeoutInterval = 45
             SupplyChainLog.shared.record("[socket.dev] →  POST \(urlStr) \(purl)")
@@ -448,17 +449,32 @@ public actor SocketDevClient {
         return nil
     }
 
-    /// The /purl response (NDJSON: artifacts, purlError, summary lines):
-    /// the verdict for the one package asked about, or nil (an error line,
-    /// no artifact, or an analysis still pending).
+    /// Alerts that mean socket.dev has no verdict on the package: an
+    /// analysis still under way, or a package it can't resolve (a new
+    /// upload, a name it doesn't know). Read as clean, such a package was
+    /// let through — and remembered so for the rest of the run.
+    static let noVerdictAlerts: Set<String> = ["pendingScan", "notFound"]
+
+    /// The /purl response (NDJSON: artifacts, purlError, summary lines;
+    /// a JSON array of the same is read too): the verdict for the one
+    /// package asked about, or nil (an error line, no artifact, or a
+    /// no-verdict alert).
     static func parsePURLResponse(_ data: Data, purl: String) -> CheckResult? {
-        let text = String(decoding: data, as: UTF8.self)
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  obj["_type"] == nil,   // purlError / summary lines
+        var objects: [[String: Any]] = []
+        if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            objects = arr
+        } else {
+            for line in String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline) {
+                if let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+                    objects.append(obj)
+                }
+            }
+        }
+        for obj in objects {
+            guard obj["_type"] == nil,   // purlError / summary lines
                   obj["name"] != nil || obj["inputPurl"] != nil else { continue }
             let alerts = (obj["alerts"] as? [[String: Any]]) ?? []
-            if alerts.contains(where: { ($0["type"] as? String) == "pendingScan" }) { return nil }
+            if alerts.contains(where: { noVerdictAlerts.contains(($0["type"] as? String) ?? "") }) { return nil }
             return classify(alerts.map { a in
                 let type = (a["type"] as? String) ?? ""
                 let props = a["props"] as? [String: Any]
