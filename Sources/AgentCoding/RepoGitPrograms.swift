@@ -43,9 +43,16 @@ enum RepoGitPrograms {
         // `includeIf gitdir:` all count, which `cd / && git config --global
         // --get` missed (an included driver read as none). Local, worktree
         // and command-line (a previous `off`) values never count. Fails
-        // when there is none.
-        let userValue = "_bg() { git -C \(dir) config --show-scope --get-all \"$1\" 2>/dev/null "
-            + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "global" || s == "system") { v = $0; sub(/^[^\t]*\t/, "", v); f = 1 } } END { if (f) print v; exit !f }'; }; "#
+        // when there is none. Read NUL-separated (`scope\0value\0`): git
+        // prints a value's newline as is, so a local value holding
+        // "\nglobal\t<command>" read as one more line passed for the user's
+        // own driver — and git ran the repository's command. A value's
+        // newlines become \001 for awk (which pairs scope and value lines)
+        // and are restored in the value printed. Bytes, not characters
+        // (LC_ALL=C): a non-UTF-8 byte in a repository value doesn't stop
+        // BSD tr, and the user's own value comes back byte for byte.
+        let userValue = "_bg() { git -C \(dir) config -z --show-scope --get-all \"$1\" 2>/dev/null "
+            + #"| LC_ALL=C tr '\n\000' '\001\n' | LC_ALL=C awk 'NR % 2 == 1 { s = $0; next } s == "global" || s == "system" { v = $0; f = 1 } END { if (f) { gsub(/\001/, "\n", v); print v }; exit !f }'; }; "#
         return userValue + "_bk=$( { \(read); } 2>/dev/null "
             + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "local" || s == "worktree") { sub(/^[^\t]*\t/, ""); print } }'); "#
             + "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null "

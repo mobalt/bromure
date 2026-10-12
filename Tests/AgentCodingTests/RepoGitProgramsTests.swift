@@ -85,6 +85,38 @@ struct RepoGitProgramsTests {
         #expect(sh(TaskLitter.status("'\(home)/nope'")).isEmpty)
     }
 
+    /// Finding (CWE-78): git prints a config value's newline as is, and the
+    /// user-value read was line-based — a local value "legit\nglobal\t<cmd>"
+    /// read as the user's global driver, and `off` pinned the repository's
+    /// command: git add ran it.
+    @Test("a repository value holding a fake global line is never taken for the user's driver")
+    func newlineSpoofIgnored() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgn-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", gcfg = home + "/gitconfig"
+        let global = home + "/global.sh", seen = home + "/GLOBAL-RAN"
+        let iso = "export GIT_CONFIG_GLOBAL=\(gcfg) GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh("set -e; mkdir -p \(root); : > \(gcfg); printf '#!/bin/sh\\ntouch \(seen)\\ncat\\n' > \(global); chmod +x \(global); "
+               + iso + "cd \(root); git init -q -b main; echo '*.txt filter=only' > .gitattributes; "
+               + "git add .gitattributes; git commit -qm a; echo x > a.txt; "
+               + "git config filter.only.clean \"$(printf 'legit\\nglobal\\ttouch \(marker); cat')\"")
+        // The setup is live: the stored value does hold the fake line.
+        #expect(sh(iso + "git -C '\(root)' config -z --show-scope --get-all filter.only.clean | tr '\\0' '|'")
+                .contains("global\ttouch"))
+        func add() -> String {
+            sh(iso + RepoGitPrograms.off("'\(root)'")
+               + "git -C '\(root)' add a.txt >/dev/null 2>&1 && echo ADDED || echo REFUSED; git -C '\(root)' status --porcelain >/dev/null 2>&1")
+        }
+        // No user driver: the repository's command never runs.
+        _ = add()
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // A real global driver: that one is pinned, not the spoofed line.
+        _ = sh("git -C '\(root)' reset -q; printf '[filter \"only\"]\\n\\tclean = \(global)\\n' > \(gcfg)")
+        #expect(add().contains("ADDED"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        #expect(FileManager.default.fileExists(atPath: seen))
+    }
+
     /// Finding (CWE-754): `git lfs install --local` also sets a `process`
     /// filter; switched off it was blank, and a blank process filter that is
     /// `required` failed every status — a clean checkout read as dirty.
