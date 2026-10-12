@@ -108,6 +108,57 @@ struct RepoGitProgramsTests {
         #expect(!FileManager.default.fileExists(atPath: marker))
     }
 
+    /// Finding (CWE-754): with a GLOBAL clean/smudge driver for the filter,
+    /// the blank local `process` shadowed it, and `required=false` hid the
+    /// failure — `git add` stored raw bytes and reported success. Now the
+    /// required filter fails loudly; the repository's program never runs.
+    @Test("a blank process over a global clean/smudge driver fails a required filter, never passes raw bytes")
+    func blankProcessOverGlobalDriverFails() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgq-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        let global = home + "/global.sh", gcfg = home + "/gitconfig"
+        let iso = "export GIT_CONFIG_GLOBAL=\(gcfg) GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh("set -e; mkdir -p \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); "
+               + "printf '#!/bin/sh\\nprintf FILTERED; cat\\n' > \(global); chmod +x \(pwn) \(global); "
+               + "printf '[filter \"lfs\"]\\n\\tclean = \(global)\\n\\tsmudge = \(global)\\n\\trequired = true\\n' > \(gcfg); "
+               + iso + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; "
+               + "git add .gitattributes; git commit -qm a; "
+               + "for k in clean smudge process; do git config filter.lfs.$k \(pwn); done; "
+               + "git config filter.lfs.required true; echo raw > b.bin")
+        let add = sh(iso + RepoGitPrograms.off("'\(root)'")
+                     + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(add.contains("REFUSED"))
+        #expect(sh(iso + "git -C '\(root)' ls-files b.bin").isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // Review: a user driver git reads through an include, or an
+        // includeIf gitdir: matching this repository, counts the same.
+        let inc = home + "/included"
+        _ = sh("mv \(gcfg) \(inc); printf '[include]\\n\\tpath = \(inc)\\n' > \(gcfg)")
+        let viaInclude = sh(iso + RepoGitPrograms.off("'\(root)'")
+                            + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(viaInclude.contains("REFUSED"))
+        // gitdir: matches the resolved path (/var is /private/var here;
+        // Foundation's resolvingSymlinksInPath turns it back into /var).
+        _ = sh("git -C '\(root)' reset -q; printf '[includeIf \"gitdir:%s/\"]\\n\\tpath = \(inc)\\n' "
+               + "\"$(cd '\(root)' && pwd -P)\" > \(gcfg)")
+        let viaIncludeIf = sh(iso + RepoGitPrograms.off("'\(root)'")
+                              + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(viaIncludeIf.contains("REFUSED"))
+        // Only a global smudge, under `set -e` (dash): still a user driver.
+        _ = sh("git -C '\(root)' reset -q; printf '[filter \"lfs\"]\\n\\tsmudge = \(global)\\n\\trequired = true\\n' > \(gcfg)")
+        let smudgeOnly = sh("set -e; " + iso + RepoGitPrograms.off("'\(root)'")
+                            + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(smudgeOnly.contains("REFUSED"))
+        #expect(sh(iso + "git -C '\(root)' ls-files b.bin").isEmpty)
+        // With no user driver at all, the blank process still passes through.
+        _ = sh("printf '' > \(gcfg)")
+        let passthrough = sh(iso + RepoGitPrograms.off("'\(root)'")
+                             + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(passthrough.contains("ADDED"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
     /// Finding: `--ignore-submodules=dirty` hid an edited submodule — the
     /// session list said "no changes yet", Discard said nothing would be
     /// lost, and removing the worktree deleted that work.
