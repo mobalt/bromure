@@ -398,7 +398,10 @@ final class TaskDispatcher {
         case .note:
             // The host speaking for the far end: a failure, the peer ending.
             store.mutate(task.id) { $0.assigneeNote = m.text }
-            if d.status == .failed || store.task(task.id)?.stage == .inProgress && m.text.hasPrefix("failed") {
+            if m.text == DelegationEngine.backText {
+                // The assignee's session came back: its "gone" failure is moot.
+                store.mutate(task.id) { if $0.lastError?.contains(DelegationEngine.goneText(d)) == true { $0.lastError = nil } }
+            } else if d.status == .failed || store.task(task.id)?.stage == .inProgress && m.text.hasPrefix("failed") {
                 store.mutate(task.id) { $0.lastError = m.text }
             }
         case .brief, .answer, .steer, .cancel:

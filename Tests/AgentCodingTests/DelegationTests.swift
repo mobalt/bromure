@@ -346,6 +346,46 @@ struct DelegationTests {
         #expect(f.store.delegation(d.id)?.status == .failed)
     }
 
+    /// Board report: a Sidecar that crashed or rebooted during a board
+    /// task took its session out of view past the grace; the delegation
+    /// failed for good ("the peer's session is gone") — the card too — even
+    /// though the session came back, and its delivery was refused.
+    @Test("a delegation failed for its session's absence carries on when the session is back")
+    func goneSessionComesBack() async throws {
+        let f = fixture()
+        let (d, childID) = await delegated(f)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .working)
+        f.engine.absenceGrace = 0
+        let child = try #require(f.sessions.session(childID))
+        // The Mac rebooting: the session out of view, past the grace.
+        f.sessions.remove(childID)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .failed)
+        #expect(f.store.delegation(d.id)?.goneFrom == .working)
+        // Back: on with it where it was.
+        f.sessions.upsert(child)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .working)
+        #expect(f.store.delegation(d.id)?.goneFrom == nil && f.store.delegation(d.id)?.failure == nil)
+        // Gone again, and it delivers before it's seen: the delivery goes in.
+        f.sessions.remove(childID)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .failed)
+        _ = try await f.engine.post(d.id, from: .child, kind: .deliver, text: "done")
+        #expect(f.store.delegation(d.id)?.status == .delivered)
+        f.sessions.upsert(child)
+        // A deleted session is still the end.
+        f.sessions.mutate(childID) { $0.deletedAt = Date() }
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.status == .failed)
+        #expect(f.store.delegation(d.id)?.goneFrom == nil)
+    }
+
     @Test("what the host owes a session is on the record, not in a queue")
     func unnoticedOnRecord() {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("delegations-\(UUID().uuidString).json")
