@@ -1603,6 +1603,23 @@ struct HubFindingsTab: View {
     @Bindable var hub: AutomationHubModel
     let actions: AutomationHubView.Actions
 
+    /// The repository filter, while it names a repository still watched or
+    /// with findings — else none. Stopping a watch deletes its findings and
+    /// left the filter on its name: an empty chart and list, and no picker
+    /// to clear it once one repository was left.
+    private var repoFilter: String? {
+        Self.activeRepoFilter(hub.repoFilter, watched: findingStore.watches.map(\.repo),
+                              findings: findingStore.findings)
+    }
+
+    static func activeRepoFilter(_ picked: String?, watched: [String], findings: [RepoFinding]) -> String? {
+        HubOverviewTab.pickedRepo(picked, watched: watched + findings.map(\.repo))
+    }
+
+    private func dropStaleFilter() {
+        if hub.repoFilter != nil, repoFilter == nil { hub.repoFilter = nil }
+    }
+
     private var filtered: [RepoFinding] {
         let q = hub.search.trimmingCharacters(in: .whitespaces)
         return findingStore.findings.filter { f in
@@ -1612,7 +1629,7 @@ struct HubFindingsTab: View {
             case .only(let s): if f.status != s { return false }
             }
             if let sev = hub.severityFilter, f.severity != sev { return false }
-            if let r = hub.repoFilter, f.repo != r { return false }
+            if let r = repoFilter, f.repo != r { return false }
             if !q.isEmpty {
                 let hay = [f.title, f.file ?? "", f.summary, f.cwe ?? "", f.repo].joined(separator: " ")
                 if !hay.localizedCaseInsensitiveContains(q) { return false }
@@ -1625,7 +1642,7 @@ struct HubFindingsTab: View {
         VStack(spacing: 0) {
             // The chart follows the repository picker (its own columns are
             // severity and status, so those filters don't narrow it).
-            HubFindingsFlow(findings: hub.repoFilter.map { r in findingStore.findings.filter { $0.repo == r } }
+            HubFindingsFlow(findings: repoFilter.map { r in findingStore.findings.filter { $0.repo == r } }
                                 ?? findingStore.findings)
                 .frame(height: 150)
                 .padding(.horizontal, 16)
@@ -1650,6 +1667,9 @@ struct HubFindingsTab: View {
                 }
             }
         }
+        .onAppear { dropStaleFilter() }
+        .onChange(of: findingStore.watches.map(\.repo)) { _, _ in dropStaleFilter() }
+        .onChange(of: Set(findingStore.findings.map(\.repo))) { _, _ in dropStaleFilter() }
     }
 
     private var filterBar: some View {
