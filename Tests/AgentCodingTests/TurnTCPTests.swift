@@ -324,7 +324,8 @@ struct TurnTCPTests {
         defer { sshd.stop() }
 
         let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
-                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port)
+                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port,
+                                              admit: { _ in true })   // loopback fake relay
         let (listener, info) = try #require(started)
         defer { listener.stop() }
         #expect(info.relay.kind == .relay)
@@ -370,7 +371,8 @@ struct TurnTCPTests {
         defer { sshd.stop() }
         // As seen by a far relay first (another exit), then by this one.
         let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
-                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port)
+                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port,
+                                              admit: { _ in true })   // loopback fake relay
         let (listener, info) = try #require(started)
         defer { listener.stop() }
         #expect(turn.permittedIPs.contains("198.51.100.9") && turn.permittedIPs.contains("127.0.0.1"))
@@ -408,7 +410,8 @@ struct TurnTCPTests {
         defer { sshd.stop() }
         turn.refusePermission("127.0.0.1", times: 2)   // at allocation, and its first retry
         let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
-                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port)
+                                              permitIPs: ["198.51.100.9", "127.0.0.1"], sshPort: sshd.port,
+                                              admit: { _ in true })   // loopback fake relay
         let (listener, info) = try #require(started)
         defer { listener.stop() }
         let deadline = Date().addingTimeInterval(8)
@@ -440,7 +443,8 @@ struct TurnTCPTests {
         defer { sshd.stop() }
         turn.refusePermission("127.0.0.1", times: 2)
         let started = TurnRelayListener.start(creds: try makeCreds(port: turn.port),
-                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port)
+                                              permitIPs: ["127.0.0.1"], sshPort: sshd.port,
+                                              admit: { _ in true })   // loopback fake relay
         let (listener, _) = try #require(started)
         defer { listener.stop() }
         let deadline = Date().addingTimeInterval(10)
@@ -448,9 +452,50 @@ struct TurnTCPTests {
         #expect(turn.permittedIPs.contains("127.0.0.1"))
     }
 
+    /// Finding (CWE-807): the permissions are the ACL in front of sshd and
+    /// came from unsigned signalling — every srflx the peer sent was let
+    /// in, any string, no cap. Only public unicast addresses, a few at most.
+    @Test("only public unicast addresses are let in, a few per allocation")
+    func permitsArePublicAndCapped() {
+        for ip in ["8.8.8.8", "203.0.114.1", "2606:4700::1111", "2a00:1450:4001::64"] {
+            #expect(RelayPermits.isPublicUnicast(ip), "\(ip)")
+        }
+        for ip in ["10.1.2.3", "172.20.0.1", "192.168.1.1", "127.0.0.1", "169.254.1.1", "100.64.0.1",
+                   "0.0.0.0", "224.0.0.1", "255.255.255.255", "198.51.100.9", "203.0.113.7", "192.0.2.1",
+                   "::1", "::", "fe80::1", "fd00::1", "ff02::1", "2001:db8::1", "::ffff:8.8.8.8",
+                   "example.com", "8.8.8", ""] {
+            #expect(!RelayPermits.isPublicUnicast(ip), "\(ip)")
+        }
+        let many = (1...10).map { "8.8.8.\($0)" }
+        #expect(RelayPermits.admissible(["10.0.0.1"] + many + ["8.8.8.1"]) == Array(many.prefix(RelayPermits.maxAddresses)))
+        var p = RelayPermits(installed: ["8.8.8.1", "10.0.0.1"])
+        #expect(p.installed == ["8.8.8.1"])
+        let privateOne = p.add("192.168.0.9")
+        let fill = [p.add("8.8.8.2"), p.add("8.8.8.3"), p.add("8.8.8.4")]
+        let overCap = p.add("8.8.8.5")
+        let again = p.add("8.8.8.4")
+        #expect(!privateOne)
+        #expect(fill == [true, true, true])
+        #expect(!overCap)   // the cap
+        #expect(again)      // already queued: fine
+
+        // Review: an address whose CreatePermission is under way still
+        // counts — a late one can't take its slot, then both get in.
+        var q = RelayPermits(installed: ["8.8.8.1", "8.8.8.2", "8.8.8.3"], pending: ["8.8.8.4"])
+        let inFlight = q.takeOne()
+        let late = q.add("8.8.8.5")
+        #expect(inFlight?.ip == "8.8.8.4")
+        #expect(!late)
+        let requeued = q.record("8.8.8.4", tries: 0, ok: false)
+        #expect(requeued && q.pending.map(\.ip) == ["8.8.8.4"])
+        _ = q.takeOne()
+        _ = q.record("8.8.8.4", tries: 1, ok: true)
+        #expect(q.installed.count == RelayPermits.maxAddresses && q.inFlight.isEmpty)
+    }
+
     @Test("RelayPermits: installed only on success, a failure retried up to the cap, renewals of what's installed")
     func relayPermitsBookkeeping() {
-        var p = RelayPermits(installed: ["a"], pending: ["b"])
+        var p = RelayPermits(installed: ["a"], pending: ["b"], admit: { _ in true })
         p.add("a"); p.add("b"); p.add("c")
         #expect(p.pending.map(\.ip) == ["b", "c"])
         let first = p.take()
