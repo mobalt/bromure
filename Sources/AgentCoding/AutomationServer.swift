@@ -454,8 +454,11 @@ final class ACAutomationServer {
         var linger = Darwin.linger(l_onoff: 0, l_linger: 0)
         setsockopt(clientFD, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
 
-        // A silent client gets the request-read timeout, not a thread for good.
-        Self.setReceiveTimeout(clientFD, Self.requestReadTimeout)
+        // A silent client gets a timeout, not a thread for good. Long for the
+        // first byte: a fat client opens a control channel ahead of need (its
+        // spare, replaced after `SSHConnection.spareMaxAge`) and its
+        // request comes when it's used.
+        Self.setReceiveTimeout(clientFD, Self.firstByteTimeout)
         // A thread of its own, not the global queue: a request may block for
         // long (a /state subscription for as long as its client stays, a call
         // waiting on a machine's link, an exec), and the global queue's ~64
@@ -471,7 +474,9 @@ final class ACAutomationServer {
         t.start()
     }
 
-    /// Longest wait for the next bytes of a request's head or body.
+    /// Longest wait for a connection's first byte.
+    static let firstByteTimeout: TimeInterval = 900
+    /// Then, for each next bytes of its head or body.
     static let requestReadTimeout: TimeInterval = 60
 
     /// SO_RCVTIMEO on `fd`; 0 = block for as long as it takes.
@@ -510,6 +515,7 @@ final class ACAutomationServer {
         while bodyStart == nil {
             let n = Darwin.read(fd, &chunk, chunk.count)
             if n <= 0 { Darwin.close(fd); return }
+            if data.isEmpty { Self.setReceiveTimeout(fd, Self.requestReadTimeout) }
             data.append(contentsOf: chunk[0..<n])
             bodyStart = headerEndIndex()
             // A header block this large is bogus — bail rather than grow forever.

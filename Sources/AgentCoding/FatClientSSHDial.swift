@@ -683,6 +683,9 @@ final class SSHConnection: @unchecked Sendable {
     /// (= per lane).
     private let spareLock = NSLock()
     private var spareControlFD: Int32?
+    /// When the spare was opened: one older than `spareMaxAge` is replaced,
+    /// well before the server stops waiting for its request.
+    private var spareOpenedAt = Date.distantPast
     /// Set once the connection is gone: a spare opened after that (a refill
     /// racing the drop) is closed instead of kept.
     private var spareReleased = false
@@ -694,10 +697,11 @@ final class SSHConnection: @unchecked Sendable {
         guard verb == FatClient.controlVerb, !Self.noPrewarm else { return openFreshChannel(verb) }
         spareLock.lock()
         let spare = spareControlFD
+        let fresh = Date().timeIntervalSince(spareOpenedAt) < Self.spareMaxAge
         spareControlFD = nil
         spareLock.unlock()
         let fd: Int32?
-        if let spare, Self.spareIsUsable(spare) {
+        if let spare, fresh, Self.spareIsUsable(spare) {
             fd = spare
         } else {
             if let spare { Darwin.close(spare) }
@@ -712,7 +716,7 @@ final class SSHConnection: @unchecked Sendable {
         spareLock.lock()
         let released = spareReleased
         let old = released ? nil : spareControlFD
-        if !released { spareControlFD = fd }
+        if !released { spareControlFD = fd; spareOpenedAt = Date() }
         spareLock.unlock()
         if let old { Darwin.close(old) }
         if released { Darwin.close(fd) }
@@ -728,6 +732,10 @@ final class SSHConnection: @unchecked Sendable {
         spareLock.unlock()
         if let spare { Darwin.close(spare) }
     }
+
+    /// Oldest spare handed out: the server waits `ACAutomationServer
+    /// .firstByteTimeout` for a connection's request, then hangs up.
+    static let spareMaxAge: TimeInterval = 300
 
     /// Spare fds currently held (tests).
     var heldSpareCount: Int {
