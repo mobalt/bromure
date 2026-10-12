@@ -3,7 +3,9 @@ import os
 import Testing
 @testable import bromure_ac
 
-@Suite("Attached machines (Bromure Agent Host)")
+// Serialized: every test shares MachineLinkHub.shared, and the persistence
+// test swaps its store (reloading the admissions) under the others.
+@Suite("Attached machines (Bromure Agent Host)", .serialized)
 struct MachineLinkTests {
     @Test("machine-link and machine-detach verbs parse, and nothing else does")
     func verbs() {

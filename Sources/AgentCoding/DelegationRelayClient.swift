@@ -51,9 +51,11 @@ final class DelegationRelayClient: @unchecked Sendable {
                 switch Self.readLine(fd, within: parkedFor) {
                 case .line(let hello, let rest):
                     FatClientLog.log("delegation-relay: \(label) stream \(hello)")
-                    Thread.detachNewThread { [weak self] in
-                        self?.pump(fd, hello: hello, pending: rest)
-                        self?.release(fd)
+                    // Strong: this thread closes the fd (stop() only shuts it
+                    // down), so it must outlive the client letting go.
+                    Thread.detachNewThread { [self] in
+                        self.pump(fd, hello: hello, pending: rest)
+                        self.release(fd)
                     }
                 case .expired:
                     // Maybe a dead end nobody told us about: a fresh one.
