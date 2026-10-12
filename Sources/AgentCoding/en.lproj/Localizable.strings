@@ -4201,3 +4201,6 @@
 
 /* automation editor */
 "The host couldn't list them (HTTP %d)." = "The host couldn't list them (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "The branch is still being recorded — try again in a moment.";

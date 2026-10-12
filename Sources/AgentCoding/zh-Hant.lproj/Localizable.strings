@@ -4170,3 +4170,6 @@
 
 /* automation editor */
 "The host couldn't list them (HTTP %d)." = "主機無法列出它們（HTTP %d）。";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "分支仍在記錄中——請稍後再試。";

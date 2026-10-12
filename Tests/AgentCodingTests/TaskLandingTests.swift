@@ -549,6 +549,79 @@ struct TaskLandingTests {
         #expect(none.lastError == TaskDispatcher.noWorktreeText("wt/y"))
     }
 
+    /// Finding (CWE-362): a card moved to Review while a finished agent's
+    /// worktree lookup awaited got neither branch nor checkout — the
+    /// lookup's write bailed on the stage — so Merge marked it done unmerged
+    /// and Send Back did nothing.
+    @Test("a card moved to Review mid-lookup still gets its branch, and Merge lands it")
+    func reviewMidLookupKeepsBranch() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        var t = reviewTask(s, branch: nil)
+        t.branchSlug = "fix"
+        t.parentBranch = nil; t.rootRepo = nil
+        #expect(CodingTaskEngine.fillsReview(t))
+        // The lookup's find fills in what it lacks, nothing else.
+        t.lastError = TaskDispatcher.noWorktreeText("wt/fix")
+        #expect(CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/w", parent: "main", root: "/r"))
+        #expect(t.branch == "wt/fix" && t.worktreeDir == "/w" && t.parentBranch == "main" && t.rootRepo == "/r")
+        #expect(t.stage == .testing && t.lastError == nil)
+        // Never over what it has.
+        #expect(!CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/other", parent: "dev", root: "/x"))
+        #expect(t.worktreeDir == "/w" && t.parentBranch == "main")
+        var other = t; other.branch = "wt/else"
+        #expect(!CodingTaskEngine.fillWorktree(&other, branch: "wt/fix", dir: "/w2", parent: nil, root: nil))
+        // Landed or closed: left alone.
+        var landed = t
+        landed.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+        #expect(!CodingTaskEngine.fillsReview(landed))
+        var done = t; done.stage = .done
+        #expect(!CodingTaskEngine.fillsReview(done))
+
+        // A parent the guest read that isn't a plain branch name is left out.
+        var unsafe = reviewTask(s, branch: nil)
+        unsafe.branchSlug = "u"; unsafe.parentBranch = nil
+        CodingTaskEngine.fillWorktree(&unsafe, branch: "wt/u", dir: "/u", parent: "--upload-pack=x", root: "/r")
+        #expect(unsafe.parentBranch == nil && unsafe.worktreeDir == "/u")
+
+        // No branch recorded yet (and no live tab to read it from): Merge
+        // neither marks it done nor guesses the slug's name (the guest may
+        // have suffixed it) — it waits, saying why.
+        let bare = reviewTask(s, branch: nil)
+        s.mutate(bare.id) { $0.branchSlug = "bare" }
+        engine.land(bare.id, mode: .merge)
+        #expect(s.task(bare.id)?.stage == .testing)
+        #expect(s.task(bare.id)?.landing == nil)
+        #expect(s.task(bare.id)?.lastError == CodingTaskEngine.branchPendingText)
+        // A live tab names it only when exactly one is the slug's: an old
+        // wt/bare beside the guest's wt/bare-2 is ambiguous.
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare-2", nil, "wt/other"], slug: "bare") == "wt/bare-2")
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare", "wt/bare-2"], slug: "bare") == nil)
+        #expect(CodingTaskEngine.onlyBranch(["wt/barely"], slug: "bare") == nil)
+        // The lookup then records it: the note goes.
+        s.mutate(bare.id) { CodingTaskEngine.fillWorktree(&$0, branch: "wt/bare-2", dir: "/b", parent: "main", root: "/r") }
+        #expect(s.task(bare.id)?.branch == "wt/bare-2" && s.task(bare.id)?.lastError == nil)
+    }
+
+    /// Review follow-up: Send Back (or Back to In Progress) while the
+    /// finish waited for the session to settle put the card back to work —
+    /// and the finish then moved it to Review again, under the agent working
+    /// on the feedback.
+    @Test("a card moved by hand while its finish waited is only filled in, not moved")
+    func armedFinishSeesHandMoves() {
+        var t = CodingTask(title: "x", profileID: UUID(), tool: .claude)
+        t.stage = .inProgress
+        t.startedAt = Date(timeIntervalSince1970: 100)
+        let armed = TaskFinishArmed(startedAt: t.startedAt, testingAt: t.testingAt)
+        #expect(!armed.moved(t))
+        // Move to Review, then Back to In Progress: testingAt moved.
+        var back = t; back.testingAt = Date()
+        #expect(armed.moved(back))
+        // Send Back: the session-gone clock restarted.
+        var sent = t; sent.startedAt = Date()
+        #expect(armed.moved(sent))
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

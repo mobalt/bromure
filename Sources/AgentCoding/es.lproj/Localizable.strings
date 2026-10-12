@@ -4169,3 +4169,6 @@
 
 /* automation editor */
 "The host couldn't list them (HTTP %d)." = "El host no pudo listarlos (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "La rama aún se está registrando; vuelve a intentarlo en un momento.";

@@ -445,7 +445,13 @@ extension CodingTaskEngine {
         guard let task = store.task(taskID), task.stage == .testing else { return }
         if let l = task.landing, l.phase != .needsYou { return }
         // Nothing to land: a task without a branch is simply done.
-        guard let branch = task.branch else { markDone(taskID); return }
+        guard task.branch != nil || task.branchSlug != nil else { markDone(taskID); return }
+        // One whose branch isn't recorded yet (moved to Review mid-lookup)
+        // lands its live tab's, or waits — never done, never a guess.
+        guard let branch = reviewBranch(task) else {
+            store.mutate(taskID) { $0.lastError = Self.branchPendingText }
+            return
+        }
         let wanted = targetOverride ?? task.parentBranch ?? ""
         store.mutate(taskID) {
             $0.landing = TaskLanding(mode: mode, target: wanted, phase: .checking,

@@ -640,6 +640,14 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// A finish's snapshot of its card when it was armed: the card was moved
+/// by hand since (sent back, put back to work) when either stamp changed.
+struct TaskFinishArmed: Equatable, Sendable {
+    var startedAt: Date?
+    var testingAt: Date?
+    func moved(_ t: CodingTask) -> Bool { t.startedAt != startedAt || t.testingAt != testingAt }
+}
+
 // MARK: - Store
 
 /// Persistence for the coding board: one JSON blob at
@@ -2608,6 +2616,10 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(task.id) else { return }
             settling.insert(task.id)
+            // The card as this finish found it: moved by hand while it waits
+            // (Move to Review, then Send Back or Back to In Progress), the
+            // finish no longer moves it.
+            let armed = TaskFinishArmed(startedAt: task.startedAt, testingAt: task.testingAt)
             // Finalize only after the session is quiet — a Stop-hook done
             // with background subagents still running isn't done.
             Task { [weak self] in
@@ -2616,7 +2628,7 @@ final class CodingTaskEngine {
                 guard let self else { return }
                 self.settling.remove(task.id)
                 await self.finalizeTaskDone(task.id, profileID: profileID,
-                                            branch: branch)
+                                            branch: branch, armed: armed)
             }
             return
         }
@@ -2675,9 +2687,11 @@ final class CodingTaskEngine {
     /// diff), stage → Testing, session tab closed. Idempotent via the
     /// stage guard.
     private func finalizeTaskDone(_ taskID: UUID, profileID: UUID,
-                                  branch: String) async {
+                                  branch: String, armed: TaskFinishArmed) async {
+        // Moved to Review while the session settled: it still needs the
+        // branch and checkout this finish looks up.
         guard let task = store.task(taskID),
-              task.stage == .inProgress || task.stage == .planning else { return }
+              task.stage == .inProgress || task.stage == .planning || Self.fillsReview(task) else { return }
         let tab = delegate?.pane(for: profileID)?.model.tabs
             .first { $0.worktreeBranch == branch }
         var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
@@ -2692,10 +2706,20 @@ final class CodingTaskEngine {
             root = root ?? m.root
         }
         BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
+        var wrote = false
         store.mutate(taskID) {
-            // The lookup above awaited: marked done, discarded or moved on
-            // meanwhile, the card stays where it is now.
+            // The lookup above awaited. Moved to Review meanwhile (Move to
+            // Review, a delegated delivery): it keeps its state, but gets
+            // the branch and checkout it lacks — without them Merge marked
+            // it done unmerged and Send Back did nothing.
+            let atWork = $0.stage == .inProgress || $0.stage == .planning
+            if Self.fillsReview($0) || (atWork && armed.moved($0)) {
+                wrote = Self.fillWorktree(&$0, branch: branch, dir: dir, parent: parent, root: root)
+                return
+            }
+            // Marked done, discarded or stopped meanwhile: it stays as it is.
             guard $0.stage == .inProgress || $0.stage == .planning else { return }
+            wrote = true
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
@@ -2707,7 +2731,8 @@ final class CodingTaskEngine {
             $0.lastError = nil
             $0.restartNeeded = nil
             if let dir { $0.worktreeDir = dir }
-            if let parent { $0.parentBranch = parent }
+            // Read from the guest (its registry, or HEAD): a plain branch name only.
+            if let parent, parent != branch, Self.isSafeBranchName(parent) { $0.parentBranch = parent }
             if let root { $0.rootRepo = root }
         }
         // The agent stays in its tab through review: send-back types into
@@ -2715,7 +2740,57 @@ final class CodingTaskEngine {
         // that wrote the change. The tab is put away when the task lands, is
         // marked done or discarded — or after a long idle spell in Review
         // (`sweepIdleReview`).
-        await measureCodeChanges(taskID)
+        if wrote { await measureCodeChanges(taskID) }
+    }
+
+    /// The branch a Review card stands for: the one recorded, or — not yet
+    /// recorded — its live tab's, when exactly one tab is the slug's (an old
+    /// `wt/<slug>` beside the new `wt/<slug>-2` is ambiguous: wait).
+    /// The guest may have suffixed the slug ("-2"), so the slug alone
+    /// names a branch that isn't this card's. nil: wait for the lookup.
+    func reviewBranch(_ t: CodingTask) -> String? {
+        if let b = t.branch { return b }
+        guard let slug = t.branchSlug else { return nil }
+        let tabs = delegate?.pane(for: t.profileID)?.model.tabs.map(\.worktreeBranch) ?? []
+        return Self.onlyBranch(tabs, slug: slug)
+    }
+
+    /// The one branch among `tabs` that is the slug's, or nil (none, or more).
+    nonisolated static func onlyBranch(_ tabs: [String?], slug: String) -> String? {
+        let hits = Set(tabs.compactMap { $0 }.filter { AutomationBoard.branchMatches($0, slug: slug) })
+        return hits.count == 1 ? hits.first : nil
+    }
+
+    nonisolated static var branchPendingText: String {
+        NSLocalizedString("The branch is still being recorded — try again in a moment.",
+                          comment: "task card: Merge/Send Back on a card whose branch isn't known yet")
+    }
+
+    /// A card a finished agent's lookup only fills in: already in Review,
+    /// not landed or closed.
+    nonisolated static func fillsReview(_ t: CodingTask) -> Bool {
+        t.stage == .testing && t.landing?.phase != .landed && t.completion == nil
+    }
+
+    /// The branch and checkout a Review card lacks, from a lookup — never
+    /// over what it has (another branch, a checkout already found), and
+    /// nothing else (its landing, its stage). True when it wrote anything.
+    @discardableResult
+    nonisolated static func fillWorktree(_ t: inout CodingTask, branch: String, dir: String?,
+                                         parent: String?, root: String?) -> Bool {
+        guard t.branch == nil || t.branch == branch else { return false }
+        let before = t
+        if t.branch == nil { t.branch = branch }
+        if (t.worktreeDir ?? "").isEmpty, let dir { t.worktreeDir = dir }
+        if (t.parentBranch ?? "").isEmpty, let parent, parent != branch, isSafeBranchName(parent) {
+            t.parentBranch = parent
+        }
+        if (t.rootRepo ?? "").isEmpty, let root { t.rootRepo = root }
+        // Merge / Send Back's "still being recorded" is moot once it is.
+        if t.lastError == branchPendingText { t.lastError = nil }
+        // A delivery's "no worktree" error is moot once there is one.
+        if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskDispatcher.noWorktreeText(branch) { t.lastError = nil }
+        return t != before
     }
 
     /// Tab-independent worktree metadata: the checkout dir from
@@ -2841,8 +2916,11 @@ final class CodingTaskEngine {
     /// confirmed; a failed one leaves them pending with the reason on the
     /// card, and Restart Session sends them.
     func sendBack(_ taskID: UUID) async {
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let delegate else { return }
+        guard let task = store.task(taskID), task.stage == .testing, let delegate else { return }
+        guard let branch = reviewBranch(task) else {
+            if task.branchSlug != nil { store.mutate(taskID) { $0.lastError = Self.branchPendingText } }
+            return
+        }
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
         let ids = Set(unsent.map(\.id))
