@@ -967,7 +967,11 @@ final class DelegationEngine {
     /// open one the session is the child of.
     func childDelegation(_ key: String?, for sessionID: UUID) throws -> Delegation {
         if let key, !key.isEmpty { return try delegation(key, as: .child, for: sessionID) }
+        // A delegation failed only for this session's absence is still its
+        // own: the session back and calling without an id (one delegation:
+        // the id is optional) revives it in `post`, not "nobody to answer".
         let open = store.openAsChild(sessionID)
+            + store.delegations(child: sessionID).filter { $0.goneFrom != nil }
         // One still waiting on a delivery is the one meant; a delivered
         // one only when it's the only one left (a follow-up after a steer).
         let undelivered = open.filter { $0.status != .delivered }
@@ -990,9 +994,15 @@ final class DelegationEngine {
     func post(_ delegationID: UUID, from: DelegationMessage.Party, kind: DelegationMessage.Kind,
               text: String, answering: UUID? = nil, files: [String] = [],
               landed: [String] = []) async throws -> DelegationMessage {
-        guard let d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
+        guard var d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DelegationRefusal("Nothing to say.") }
+        // Failed only for being out of view, and its session speaks: it's
+        // back (a delivery after a Sidecar restart was refused as "failed").
+        if from == .child, d.goneFrom != nil, sessions.session(d.childSessionID)?.isDeleted != true {
+            revive(d)
+            if let fresh = store.delegation(delegationID) { d = fresh }
+        }
         guard d.status.isOpen || kind == .note else {
             throw DelegationRefusal("Delegation “\(d.title)” is \(d.status.rawValue).")
         }
@@ -1114,12 +1124,14 @@ final class DelegationEngine {
             link.remoteDelegations.mutate(d.id) { $0.status = .cancelled }
             return
         }
-        guard d.status.isOpen else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
+        // A delegation failed only for its session's absence can still be
+        // cancelled — else its revival undid a cancel the parent was told of.
+        guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         let why = trimmedReason.isEmpty ? "no longer needed" : trimmedReason
         var m = DelegationMessage(kind: .cancel, from: party, to: .child, text: why)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .cancel, from: party, to: .child, text: why))
         wake(d.childSessionID)
         if d.isRequest {
@@ -1146,13 +1158,13 @@ final class DelegationEngine {
             link.remoteDelegations.mutate(d.id) { $0.status = .done; $0.verdict = verdict.lowercased() == "rejected" ? "rejected" : "accepted" }
             return
         }
-        guard d.status.isOpen else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
+        guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let v = verdict.lowercased() == "rejected" ? "rejected" : "accepted"
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let text = (d.isRequest ? "Request closed (\(v))." : "Delivery \(v).") + (trimmedNote.isEmpty ? "" : " " + trimmedNote)
         var m = DelegationMessage(kind: .note, from: party, to: .child, text: text)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .note, from: party, to: .child, text: text))
         wake(d.childSessionID)
         if !d.isRequest { retireChild(d) }
@@ -1580,9 +1592,26 @@ final class DelegationEngine {
     /// How long a session may be out of view (its Mac restarting, asleep,
     /// reconnecting) before its delegations end.
     static let missingGrace: TimeInterval = 300
+    /// `missingGrace`, for this engine (tests shorten it).
+    var absenceGrace = DelegationEngine.missingGrace
 
     private func watchChildren() {
         let now = Date()
+        // Gone too long, and back: on with it where it was. Back deleted:
+        // that's the end (failed, as a deleted session's always is).
+        for d in store.delegations where d.goneFrom != nil {
+            guard let child = sessions.session(d.childSessionID) else { continue }
+            if child.isDeleted {
+                let why = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+                store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
+                // The card said it would carry on: say it won't.
+                Task { [weak self] in
+                    _ = try? await self?.post(d.id, from: .host, kind: .note, text: "failed — \(why)")
+                }
+            } else {
+                revive(d)
+            }
+        }
         for d in store.delegations where d.status.isOpen {
             if let child = sessions.session(d.childSessionID), child.isDeleted {
                 missingSince[d.id] = nil
@@ -1594,9 +1623,9 @@ final class DelegationEngine {
                 // moment. Only a long absence ends the delegation.
                 let since = missingSince[d.id] ?? now
                 missingSince[d.id] = since
-                if now.timeIntervalSince(since) > Self.missingGrace {
+                if now.timeIntervalSince(since) > absenceGrace {
                     missingSince[d.id] = nil
-                    fail(d, d.isRequest ? "the peer's session is gone" : "the delegate's session is gone")
+                    markGone(d)
                 }
                 continue
             }
@@ -1621,6 +1650,37 @@ final class DelegationEngine {
             }
         }
     }
+
+    nonisolated static func goneText(_ d: Delegation) -> String {
+        d.isRequest ? "the peer's session is gone" : "the delegate's session is gone"
+    }
+
+    /// Out of view past `missingGrace`: failed, but not over — its session
+    /// isn't put away, and coming back revives it (`revive`).
+    private func markGone(_ d: Delegation) {
+        let why = Self.goneText(d)
+        store.mutate(d.id) { $0.goneFrom = $0.status; $0.status = .failed; $0.failure = why }
+        BACDebug.log("delegation", "“\(d.title)” failed: \(why) (revived if it comes back)")
+        Task { [weak self] in
+            guard let self, let fresh = self.store.delegation(d.id) else { return }
+            _ = try? await self.post(fresh.id, from: .host, kind: .note,
+                                     text: "failed — \(why); it carries on if the session comes back")
+        }
+    }
+
+    /// A delegation failed for its session's absence, the session back:
+    /// its status before, and the other end hears it.
+    func revive(_ d: Delegation) {
+        guard let was = store.delegation(d.id)?.goneFrom else { return }
+        store.mutate(d.id) { $0.status = was; $0.failure = nil; $0.goneFrom = nil }
+        missingSince[d.id] = nil
+        BACDebug.log("delegation", "“\(d.title)”: its session is back — \(was.rawValue) again")
+        Task { [weak self] in
+            _ = try? await self?.post(d.id, from: .host, kind: .note, text: Self.backText)
+        }
+    }
+
+    nonisolated static let backText = "the session is back — the work carries on"
 
     private func fail(_ d: Delegation, _ why: String) {
         store.mutate(d.id) { $0.status = .failed; $0.failure = why }
