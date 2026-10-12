@@ -528,12 +528,8 @@ public final class KubeconfigMaterializer {
         return identity.takeRetainedValue()
     }
 
-    /// SecKeyCreateWithData only takes PKCS#1 DER for RSA and raw X9.63
-    /// bytes for EC — not the SEC1 (`EC PRIVATE KEY`, what k3s writes) or
-    /// PKCS#8 (`PRIVATE KEY`) PEMs kubeconfigs carry. swift-crypto parses
-    /// every one of those; re-export in the shape Security wants. Without
-    /// this the identity silently failed to build and the proxy dialed
-    /// the API server with no client cert (401 in the guest).
+    /// SecKeyCreateWithData takes PKCS#1 DER for RSA and X9.63
+    /// (`04 || X || Y || K`) for EC, not SEC1 or PKCS#8 PEM.
     private func makeSecKey(keyPEM: String) -> SecKey? {
         let ecAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
                                         kSecAttrKeyClass: kSecAttrKeyClassPrivate]
