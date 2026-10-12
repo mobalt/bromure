@@ -531,6 +531,37 @@ struct TaskLandingTests {
         #expect(!CodingTaskEngine.stillHandingOver(nil))
     }
 
+    /// Finding (CWE-670): that early return left the lead unwatched — the
+    /// sweep skips a card still "handing over", and only `watchLanding`
+    /// finishes a landing git shows — so a merge after the user's answer
+    /// kept it on Needs you with Retry for good.
+    @Test("a failed hand-over the agent answered with a question is watched, its question kept")
+    @MainActor func failedHandOverIsWatched() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let lead = reviewTask(s)
+        s.mutate(lead.id) {
+            $0.delegationID = UUID()
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .needsYou, startedAt: Date())
+            $0.landing?.detail = "Which branch?"
+            $0.landing?.handingOver = true
+            $0.lastError = "steer failed"
+        }
+        engine.settleFailedHandOver(lead.id, steerError: "steer failed")
+        let t = s.task(lead.id)
+        #expect(t?.landing?.phase == .needsYou && t?.landing?.detail == "Which branch?")
+        #expect(t?.landing?.handingOver == nil && t?.lastError == nil)
+        #expect(engine.landingWatches.contains(lead.id))
+        // A pull request isn't watched (the agent reports it), nor a lead
+        // that landed meanwhile.
+        var pr = s.task(lead.id)!
+        pr.landing?.mode = .pr
+        #expect(!CodingTaskEngine.settleFailedSteer(&pr, steerError: nil))
+        var landed = s.task(lead.id)!
+        landed.landing?.phase = .landed
+        #expect(!CodingTaskEngine.settleFailedSteer(&landed, steerError: nil))
+    }
+
     /// Finding (CWE-362): a re-delivery whose look failed stamped "no
     /// worktree … the diff can't be shown" on a card whose checkout the
     /// review window's look had just found.

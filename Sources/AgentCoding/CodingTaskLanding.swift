@@ -681,9 +681,24 @@ extension CodingTaskEngine {
     /// stays (the question), the steer's own error goes, and it is no longer
     /// "handing over" — left set, the sweep never watched it again, and a
     /// merge the assignee didn't report kept it on Needs you for good.
-    nonisolated static func settleFailedSteer(_ t: inout CodingTask, steerError: String?) {
+    /// True when it is to be watched now (`watchLanding`): the only loop that
+    /// finishes a landing the repository shows, and nothing else would start
+    /// one for it — the brief did reach the agent, which may well merge
+    /// after its answer. Not a pull request (the agent reports it), nor a
+    /// lead that was cancelled or landed meanwhile.
+    @discardableResult
+    nonisolated static func settleFailedSteer(_ t: inout CodingTask, steerError: String?) -> Bool {
         if let steerError, t.lastError == steerError { t.lastError = nil }
-        if t.landing != nil { t.landing?.handingOver = nil }
+        guard t.landing != nil else { return false }
+        t.landing?.handingOver = nil
+        return t.landing?.phase == .needsYou && t.landing?.mode != .pr
+    }
+
+    /// `settleFailedSteer` on the card, and the watch it calls for.
+    func settleFailedHandOver(_ taskID: UUID, steerError: String?) {
+        var watch = false
+        store.mutate(taskID) { watch = Self.settleFailedSteer(&$0, steerError: steerError) }
+        if watch { watchLanding(taskID) }
     }
 
     /// `batched`: part of a batch landing — what needs an agent comes back
@@ -857,7 +872,7 @@ extension CodingTaskEngine {
                 // reach it): its question is on every card — the steer's
                 // error must not replace it, nor sit beside it.
                 guard Self.stillHandingOver(store.task(taskID)) else {
-                    store.mutate(taskID) { Self.settleFailedSteer(&$0, steerError: steerError) }
+                    settleFailedHandOver(taskID, steerError: steerError)
                     return
                 }
                 let why = steerError ?? NSLocalizedString(
@@ -872,8 +887,15 @@ extension CodingTaskEngine {
             // "Handing over…" until that's confirmed; a failure is "Needs
             // you" with the reason right away, not after the stall timeout.
             let before = await lastAgentLine(task)
+            let errorBefore = store.task(taskID)?.lastError
             guard await deliverToConversation(taskID, branch: branch, text: prompt) else {
-                guard Self.stillHandingOver(store.task(taskID)) else { return }
+                // Moved on meanwhile (the agent asked): the same as a
+                // delegated steer's — left "handing over" and unwatched.
+                guard Self.stillHandingOver(store.task(taskID)) else {
+                    let error = store.task(taskID)?.lastError
+                    settleFailedHandOver(taskID, steerError: error != errorBefore ? error : nil)
+                    return
+                }
                 let why = store.task(taskID)?.lastError ?? String(format: NSLocalizedString(
                     "The landing brief didn't reach %@.", comment: "task landing"), task.workerName)
                 store.mutate(taskID) { $0.lastError = nil }
