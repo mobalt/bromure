@@ -2326,16 +2326,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         keyed.profileID = machine.id
         keyed.roomID = room
         let key = SessionStartCoalescer.key(keyed)
-        guard SessionStartCoalescer.shared.claim(key) else { return }
+        guard let token = SessionStartCoalescer.shared.claim(key) else { return }
         Task { @MainActor [weak self, weak machine] in
             guard let machine,
                   let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
                   let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
-                SessionStartCoalescer.shared.finish(key, ok: false)
+                SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
                 NSSound.beep()
                 return
             }
-            SessionStartCoalescer.shared.finish(key, ok: true)
+            // The id too: a client's same start through this host gets it.
+            SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
             // Started from a room ("Add to Room"): into it, and back to its grid.
             if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
                 delegate.assignMachineRoom(id, room)

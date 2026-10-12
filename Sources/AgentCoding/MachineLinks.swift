@@ -360,22 +360,23 @@ final class MachineLinkHub: @unchecked Sendable {
                 profile: id.uuidString, tool: body["tool"] as? String ?? "", cwd: body["cwd"] as? String,
                 cloneURL: body["cloneURL"] as? String, message: body["message"] as? String,
                 instructions: body["instructions"] as? String, room: body["room"] as? String,
-                attachments: ((body["attachments"] as? [[String: Any]]) ?? []).map {
-                    "\($0["name"] as? String ?? ""):\(($0["data"] as? String)?.count ?? 0)"
-                })
+                attachments: ((body["attachments"] as? [[String: Any]]) ?? []).map(SessionStartCoalescer.attachment(wire:)))
             var status = 502
             let json = SessionStartCoalescer.shared.run(key) { () -> [String: Any] in
                 let r = request(id, method, path, body: body, timeout: 60)
-                if let sid = (r?.json["id"] as? String)?.uppercased() {
-                    cond.lock(); fragments[id]?.sessionIDs.insert(sid); cond.unlock()
-                    if let u = UUID(uuidString: sid) { onSessionStarted?(u, body) }
-                }
                 status = r?.status ?? 502
                 var j = r?.json ?? ["error": "That machine isn't connected right now"]
                 if status != 200, j["error"] == nil { j["error"] = "HTTP \(status)" }
                 return j
             }
-            if json["error"] == nil { status = 200 }
+            // Routed here from now on — the first start's answer or a repeat's.
+            if json["error"] == nil, let sid = (json["id"] as? String)?.uppercased() {
+                status = 200
+                cond.lock(); fragments[id]?.sessionIDs.insert(sid); cond.unlock()
+                if let u = UUID(uuidString: sid) { onSessionStarted?(u, body) }
+            } else if json["error"] == nil {
+                status = 502
+            }
             let out = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
             _ = Self.writeAll(clientFD, Data(("HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\n"
                 + "Content-Type: application/json\r\nContent-Length: \(out.count)\r\nConnection: close\r\n\r\n").utf8) + out)
