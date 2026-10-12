@@ -856,12 +856,22 @@ struct CodingKanbanView: View {
                         actions.delete(task.id)
                     })
             }
-        }
-        // Dropped below the cards: to the bottom.
-        .dropDestination(for: String.self) { items, _ in
-            reorderBacklog(items, before: nil, in: tasks)
+            // Dropped below the cards: to the bottom. Only there — on the
+            // whole column, a drop on the header (aimed at the top) or in a
+            // gap sent the card to the end of its assignee's queue.
+            if !tasks.isEmpty {
+                Color.clear
+                    .frame(maxWidth: .infinity, minHeight: Self.backlogTailHeight)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: nil, in: tasks)
+                    }
+            }
         }
     }
+
+    /// The drop zone under the Backlog's last card ("to the bottom").
+    static let backlogTailHeight: CGFloat = 120
 
     /// Backlog cards dragged to a new place in the column (top runs first —
     /// the order their assignees' queues follow). Cards from elsewhere
