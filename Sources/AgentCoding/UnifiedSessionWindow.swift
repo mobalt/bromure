@@ -2329,7 +2329,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard let token = SessionStartCoalescer.shared.claim(key) else { return }
         Task { @MainActor [weak self, weak machine] in
             guard let machine,
-                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
+                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60,
+                                                total: SessionStartCoalescer.machineStartBudget),
                   let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
                 SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
                 NSSound.beep()
