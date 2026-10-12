@@ -454,9 +454,30 @@ final class ACAutomationServer {
         var linger = Darwin.linger(l_onoff: 0, l_linger: 0)
         setsockopt(clientFD, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.handleRequest(fd: clientFD)
+        // A silent client gets the request-read timeout, not a thread for good.
+        Self.setReceiveTimeout(clientFD, Self.requestReadTimeout)
+        // A thread of its own, not the global queue: a request may block for
+        // long (a /state subscription for as long as its client stays, a call
+        // waiting on a machine's link, an exec), and the global queue's ~64
+        // threads ran out — then every connection accepted after waited
+        // unserved, holding its socket after its client gave up ("->(none)"
+        // unix sockets piling up on a server).
+        let t = Thread { [weak self] in
+            guard let self else { Darwin.close(clientFD); return }
+            self.handleRequest(fd: clientFD)
         }
+        t.name = "ac-control-request"
+        t.qualityOfService = .userInitiated
+        t.start()
+    }
+
+    /// Longest wait for the next bytes of a request's head or body.
+    static let requestReadTimeout: TimeInterval = 60
+
+    /// SO_RCVTIMEO on `fd`; 0 = block for as long as it takes.
+    static func setReceiveTimeout(_ fd: Int32, _ seconds: TimeInterval) {
+        var tv = timeval(tv_sec: Int(seconds), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     private func handleRequest(fd: Int32) {
@@ -556,6 +577,9 @@ final class ACAutomationServer {
             }
         }
 
+        // Read in: what follows (a subscription, a terminal, a machine link
+        // waiting for its verb) reads as long as its stream lives.
+        Self.setReceiveTimeout(fd, 0)
         route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
     }
 

@@ -259,6 +259,33 @@ struct MachineLinkTests {
         if let fd { close(fd) }
     }
 
+    /// Server report: fds piling up with the agent hosts off. Every call
+    /// aimed at a machine marked off waited the whole timeout for a link
+    /// (10–30 s), on the global queue — which ran out of threads, leaving
+    /// the connections accepted after it unserved.
+    @Test("a machine marked off is given up on at once, and a silent request read times out")
+    func offMachineFailsFast() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        let (fd, far) = Self.link()
+        defer { close(far); hub.detach(id: id, owner: nil) }
+        #expect(hub.park(fd: fd, id: id, name: "M", owner: nil))
+        if let taken = hub.open(id, verb: "control", timeout: 1) { close(taken) }
+        hub.setFragment(id, .init(workspace: [:], vm: [:], sessions: [], sessionIDs: [], connected: true))
+        hub.markDisconnected(id)
+        let t0 = Date()
+        #expect(hub.open(id, verb: "control", timeout: 10) == nil)
+        #expect(Date().timeIntervalSince(t0) < MachineLinkHub.offlineWait + 1)
+
+        let (a, b) = Self.link()
+        defer { close(a); close(b) }
+        ACAutomationServer.setReceiveTimeout(a, 1)
+        var byte: UInt8 = 0
+        let t1 = Date()
+        #expect(read(a, &byte, 1) < 0)
+        #expect(Date().timeIntervalSince(t1) < 3)
+    }
+
     private static func link() -> (Int32, Int32) {
         var fds: [Int32] = [0, 0]
         socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)

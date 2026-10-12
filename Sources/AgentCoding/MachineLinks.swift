@@ -268,7 +268,13 @@ final class MachineLinkHub: @unchecked Sendable {
     /// parked (the machine re-parks as soon as one is taken). nil when the
     /// machine isn't there.
     func open(_ id: UUID, verb: String, timeout: TimeInterval = 10) -> Int32? {
-        let deadline = Date().addingTimeInterval(timeout)
+        cond.lock()
+        // A machine marked off isn't parking: waiting the whole timeout for
+        // it held a request (and its socket) for nothing, on every call aimed
+        // at it. A machine coming back parks long before its next poll.
+        let off = fragments[id]?.connected == false
+        cond.unlock()
+        let deadline = Date().addingTimeInterval(off ? min(timeout, Self.offlineWait) : timeout)
         while true {
             cond.lock()
             while (parked[id]?.isEmpty ?? true) && names[id] != nil {
@@ -290,6 +296,9 @@ final class MachineLinkHub: @unchecked Sendable {
             close(fd)
         }
     }
+
+    /// How long `open` waits for a link of a machine marked off.
+    static let offlineWait: TimeInterval = 1
 
     /// No hangup, no pending EOF and no stray bytes on a parked link.
     static func quietWhileParked(_ fd: Int32) -> Bool {
