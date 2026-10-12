@@ -489,9 +489,33 @@ struct TaskLandingTests {
         #expect(s.task(bare.id)?.stage == .testing)
         #expect(s.task(bare.id)?.landing == nil)
         #expect(s.task(bare.id)?.lastError == CodingTaskEngine.branchPendingText)
+        // A live tab names it only when exactly one is the slug's: an old
+        // wt/bare beside the guest's wt/bare-2 is ambiguous.
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare-2", nil, "wt/other"], slug: "bare") == "wt/bare-2")
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare", "wt/bare-2"], slug: "bare") == nil)
+        #expect(CodingTaskEngine.onlyBranch(["wt/barely"], slug: "bare") == nil)
         // The lookup then records it: the note goes.
         s.mutate(bare.id) { CodingTaskEngine.fillWorktree(&$0, branch: "wt/bare-2", dir: "/b", parent: "main", root: "/r") }
         #expect(s.task(bare.id)?.branch == "wt/bare-2" && s.task(bare.id)?.lastError == nil)
+    }
+
+    /// Review follow-up: Send Back (or Back to In Progress) while the
+    /// finish waited for the session to settle put the card back to work —
+    /// and the finish then moved it to Review again, under the agent working
+    /// on the feedback.
+    @Test("a card moved by hand while its finish waited is only filled in, not moved")
+    func armedFinishSeesHandMoves() {
+        var t = CodingTask(title: "x", profileID: UUID(), tool: .claude)
+        t.stage = .inProgress
+        t.startedAt = Date(timeIntervalSince1970: 100)
+        let armed = TaskFinishArmed(startedAt: t.startedAt, testingAt: t.testingAt)
+        #expect(!armed.moved(t))
+        // Move to Review, then Back to In Progress: testingAt moved.
+        var back = t; back.testingAt = Date()
+        #expect(armed.moved(back))
+        // Send Back: the session-gone clock restarted.
+        var sent = t; sent.startedAt = Date()
+        #expect(armed.moved(sent))
     }
 
     /// Board report: a bulk review gave the designated agent one message

@@ -589,6 +589,14 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// A finish's snapshot of its card when it was armed: the card was moved
+/// by hand since (sent back, put back to work) when either stamp changed.
+struct TaskFinishArmed: Equatable, Sendable {
+    var startedAt: Date?
+    var testingAt: Date?
+    func moved(_ t: CodingTask) -> Bool { t.startedAt != startedAt || t.testingAt != testingAt }
+}
+
 // MARK: - Store
 
 /// Persistence for the coding board: one JSON blob at
@@ -2555,6 +2563,10 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(task.id) else { return }
             settling.insert(task.id)
+            // The card as this finish found it: moved by hand while it waits
+            // (Move to Review, then Send Back or Back to In Progress), the
+            // finish no longer moves it.
+            let armed = TaskFinishArmed(startedAt: task.startedAt, testingAt: task.testingAt)
             // Finalize only after the session is quiet — a Stop-hook done
             // with background subagents still running isn't done.
             Task { [weak self] in
@@ -2563,7 +2575,7 @@ final class CodingTaskEngine {
                 guard let self else { return }
                 self.settling.remove(task.id)
                 await self.finalizeTaskDone(task.id, profileID: profileID,
-                                            branch: branch)
+                                            branch: branch, armed: armed)
             }
             return
         }
@@ -2622,9 +2634,11 @@ final class CodingTaskEngine {
     /// diff), stage → Testing, session tab closed. Idempotent via the
     /// stage guard.
     private func finalizeTaskDone(_ taskID: UUID, profileID: UUID,
-                                  branch: String) async {
+                                  branch: String, armed: TaskFinishArmed) async {
+        // Moved to Review while the session settled: it still needs the
+        // branch and checkout this finish looks up.
         guard let task = store.task(taskID),
-              task.stage == .inProgress || task.stage == .planning else { return }
+              task.stage == .inProgress || task.stage == .planning || Self.fillsReview(task) else { return }
         let tab = delegate?.pane(for: profileID)?.model.tabs
             .first { $0.worktreeBranch == branch }
         var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
@@ -2645,7 +2659,8 @@ final class CodingTaskEngine {
             // Review, a delegated delivery): it keeps its state, but gets
             // the branch and checkout it lacks — without them Merge marked
             // it done unmerged and Send Back did nothing.
-            if Self.fillsReview($0) {
+            let atWork = $0.stage == .inProgress || $0.stage == .planning
+            if Self.fillsReview($0) || (atWork && armed.moved($0)) {
                 wrote = Self.fillWorktree(&$0, branch: branch, dir: dir, parent: parent, root: root)
                 return
             }
@@ -2676,14 +2691,21 @@ final class CodingTaskEngine {
     }
 
     /// The branch a Review card stands for: the one recorded, or — not yet
-    /// recorded (moved to Review while the finished agent's lookup ran) —
-    /// its live tab's: the guest may have suffixed the slug ("-2"), so the
-    /// slug alone names a branch that isn't this card's. nil: wait for it.
+    /// recorded — its live tab's, when exactly one tab is the slug's (an old
+    /// `wt/<slug>` beside the new `wt/<slug>-2` is ambiguous: wait).
+    /// The guest may have suffixed the slug ("-2"), so the slug alone
+    /// names a branch that isn't this card's. nil: wait for the lookup.
     func reviewBranch(_ t: CodingTask) -> String? {
         if let b = t.branch { return b }
         guard let slug = t.branchSlug else { return nil }
-        return delegate?.pane(for: t.profileID)?.model.tabs
-            .first { AutomationBoard.branchMatches($0.worktreeBranch, slug: slug) }?.worktreeBranch
+        let tabs = delegate?.pane(for: t.profileID)?.model.tabs.map(\.worktreeBranch) ?? []
+        return Self.onlyBranch(tabs, slug: slug)
+    }
+
+    /// The one branch among `tabs` that is the slug's, or nil (none, or more).
+    nonisolated static func onlyBranch(_ tabs: [String?], slug: String) -> String? {
+        let hits = Set(tabs.compactMap { $0 }.filter { AutomationBoard.branchMatches($0, slug: slug) })
+        return hits.count == 1 ? hits.first : nil
     }
 
     nonisolated static var branchPendingText: String {
