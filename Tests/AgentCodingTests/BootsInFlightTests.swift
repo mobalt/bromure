@@ -29,7 +29,7 @@ import Testing
     /// Finding (CWE-362): the base-image upgrade and compromise-wipe prompts
     /// are modals, and a boot (an automation's timer) can begin inside one.
     /// "Yes, upgrade" then deleted the disk that boot had just opened.
-    @Test("a reset or wipe answered after a boot began does nothing")
+    @Test("an upgrade or wipe answered after a boot began: no disk touched, harmless answers kept")
     func promptAnsweredAfterBootBegan() {
         // A fresh id: the store's paths for it don't exist, so nothing real
         // is touched either way.
@@ -39,13 +39,22 @@ import Testing
             imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
         var p = Profile(name: "w", tool: .claude, authMode: .token)
         #expect(delegate.bootsInFlight.begin(p.id))
-        #expect(!delegate.applyBaseImageUpgradeAnswer(0, profile: &p, current: "999"))
-        #expect(!delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999"))
-        #expect(p.baseImageUpgradeDeclinedFor == nil)
+        // "Yes" doesn't reset the disk that boot has open — and says so.
+        let yes = delegate.applyBaseImageUpgradeAnswer(0, profile: &p, current: "999")
+        #expect(yes == .diskInUse(upgradeSkipped: true))
+        // Review: "No" / "Remind me later" touch no disk — still recorded,
+        // while this launch still stops (the other boot owns it).
+        let no = delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999")
+        #expect(no == .diskInUse(upgradeSkipped: false))
+        #expect(p.baseImageUpgradeDeclinedFor == "999")
+        let later = delegate.applyBaseImageUpgradeAnswer(2, profile: &p, current: "999")
+        #expect(later == .diskInUse(upgradeSkipped: false))
+        #expect(p.baseImageUpgradeRemindAfter != nil && p.baseImageUpgradeDeclinedFor == nil)
         #expect(!delegate.wipeCompromised(profile: p))
         // Once that boot is over, the answer applies.
         delegate.bootsInFlight.end(p.id)
-        #expect(delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999"))
+        let after = delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999")
+        #expect(after == .applied)
         #expect(p.baseImageUpgradeDeclinedFor == "999")
     }
 

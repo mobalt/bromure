@@ -11212,12 +11212,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The offer is a modal (or, remote, a suspended wait): a boot that began
     /// meanwhile — an automation's timer fires inside the modal run loop —
     /// has the disk open, and "Yes" must not delete it from under that VM.
-    /// False: nothing was done, the disk is in use.
+    /// Then: "No" and "Remind me later" are still recorded (they touch no
+    /// disk); "Yes" is not carried out, and says so (`upgradeSkipped`).
+    /// Either way that other boot owns the workspace: this launch stops.
+    enum UpgradeAnswerOutcome: Equatable {
+        case applied
+        case diskInUse(upgradeSkipped: Bool)
+    }
+
     @discardableResult
-    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) -> Bool {
-        if diskInUse(profile.id) { return false }
+    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile,
+                                     current: String) -> UpgradeAnswerOutcome {
+        let busy = diskInUse(profile.id)
         switch index {
         case 0:
+            if busy { return .diskInUse(upgradeSkipped: true) }
             try? store.resetDisk(for: profile)
             emitDiskResetEvent(profile: profile, reason: "base_image_drift")
         case 1:
@@ -11230,7 +11239,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profile.baseImageUpgradeRemindAfter = until
             recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: nil, remindAfter: until)
         }
-        return true
+        return busy ? .diskInUse(upgradeSkipped: false) : .applied
+    }
+
+    /// "Yes, upgrade" answered after the workspace started anyway (an
+    /// automation, during the prompt): what happened, and what to do.
+    static func upgradeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't upgraded", comment: "base image upgrade skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.",
+            comment: "base image upgrade skipped"))
+    }
+
+    private func showUpgradeSkipped(_ profile: Profile) {
+        let (title, message) = Self.upgradeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
     }
 
     private func recordBaseImageUpgradeAnswer(profileID: UUID, declinedFor: String?, remindAfter: Date?) {
@@ -11525,7 +11553,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 default: index = 2
                 }
                 // Another boot began during the modal: it owns the disk now.
-                guard applyBaseImageUpgradeAnswer(index, profile: &profile, current: current) else { return }
+                if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                               current: current) {
+                    if skipped { showUpgradeSkipped(profile) }
+                    return
+                }
             }
         }
 
@@ -13815,7 +13847,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
-            guard applyBaseImageUpgradeAnswer(index, profile: &profile, current: current) else { return }
+            if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                           current: current) {
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                if skipped {
+                    let (title, message) = Self.upgradeSkippedParts(profile.name)
+                    _ = await PendingPromptBroker.shared.askAsync(
+                        profileID: profile.id, title: title, message: message,
+                        buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                }
+                return
+            }
         }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true, quiet: quiet)
