@@ -3447,6 +3447,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     startOver: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.startOver(id)
                     },
+                    reorder: { [weak self] id, rank in
+                        self?.acDelegate?.codingTaskStore.mutate(id) { $0.queueRank = rank }
+                    },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
                         self?.acDelegate?.codingTaskEngine.pumpQueue()

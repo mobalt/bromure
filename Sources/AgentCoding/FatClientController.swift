@@ -4628,6 +4628,7 @@ final class RemoteHostWindow: NSWindow {
                     markDone: { c.taskCommand($0, "mark-done") },
                     stop: { c.taskCommand($0, "stop") },
                     startOver: { c.taskCommand($0, "start-over") },
+                    reorder: { c.taskCommand($0, "rank", body: ["rank": $1]) },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in

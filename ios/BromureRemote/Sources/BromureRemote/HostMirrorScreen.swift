@@ -503,6 +503,7 @@ struct CodingBoardScreen: View {
                 markDone: { controller.taskCommand($0, "mark-done") },
                 stop: { controller.taskCommand($0, "stop") },
                 startOver: { controller.taskCommand($0, "start-over") },
+                reorder: { controller.taskCommand($0, "rank", body: ["rank": $1]) },
                 mergeNeedsConfirm: true,
                 delete: { controller.deleteTask($0) },
                 save: { controller.upsertTask($0) },

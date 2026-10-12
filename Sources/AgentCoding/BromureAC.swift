@@ -5733,6 +5733,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "mark-done":
                     self.codingTaskEngine.markDone(id)
+                case "rank":
+                    // A Backlog card dragged on a client: its new place.
+                    guard let rank = (body["rank"] as? NSNumber)?.doubleValue, rank.isFinite
+                    else { return ["error": "rank required"] }
+                    self.codingTaskStore.mutate(id) { $0.queueRank = rank }
                 case "locate":
                     // A fat client's review window: a delivered card without
                     // a worktree is looked for again; the mirror picks it up.

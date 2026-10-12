@@ -119,6 +119,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// Where the user put it in the Backlog (dragged): its place, between its
+    /// neighbours' ranks. nil: where its creation put it (`backlogRank`).
+    var queueRank: Double?
     /// What the assignee said when it merged the task on acceptance.
     var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
@@ -281,6 +284,27 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// A task with nothing to merge: no branch at all, a delegated delivery
     /// whose worktree was never found, or a branch measured with no change
     /// against its target. Review offers Mark Done, not git.
+    /// Its place in the Backlog and in its assignee's queue: top runs first.
+    var backlogRank: Double { queueRank ?? createdAt.timeIntervalSince1970 }
+
+    /// Backlog order: by rank, oldest first among equals.
+    static func backlogOrder(_ a: CodingTask, _ b: CodingTask) -> Bool {
+        a.backlogRank != b.backlogRank ? a.backlogRank < b.backlogRank : a.createdAt < b.createdAt
+    }
+
+    /// The rank that puts a card dropped on `target` just above it — or at
+    /// the bottom, `target` nil — among the column `ordered` (by rank),
+    /// leaving out the card being moved.
+    static func rank(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask]) -> Double {
+        let others = ordered.filter { $0.id != moving }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }) else {
+            return (others.last?.backlogRank ?? Date().timeIntervalSince1970) + 1
+        }
+        let after = others[i].backlogRank
+        guard i > 0 else { return after - 1 }
+        return (others[i - 1].backlogRank + after) / 2
+    }
+
     var isNoCode: Bool {
         if branch == nil && branchSlug == nil { return true }
         if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return true }
@@ -506,7 +530,7 @@ struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
     static func queuePosition(of task: CodingTask, in tasks: [CodingTask]) -> Int? {
         guard task.stage == .backlog, let a = task.assignment else { return nil }
         let queue = tasks.filter { $0.stage == .backlog && a.same(as: $0.assignment) }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: CodingTask.backlogOrder)
         return queue.firstIndex { $0.id == task.id }.map { $0 + 1 }
     }
 
@@ -636,12 +660,14 @@ final class CodingTaskStore {
     /// column and disappears from Backlog (it stays in the store as the
     /// phases' parent — title chip, plan overview). If every phase is
     /// later deleted, the brief resurfaces.
+    /// The Backlog column, top first: the order its assignees' queues run.
     func backlogTasks() -> [CodingTask] {
         tasks.filter { t in
             t.stage == .backlog
                 && !(t.validatedAt != nil
                      && tasks.contains { $0.parentTaskID == t.id })
         }
+        .sorted(by: CodingTask.backlogOrder)
     }
 
     func remove(_ id: UUID) {

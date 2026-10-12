@@ -393,6 +393,9 @@ struct CodingKanbanView: View {
         /// A fresh run on a new branch, when there's nothing left to resume
         /// into (repository or branch gone).
         var startOver: (UUID) -> Void = { _ in }
+        /// A Backlog card dragged to a new place: its new rank (the queue's
+        /// order too). nil: the board can't reorder.
+        var reorder: ((UUID, Double) -> Void)? = nil
         /// No review window here (iOS): the board confirms a Merge itself.
         var mergeNeedsConfirm = false
         var delete: (UUID) -> Void = { _ in }
@@ -845,11 +848,38 @@ struct CodingKanbanView: View {
                     onAssign: actions.assign == nil ? nil : { assigning = task },
                     onUnassign: actions.assign.map { assign in { assign(task.id, nil) } })
                     .draggable(task.id.uuidString)
+                    // Dropped on another card: just above it.
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: task.id, in: tasks)
+                    }
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
             }
         }
+        // Dropped below the cards: to the bottom.
+        .dropDestination(for: String.self) { items, _ in
+            reorderBacklog(items, before: nil, in: tasks)
+        }
+    }
+
+    /// Backlog cards dragged to a new place in the column (top runs first —
+    /// the order their assignees' queues follow). Cards from elsewhere
+    /// aren't the Backlog's to take.
+    private func reorderBacklog(_ items: [String], before target: UUID?, in column: [CodingTask]) -> Bool {
+        guard let reorder = actions.reorder else { return false }
+        var column = column
+        var moved = false
+        for id in items.compactMap(UUID.init(uuidString:)) where id != target {
+            guard let t = store.task(id), t.stage == .backlog else { continue }
+            let rank = CodingTask.rank(dropping: id, before: target, in: column)
+            reorder(id, rank)
+            // The next dragged card goes after this one, in the same spot.
+            if let i = column.firstIndex(where: { $0.id == id }) { column[i].queueRank = rank }
+            column.sort(by: CodingTask.backlogOrder)
+            moved = true
+        }
+        return moved
     }
 
     private var planColumn: some View {

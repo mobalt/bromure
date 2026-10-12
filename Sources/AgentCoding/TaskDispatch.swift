@@ -111,7 +111,7 @@ final class TaskDispatcher {
                           && $0.lastError == nil && !$0.isStarting
                           && $0.unmetDependencies(in: tasks).isEmpty
                           && !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }
-                .sorted { $0.createdAt < $1.createdAt }
+                .sorted(by: CodingTask.backlogOrder)   // the Backlog's order: top first
             for next in ready.prefix(limit - running) {
                 if a.kind == .worktree {
                     BACDebug.log("tasks", "“\(next.title)” picked up by a new agent")

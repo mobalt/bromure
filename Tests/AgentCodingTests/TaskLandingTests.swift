@@ -445,6 +445,39 @@ struct TaskLandingTests {
         #expect(!v.awaitsRelocation)
     }
 
+    /// Board request: re-order Backlog cards by dragging; the order is the
+    /// queue's — top runs first.
+    @Test("a dragged Backlog card takes its place, and its assignee's queue follows the board")
+    func backlogReorder() {
+        let s = store()
+        let a = TaskAssignment(kind: .session, id: UUID(), label: "@s")
+        let t0 = Date(timeIntervalSince1970: 1000)
+        var cards: [CodingTask] = []
+        for i in 0..<3 {
+            var t = CodingTask(title: "T\(i)", profileID: UUID(), tool: .claude)
+            t.createdAt = t0.addingTimeInterval(Double(i))
+            t.assignment = a
+            s.upsert(t)
+            cards.append(t)
+        }
+        // Untouched: oldest first (the order they were queued in).
+        #expect(s.backlogTasks().map(\.title) == ["T0", "T1", "T2"])
+        #expect(TaskAssignment.queuePosition(of: cards[2], in: s.tasks) == 3)
+        // T2 dragged onto T0: above it — first in the column and the queue.
+        let top = CodingTask.rank(dropping: cards[2].id, before: cards[0].id, in: s.backlogTasks())
+        s.mutate(cards[2].id) { $0.queueRank = top }
+        #expect(s.backlogTasks().map(\.title) == ["T2", "T0", "T1"])
+        #expect(TaskAssignment.queuePosition(of: s.task(cards[2].id)!, in: s.tasks) == 1)
+        // T1 dragged onto T0: between T2 and T0.
+        let mid = CodingTask.rank(dropping: cards[1].id, before: cards[0].id, in: s.backlogTasks())
+        s.mutate(cards[1].id) { $0.queueRank = mid }
+        #expect(s.backlogTasks().map(\.title) == ["T2", "T1", "T0"])
+        // T2 dropped below the cards: to the bottom.
+        let end = CodingTask.rank(dropping: cards[2].id, before: nil, in: s.backlogTasks())
+        s.mutate(cards[2].id) { $0.queueRank = end }
+        #expect(s.backlogTasks().map(\.title) == ["T1", "T0", "T2"])
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
