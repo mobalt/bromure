@@ -206,23 +206,35 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
     /// When true, every SSH sign request using this key prompts for
     /// user consent on the host. See `ConsentBroker`.
     public var requireApproval: Bool
+    /// Set when the key isn't a file at all but lives in an ssh-agent on
+    /// the host — a YubiKey behind gpg-agent, Secretive, 1Password — whose
+    /// private half can't be copied. Holds that agent's socket path ("~"
+    /// allowed; "" = bromure's own `SSH_AUTH_SOCK`). Nothing is copied or
+    /// ssh-add'ed: the VM is shown this one key (matched by
+    /// `publicKeyText`) and its sign requests are forwarded to the socket.
+    /// The agent's other keys stay invisible to the VM.
+    public var hostAgentSocket: String?
+
+    public var isFromHostAgent: Bool { hostAgentSocket != nil }
 
     public init(id: UUID = UUID(),
                 label: String,
                 filename: String,
                 publicKeyText: String = "",
                 hasPassphrase: Bool = false,
-                requireApproval: Bool = false) {
+                requireApproval: Bool = false,
+                hostAgentSocket: String? = nil) {
         self.id = id
         self.label = label
         self.filename = filename
         self.publicKeyText = publicKeyText
         self.hasPassphrase = hasPassphrase
         self.requireApproval = requireApproval
+        self.hostAgentSocket = hostAgentSocket
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, filename, publicKeyText, hasPassphrase, requireApproval
+        case id, label, filename, publicKeyText, hasPassphrase, requireApproval, hostAgentSocket
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -232,6 +244,7 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
         publicKeyText   = try c.decodeIfPresent(String.self, forKey: .publicKeyText) ?? ""
         hasPassphrase   = try c.decodeIfPresent(Bool.self, forKey: .hasPassphrase) ?? false
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        hostAgentSocket = try c.decodeIfPresent(String.self, forKey: .hostAgentSocket)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -241,6 +254,7 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
         try c.encode(publicKeyText, forKey: .publicKeyText)
         try c.encode(hasPassphrase, forKey: .hasPassphrase)
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
+        try c.encodeIfPresent(hostAgentSocket, forKey: .hostAgentSocket)
     }
 }
 
@@ -6273,6 +6287,26 @@ public extension Profile {
         CredentialCategory.allCases.compactMap { cat in
             let items = all.filter { $0.category == cat }
             return items.isEmpty ? nil : (cat, items)
+        }
+    }
+
+    /// The id the consent broker keeps this credential's grants under — the
+    /// same one each gated call site passes to `ConsentBroker.consent`.
+    func consentCredentialID(_ ref: CredentialRef) -> String {
+        switch ref {
+        case .primaryToolKey:        return ConsentCredentialID.primaryToolAPIKey(tool: tool.rawValue)
+        case .additionalTool(let t): return ConsentCredentialID.primaryToolAPIKey(tool: t.rawValue)
+        case .git(let u):            return ConsentCredentialID.gitHTTPS(u)
+        case .manual(let u):         return ConsentCredentialID.manualToken(u)
+        case .docker(let u):         return ConsentCredentialID.dockerRegistry(u)
+        case .database(let u):       return ConsentCredentialID.httpDatabase(u)
+        case .kube(let u):           return ConsentCredentialID.kubeconfig(u)
+        case .aws:                   return ConsentCredentialID.aws()
+        case .digitalOcean:          return ConsentCredentialID.digitalOcean()
+        case .linear:                return ConsentCredentialID.linear()
+        case .twilio:                return ConsentCredentialID.twilio()
+        case .managedSSHKey:         return ConsentCredentialID.bromureSSHKey()
+        case .importedSSHKey(let u): return ConsentCredentialID.sshKey(u.uuidString)
         }
     }
 

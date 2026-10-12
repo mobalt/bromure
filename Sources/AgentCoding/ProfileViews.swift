@@ -529,6 +529,13 @@ struct ProfileEditorView: View {
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
+    /// Sheet state for "Add from host agent…".
+    @State private var hostAgentSheet: HostAgentSheetState?
+    /// Filled off the main thread when the caller did not pass a list.
+    @State private var discoveredHostSockets: [String] = []
+    /// This workspace's live consent decisions (Guardrails badges), polled
+    /// from `consentGrants` while the pane is open.
+    @State private var liveGrants: [String: ConsentGrantStatus] = [:]
     @State private var confirmBrowserRedownload = false
     /// Keys of the disclosure groups the user has expanded in the
     /// Credentials pane. All sections start collapsed — the user
@@ -570,6 +577,39 @@ struct ProfileEditorView: View {
         var passphrase: String
     }
 
+    /// A live consent decision for one credential, as the Guardrails pane
+    /// shows it next to "Require approval to use".
+    struct ConsentGrantStatus: Equatable {
+        var denied: Bool
+        var expiration: Date
+        var sessionScoped: Bool
+    }
+
+    /// The host's consent broker, seen from the editor: this workspace's live
+    /// grants by consent id, and the right-click actions on them. nil = no
+    /// broker here (a new workspace, a remote editor) → no badges.
+    struct ConsentGrantControls {
+        var status: () async -> [String: ConsentGrantStatus]
+        /// minutes nil = the rest of the session.
+        var allow: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var deny: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var revoke: (_ credentialID: String) async -> Void
+    }
+
+    struct HostAgentSheetState: Identifiable {
+        let id = UUID()
+        /// A `hostAgentSocket` value: "" = bromure's SSH_AUTH_SOCK.
+        var socket: String
+        var keys: [ImportedSSHKey] = []
+        /// `publicKeyText` of the rows ticked.
+        var selected: Set<String> = []
+        var error: String?
+        var loaded = false
+        /// A list is in flight. Distinct from `loaded` so editing the socket
+        /// field does not show a spinner.
+        var loading = false
+    }
+
     let onSave: (Profile, _ generateSSH: Bool) -> Void
     let onCancel: () -> Void
     /// Fires as the name is typed so a hosting NSWindow can keep its title bar
@@ -584,6 +624,14 @@ struct ProfileEditorView: View {
     /// Called when the user removes a row — frees the on-disk file +
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
+    /// Agent sockets to offer in "Add from host agent…" (`hostAgentSocket`
+    /// values, "" first = SSH_AUTH_SOCK). Empty means the editor discovers
+    /// them off the main thread when `onListHostAgentKeys` is set.
+    let hostAgentSockets: [String]
+    /// Lists the keys a host agent holds, ready to add. nil = not on the
+    /// host (remote clients) → the button is disabled.
+    let onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])?
+    let consentGrants: ConsentGrantControls?
     /// Returns the date this profile/preferences' Claude subscription was
     /// captured (nil = not registered). A closure (not a value) so it's
     /// re-read live after a register/forget. nil = no proxy engine → hide.
@@ -638,6 +686,9 @@ struct ProfileEditorView: View {
         onTitleChange: ((String) -> Void)? = nil,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
+        hostAgentSockets: [String] = [],
+        onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])? = nil,
+        consentGrants: ConsentGrantControls? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
         claudeReauthRequiredAt: (() -> Date?)? = nil,
         codexReauthRequiredAt: (() -> Date?)? = nil,
@@ -661,6 +712,9 @@ struct ProfileEditorView: View {
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
+        self.hostAgentSockets = hostAgentSockets
+        self.onListHostAgentKeys = onListHostAgentKeys
+        self.consentGrants = consentGrants
         self.claudeAccountSavedAt = claudeAccountSavedAt
         self.claudeReauthRequiredAt = claudeReauthRequiredAt
         self.codexReauthRequiredAt = codexReauthRequiredAt
@@ -833,6 +887,10 @@ struct ProfileEditorView: View {
         .sheet(item: $importSheet) { sheet in
             importSheetView(for: sheet)
         }
+        .sheet(item: $hostAgentSheet) { _ in
+            hostAgentSheetView
+        }
+        .task { await loadHostAgentSocketChoices() }
         .sheet(item: $credSheet) { sheet in
             credentialSheetView(sheet)
         }
@@ -3271,8 +3329,18 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(onImportSSHKey == nil)
+                Button {
+                    openHostAgentSheet(socket: hostSocketChoices.first ?? "")
+                } label: {
+                    Label("From host agent…", systemImage: "key.radiowaves.forward")
+                }
+                .buttonStyle(.borderless)
+                .disabled(onListHostAgentKeys == nil)
             }
             Text("Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("A key that can't be copied — on a YubiKey, in gpg-agent, Secretive or 1Password — can be picked from that ssh-agent instead. The VM sees only the keys you pick, and their signatures are made by the agent on your Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -3286,11 +3354,18 @@ struct ProfileEditorView: View {
                 ForEach(Array(draft.importedSSHKeys.enumerated()), id: \.element.id) { (idx, key) in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Image(systemName: "key.horizontal.fill")
+                            Image(systemName: key.isFromHostAgent
+                                  ? "key.radiowaves.forward.fill" : "key.horizontal.fill")
                                 .foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
                                     Text(key.label).font(.callout)
+                                    if let socket = key.hostAgentSocket {
+                                        Text(Self.hostAgentSocketName(socket))
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .help("Signed by the ssh-agent on your Mac; never copied.")
+                                    }
                                     if key.hasPassphrase {
                                         Image(systemName: "lock.fill")
                                             .font(.caption2)
@@ -3373,6 +3448,154 @@ struct ProfileEditorView: View {
         }
         .padding(20)
         .frame(width: 480)
+    }
+
+    /// The "Add from host agent…" sheet: pick an agent socket, tick keys.
+    @ViewBuilder
+    private var hostAgentSheetView: some View {
+        let state = hostAgentSheet ?? HostAgentSheetState(socket: "")
+        let alreadyAdded = Set(draft.importedSSHKeys.compactMap { k in
+            k.isFromHostAgent ? Self.publicKeyBlobText(k.publicKeyText) : nil
+        })
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add keys from a host ssh-agent")
+                .font(.title3.bold())
+            HStack {
+                TextField("Agent socket", text: Binding(
+                    get: { hostAgentSheet?.socket ?? "" },
+                    set: {
+                        hostAgentSheet?.socket = $0
+                        hostAgentSheet?.loaded = false
+                        hostAgentSheet?.loading = false
+                    }
+                ), prompt: Text("SSH_AUTH_SOCK"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout.monospaced())
+                    .onSubmit { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+                if hostSocketChoices.count > 1 {
+                    Menu {
+                        ForEach(hostSocketChoices, id: \.self) { socket in
+                            Button(Self.hostAgentSocketName(socket)) {
+                                openHostAgentSheet(socket: socket)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .fixedSize()
+                }
+                Button("Load") { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+            }
+            Text("Empty = Bromure's SSH_AUTH_SOCK (the macOS agent, unless Bromure was started from a shell). For a YubiKey behind gpg-agent, use ~/.gnupg/S.gpg-agent.ssh.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            if state.loading {
+                Text("Loading keys…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let err = state.error {
+                Text(err).font(.caption).foregroundStyle(.red)
+            } else if state.loaded && state.keys.isEmpty {
+                Text("This agent holds no keys. Plug in the security key, or check the socket.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(state.keys, id: \.publicKeyText) { key in
+                let added = alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText))
+                Toggle(isOn: Binding(
+                    get: { added || (hostAgentSheet?.selected.contains(key.publicKeyText) ?? false) },
+                    set: { on in
+                        if on { hostAgentSheet?.selected.insert(key.publicKeyText) }
+                        else { hostAgentSheet?.selected.remove(key.publicKeyText) }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(key.label).font(.callout)
+                        Text(key.publicKeyText.split(separator: " ").first.map(String.init) ?? "")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .disabled(added)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { hostAgentSheet = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    for key in state.keys where state.selected.contains(key.publicKeyText)
+                        && !alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText)) {
+                        draft.importedSSHKeys.append(key)
+                    }
+                    hostAgentSheet = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.selected.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    /// Passed-in sockets, or the list discovered in the background.
+    private var hostSocketChoices: [String] {
+        hostAgentSockets.isEmpty ? discoveredHostSockets : hostAgentSockets
+    }
+
+    /// `gpgconf` and `stat` stay off the main thread. Remote editors pass
+    /// no lister, so they never scan this Mac.
+    private func loadHostAgentSocketChoices() async {
+        guard onListHostAgentKeys != nil, hostAgentSockets.isEmpty else { return }
+        let found = await HostAgentClient.candidateHostSocketsDetached()
+        if !Task.isCancelled { discoveredHostSockets = found }
+    }
+
+    /// (Re)load the sheet's key list from `socket`, opening it if needed.
+    /// The agent query blocks (bounded); it runs off the main thread.
+    private func openHostAgentSheet(socket: String) {
+        guard let lister = onListHostAgentKeys else { return }
+        if hostAgentSheet == nil {
+            var state = HostAgentSheetState(socket: socket)
+            state.loading = true
+            hostAgentSheet = state
+        } else {
+            hostAgentSheet?.socket = socket
+            hostAgentSheet?.keys = []
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = nil
+            hostAgentSheet?.loaded = false
+            hostAgentSheet?.loading = true
+        }
+        Task {
+            let outcome = await withCheckedContinuation { (cont: CheckedContinuation<([ImportedSSHKey], String?), Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        cont.resume(returning: (try lister(socket), nil))
+                    } catch {
+                        cont.resume(returning: ([], error.localizedDescription))
+                    }
+                }
+            }
+            guard hostAgentSheet?.socket == socket else { return }
+            hostAgentSheet?.keys = outcome.0
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = outcome.1
+            hostAgentSheet?.loaded = true
+            hostAgentSheet?.loading = false
+        }
+    }
+
+    /// "SSH_AUTH_SOCK" for "", else the path as stored.
+    static func hostAgentSocketName(_ socket: String) -> String {
+        socket.isEmpty ? "SSH_AUTH_SOCK" : socket
+    }
+
+    /// The base64 blob field of an OpenSSH public-key line — identity
+    /// without the comment.
+    static func publicKeyBlobText(_ line: String) -> String {
+        let parts = line.split(separator: " ")
+        return parts.count >= 2 ? String(parts[1]) : line
     }
 
     private func presentImportPicker() {
@@ -4139,6 +4362,13 @@ struct ProfileEditorView: View {
             }
             .padding(.bottom, 8)
         }
+        .task {
+            guard let controls = consentGrants else { return }
+            while !Task.isCancelled {
+                liveGrants = await controls.status()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     /// The Firewall pane: the workspace's outbound-connection rules (pf-style
@@ -4214,7 +4444,7 @@ struct ProfileEditorView: View {
                     .labelsHidden().pickerStyle(.menu).frame(width: 176)
                 }
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 3)
@@ -4248,11 +4478,105 @@ struct ProfileEditorView: View {
                 }
                 .padding(.leading, 26)
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 4)
         #endif
+    }
+
+    /// "Require approval to use", plus — while the credential has a live
+    /// grant or remembered deny — a badge counting it down. Right-click to
+    /// allow or deny for a fresh 5 min / 1 hr / the session, or revoke so the next
+    /// use asks again. Acts on the running session at once (grants aren't
+    /// profile settings, so nothing waits for Save).
+    @ViewBuilder
+    private func approvalLine(_ ref: CredentialRef) -> some View {
+        let isOn = approvalBinding(for: ref)
+        let line = HStack(spacing: 6) {
+            requireApprovalToggle(isOn: isOn)
+            if isOn.wrappedValue, let status = liveGrants[draft.consentCredentialID(ref)] {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    grantBadge(status, now: ctx.date)
+                }
+            }
+        }
+        if let controls = consentGrants, isOn.wrappedValue {
+            line.contextMenu { grantMenu(ref, controls: controls) }
+        } else {
+            line
+        }
+    }
+
+    @ViewBuilder
+    private func grantBadge(_ status: ConsentGrantStatus, now: Date) -> some View {
+        if status.sessionScoped && status.denied {
+            Text(NSLocalizedString("denied this session", comment: "guardrails deny badge"))
+                .font(.caption2).foregroundStyle(.red).lineLimit(1)
+                .help(NSLocalizedString("Refused without asking until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if status.sessionScoped {
+            Text(NSLocalizedString("allowed this session", comment: "guardrails grant badge"))
+                .font(.caption2).foregroundStyle(.blue).lineLimit(1)
+                .help(NSLocalizedString("Allowed until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if now < status.expiration {
+            let left = Self.grantRemaining(status.expiration.timeIntervalSince(now))
+            let until = status.expiration.formatted(date: .omitted, time: .shortened)
+            if status.denied {
+                Text(String(format: NSLocalizedString("denied · %@", comment: "guardrails deny badge; %@ = time left"), left))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.red).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Refused without asking until %@. Right-click to allow or to ask again.", comment: ""), until))
+            } else {
+                Label(left, systemImage: "clock")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.orange).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Allowed without asking until %@. Right-click to extend or revoke.", comment: ""), until))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func grantMenu(_ ref: CredentialRef, controls: ConsentGrantControls) -> some View {
+        let id = draft.consentCredentialID(ref)
+        let name = draft.credentialTitle(ref)
+        let act: (@escaping () async -> Void) -> Void = { action in
+            Task { @MainActor in
+                await action()
+                liveGrants = await controls.status()
+            }
+        }
+        Button(NSLocalizedString("Allow for 5 minutes", comment: "")) {
+            act { await controls.allow(id, name, 5) }
+        }
+        Button(NSLocalizedString("Allow for 1 hour", comment: "")) {
+            act { await controls.allow(id, name, 60) }
+        }
+        Button(NSLocalizedString("Allow for the rest of the session", comment: "")) {
+            act { await controls.allow(id, name, nil) }
+        }
+        Divider()
+        Button(NSLocalizedString("Deny for 5 minutes", comment: "")) {
+            act { await controls.deny(id, name, 5) }
+        }
+        Button(NSLocalizedString("Deny for 1 hour", comment: "")) {
+            act { await controls.deny(id, name, 60) }
+        }
+        Button(NSLocalizedString("Deny for the rest of the session", comment: "")) {
+            act { await controls.deny(id, name, nil) }
+        }
+        if liveGrants[id] != nil {
+            Divider()
+            Button(NSLocalizedString("Revoke — ask next time", comment: ""), role: .destructive) {
+                act { await controls.revoke(id) }
+            }
+        }
+    }
+
+    /// "4m" / "1h 05m" / "45s" — rounded up, so a grant never reads 0 early.
+    static func grantRemaining(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds.rounded(.up)))
+        if s < 60 { return "\(s)s" }
+        let m = (s + 59) / 60
+        if m < 60 { return "\(m)m" }
+        return String(format: "%dh %02dm", m / 60, m % 60)
     }
 
     /// A `Binding<Bool>` into a configured credential's `requireApproval` flag,
