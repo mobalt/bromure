@@ -223,6 +223,42 @@ struct MachineLinkTests {
         if let fd { close(fd) }
     }
 
+    /// Server report: unix sockets "->(none)" piling up. Links go out
+    /// newest first, so the ones an agent host left behind (a restart, a
+    /// relay that went away) sat under the fresh ones, open for good.
+    @Test("links a machine hung up on are closed when it parks again, and a machine keeps a few at most")
+    func parkClosesDeadLinks() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        defer { hub.detach(id: id, owner: nil) }
+        let (dead, deadFar) = Self.link()
+        let (live, liveFar) = Self.link()
+        defer { close(liveFar) }
+        #expect(hub.park(fd: dead, id: id, name: "M", owner: nil))
+        #expect(hub.park(fd: live, id: id, name: "M", owner: nil))
+        close(deadFar)   // the machine restarted: this one is gone
+        let (fresh, freshFar) = Self.link()
+        #expect(hub.park(fd: fresh, id: id, name: "M", owner: nil))
+        #expect(hub.parkedCount(id) == 2)
+        // Past the cap the oldest go: their far ends see the close.
+        var fars = [freshFar]
+        for _ in 0..<MachineLinkHub.maxParked {
+            let (fd, far) = Self.link()
+            fars.append(far)
+            #expect(hub.park(fd: fd, id: id, name: "M", owner: nil))
+        }
+        defer { fars.forEach { close($0) } }
+        #expect(hub.parkedCount(id) == MachineLinkHub.maxParked)
+        var b: UInt8 = 0
+        #expect(read(liveFar, &b, 1) == 0 && read(freshFar, &b, 1) == 0)
+        // The newest is still the one handed out.
+        let fd = hub.open(id, verb: "control", timeout: 1)
+        var buf = [UInt8](repeating: 0, count: 16)
+        let n = read(fars[fars.count - 1], &buf, buf.count)
+        #expect(String(decoding: buf[0..<max(0, n)], as: UTF8.self) == "control\n")
+        if let fd { close(fd) }
+    }
+
     private static func link() -> (Int32, Int32) {
         var fds: [Int32] = [0, 0]
         socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)

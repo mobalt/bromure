@@ -138,11 +138,46 @@ final class MachineLinkHub: @unchecked Sendable {
             pending[id] = (name, owner)
         }
         parked[id, default: []].append(fd)
+        let stale = pruneLocked()
         cond.broadcast()
         cond.unlock()
+        stale.forEach { close($0) }
         if joined { DispatchQueue.main.async { NotificationCenter.default.post(name: Self.machinesChanged, object: id) } }
         if asked { Self.noteAdmissions() }
         return true
+    }
+
+    /// Most links one machine keeps parked here (an agent host parks 3).
+    static let maxParked = 8
+
+    /// Parked links taken off the list, for the caller to close once the
+    /// lock is released: every one its machine hung up on, and past
+    /// `maxParked` per machine the oldest. Links are handed out newest first,
+    /// so the ones a machine left behind — an agent host that restarted or
+    /// re-attached, a relay that went away — sank to the bottom and stayed
+    /// open for good: an fd per link, the server's "->(none)" unix sockets.
+    /// The cap covers a link whose far end died without a hangup.
+    private func pruneLocked() -> [Int32] {
+        var stale: [Int32] = []
+        for (id, fds) in parked {
+            var kept = fds.filter { fd in
+                if Self.quietWhileParked(fd) { return true }
+                stale.append(fd)
+                return false
+            }
+            if kept.count > Self.maxParked {
+                stale += kept.prefix(kept.count - Self.maxParked)
+                kept.removeFirst(kept.count - Self.maxParked)
+            }
+            parked[id] = kept
+        }
+        return stale
+    }
+
+    /// Links parked for `id` (tests).
+    func parkedCount(_ id: UUID) -> Int {
+        cond.lock(); defer { cond.unlock() }
+        return parked[id]?.count ?? 0
     }
 
     /// The user's answer for a waiting (or listed, or blocked) machine.
