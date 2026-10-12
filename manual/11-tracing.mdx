@@ -161,7 +161,7 @@ The `bromure-cli trace` command group gives you the same trace data in the termi
 | `bromure-cli trace leaks [workspace]` | Only requests with a potential credential leak — header, value preview, and suspicion class. Prints `No leaks detected. ✓` when clean. |
 | `bromure-cli trace clear [-f]` | Wipe **all** trace history — the in-memory ring and the on-disk files — after a `y/N` confirmation (skip it with `-f`). Reports how many records were cleared. |
 
-The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-cli agent running.` The full CLI is documented in [CLI, API & MCP](16-automation-cli.mdx).
+The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-ac agent running.` The full CLI is documented in [CLI, API & MCP](16-automation-cli.mdx).
 
 ## Exporting a trace
 
