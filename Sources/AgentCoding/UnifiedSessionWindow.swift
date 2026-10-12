@@ -2336,6 +2336,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             let id: UUID
             switch claim {
             case .underWay:
+                // The other start never answered: say so, as a failed one does.
+                NSSound.beep()
                 return
             case .done(let reply):
                 guard let started = (reply["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
