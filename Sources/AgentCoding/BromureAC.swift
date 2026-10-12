@@ -5711,6 +5711,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "mark-done":
                     self.codingTaskEngine.markDone(id)
+                case "locate":
+                    // A fat client's review window: a delivered card without
+                    // a worktree is looked for again; the mirror picks it up.
+                    Task { @MainActor in await self.taskDispatcher.relocateDelivery(id) }
                 case "comment-remove":
                     guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
                     else { return ["error": "comment required"] }
@@ -13114,6 +13118,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     v[path] = fp
                     t.reviewViewed = v.isEmpty ? nil : v
                 }
+            },
+            relocate: { [weak self] task in
+                await self?.taskDispatcher.relocateDelivery(task.id) ?? false
             }))
 
     /// Repo branches for the review window's "Merge into…" picker.

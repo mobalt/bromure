@@ -419,10 +419,81 @@ final class TaskDispatcher {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID), Self.mayReturnToReview(task),
               let slug = task.branchSlug else { return }
         let branch = "wt/\(slug)"
-        // Where to look: the session that delivered, or — through a room —
-        // every session in the room.
+        if let found = await findDelivery(task, branch: branch, childSessionID: d.childSessionID) {
+            delegate.codingTaskStore.mutate(taskID) {
+                guard Self.mayReturnToReview($0) else { return }
+                Self.point(&$0, at: found, branch: branch)
+                $0.stage = .testing
+                $0.testingAt = Date()
+                $0.lastError = nil
+            }
+            BACDebug.log("tasks", "“\(task.title)”: delivered by \(task.assignment?.label ?? "?") → review (\(found.dir))")
+            return
+        }
+        delegate.codingTaskStore.mutate(taskID) {
+            guard Self.mayReturnToReview($0) else { return }
+            $0.stage = .testing
+            $0.testingAt = Date()
+            $0.branch = branch
+            $0.lastError = Self.noWorktreeText(branch)
+        }
+    }
+
+    /// A delivered card in Review whose worktree wasn't found when it came
+    /// in is looked for again — the review window asks before it reads the
+    /// diff. The lookup at delivery is one exec on the assignee's machine:
+    /// a machine out of reach for that moment left the card without a diff
+    /// for good. True when the card now points at the worktree.
+    @discardableResult
+    func relocateDelivery(_ taskID: UUID) async -> Bool {
+        guard let delegate, let task = delegate.codingTaskStore.task(taskID), task.awaitsRelocation,
+              let slug = task.branchSlug else { return false }
+        let branch = "wt/\(slug)"
+        let child = task.delegationID
+            .flatMap { delegate.delegationEngine.store.delegation(matching: $0.uuidString) }?.childSessionID
+        guard let found = await findDelivery(task, branch: branch, childSessionID: child) else { return false }
+        var moved = false
+        delegate.codingTaskStore.mutate(taskID) {
+            // The card may have moved on during the lookup.
+            guard $0.awaitsRelocation else { return }
+            Self.point(&$0, at: found, branch: branch)
+            if $0.lastError == Self.noWorktreeText(branch) { $0.lastError = nil }
+            moved = true
+        }
+        if moved { BACDebug.log("tasks", "“\(task.title)”: found its worktree on a second look (\(found.dir))") }
+        return moved
+    }
+
+    nonisolated static func noWorktreeText(_ branch: String) -> String {
+        String(format: NSLocalizedString(
+            "Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back.",
+            comment: "task assign"), branch)
+    }
+
+    struct FoundDelivery {
+        var profileID: UUID
+        var dir: String
+        var root: String
+        var parent: String?
+    }
+
+    /// The card now points at the worktree found on the assignee's machine.
+    nonisolated static func point(_ t: inout CodingTask, at f: FoundDelivery, branch: String) {
+        t.profileID = f.profileID
+        t.repoPath = f.root
+        t.branch = branch
+        t.worktreeDir = f.dir
+        t.rootRepo = f.root
+        // Read from the assignee's machine: a plain branch name only.
+        if let p = f.parent, p != branch, CodingTaskEngine.isSafeBranchName(p) { t.parentBranch = p }
+    }
+
+    /// Where a delivered branch's worktree is: looked for in the session
+    /// that delivered, or — through a room — every session in the room.
+    private func findDelivery(_ task: CodingTask, branch: String, childSessionID: UUID?) async -> FoundDelivery? {
+        guard let delegate else { return nil }
         var candidates: [AgentSession] = []
-        if let s = delegate.sessionRecord(d.childSessionID), !s.isSwitchboard {
+        if let id = childSessionID, let s = delegate.sessionRecord(id), !s.isSwitchboard {
             candidates.append(s)
         }
         if let a = task.assignment, a.kind == .room {
@@ -448,31 +519,9 @@ final class TaskDispatcher {
             let m = await delegate.codingTaskEngine.resolveWorktreeMetadata(
                 profileID: s.profileID, branch: branch, repoPath: s.cwd)
             guard let dir = m.dir, let root = m.root else { continue }
-            delegate.codingTaskStore.mutate(taskID) {
-                guard Self.mayReturnToReview($0) else { return }
-                $0.profileID = s.profileID
-                $0.repoPath = root
-                $0.branch = branch
-                $0.worktreeDir = dir
-                $0.rootRepo = root
-                // Read from the assignee's machine: a plain branch name only.
-                if let p = m.parent, p != branch, CodingTaskEngine.isSafeBranchName(p) { $0.parentBranch = p }
-                $0.stage = .testing
-                $0.testingAt = Date()
-                $0.lastError = nil
-            }
-            BACDebug.log("tasks", "“\(task.title)”: delivered by \(task.assignment?.label ?? "?") → review (\(dir))")
-            return
+            return FoundDelivery(profileID: s.profileID, dir: dir, root: root, parent: m.parent)
         }
-        delegate.codingTaskStore.mutate(taskID) {
-            guard Self.mayReturnToReview($0) else { return }
-            $0.stage = .testing
-            $0.testingAt = Date()
-            $0.branch = branch
-            $0.lastError = String(format: NSLocalizedString(
-                "Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back.",
-                comment: "task assign"), branch)
-        }
+        return nil
     }
 
     // MARK: Board → assignee

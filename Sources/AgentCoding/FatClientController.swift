@@ -4347,6 +4347,19 @@ final class RemoteHostWindow: NSWindow {
                 var body: [String: Any] = ["path": path]
                 if let fp { body["fingerprint"] = fp }
                 self?.controller.taskCommand(id, "viewed", body: body)
+            },
+            relocate: { [weak self] task in
+                // The host looks (one exec per candidate session); the
+                // mirror shows what it found.
+                guard let self, await self.controller.taskCommandReply(task.id, "locate", body: [:]) != nil
+                else { return false }
+                for i in 1...40 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard let t = self.controller.taskStore.task(task.id) else { return false }
+                    if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+                    if i % 6 == 0 { self.controller.foregroundKick() }
+                }
+                return false
             }))
 
     /// Native planning-conversation windows for the mirrored board — the

@@ -402,6 +402,49 @@ struct TaskLandingTests {
         #expect(s.task(other.id)?.stage == .inProgress)
     }
 
+    /// Board report: a delivered card said "no worktree on branch …" for
+    /// good — the lookup at delivery is one exec on the assignee's machine,
+    /// and a machine out of reach that moment left the card without a diff
+    /// although the worktree was there. The review window now looks again.
+    @Test("a delivered card without a worktree is looked for again, and found, shows its diff")
+    func deliveredCardRelocates() {
+        let s = store()
+        var t = reviewTask(s)
+        s.mutate(t.id) {
+            $0.delegationID = UUID()
+            $0.worktreeDir = nil; $0.rootRepo = nil; $0.parentBranch = nil
+            $0.lastError = TaskDispatcher.noWorktreeText("wt/fix")
+        }
+        t = s.task(t.id)!
+        #expect(t.awaitsRelocation && t.isNoCode)
+        let machine = UUID()
+        let found = TaskDispatcher.FoundDelivery(profileID: machine, dir: "/Users/me/.bromure/worktrees/repo/fix",
+                                                 root: "/Users/me/repo", parent: "main")
+        s.mutate(t.id) { TaskDispatcher.point(&$0, at: found, branch: "wt/fix") }
+        t = s.task(t.id)!
+        #expect(!t.awaitsRelocation && !t.isNoCode)
+        #expect(t.profileID == machine && t.worktreeDir == found.dir && t.rootRepo == found.root)
+        #expect(t.parentBranch == "main" && t.landingTarget == "main")
+        // A parent read from that machine is a plain branch name or nothing.
+        var u = reviewTask(s, branch: "wt/other")
+        u.parentBranch = nil
+        TaskDispatcher.point(&u, at: .init(profileID: machine, dir: "/d", root: "/r", parent: "--exec=x"),
+                             branch: "wt/other")
+        #expect(u.parentBranch == nil)
+        // Only a delivered card in Review, without a worktree, not landed.
+        var v = reviewTask(s, branch: "wt/v")
+        v.worktreeDir = nil
+        #expect(!v.awaitsRelocation)   // not delegated
+        v.delegationID = UUID()
+        #expect(v.awaitsRelocation)
+        v.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+        #expect(!v.awaitsRelocation)
+        v.landing = nil; v.stage = .done
+        #expect(!v.awaitsRelocation)
+        v.stage = .testing; v.worktreeDir = "/d"
+        #expect(!v.awaitsRelocation)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

@@ -287,6 +287,14 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return codeChanges == 0
     }
 
+    /// A delivered card in Review whose worktree wasn't found when it came
+    /// in (and isn't landed): the review window looks for it again
+    /// (`TaskDispatcher.relocateDelivery`).
+    var awaitsRelocation: Bool {
+        delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty
+            && landing?.phase != .landed
+    }
+
     /// Who does (and lands) the task, for cards: the assignee ("@hotfixes")
     /// or the agent a new-agent task ran ("Kimi Code").
     var workerName: String {

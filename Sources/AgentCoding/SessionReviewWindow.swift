@@ -112,6 +112,12 @@ final class ReviewWindowHost {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Load an open window again from scratch (its default base re-read).
+    func reload(_ id: UUID) {
+        guard windows[id] != nil else { return }
+        focus[id]?.generation += 1
+    }
+
     func close(_ id: UUID) {
         windows[id]?.close()
         windows[id] = nil
