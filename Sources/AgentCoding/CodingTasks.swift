@@ -284,9 +284,6 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return Date().timeIntervalSince(at) < 900
     }
 
-    /// A task with nothing to merge: no branch at all, a delegated delivery
-    /// whose worktree was never found, or a branch measured with no change
-    /// against its target. Review offers Mark Done, not git.
     /// Its place in the Backlog and in its assignee's queue: top runs first.
     var backlogRank: Double { queueRank ?? createdAt.timeIntervalSince1970 }
 
@@ -335,6 +332,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         !ordered.contains { $0.id != moving && $0.backlogRank == rank }
     }
 
+    /// A task with nothing to merge: no branch at all, a delegated delivery
+    /// whose worktree was never found, or a branch measured with no change
+    /// against its target. Review offers Mark Done, not git.
     var isNoCode: Bool {
         if branch == nil && branchSlug == nil { return true }
         // While the host still looks for it, the worktree may well be there:
