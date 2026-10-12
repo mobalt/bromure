@@ -1167,16 +1167,30 @@ final class DelegationEngine {
         store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .note, from: party, to: .child, text: text))
         wake(d.childSessionID)
-        if !d.isRequest { retireChild(d) }
+        if d.isRequest {
+            // The peer hears it ended (now, or when its session is back),
+            // as a cancelled request's does.
+            if let fresh = store.delegation(d.id) {
+                store.mutate(d.id) { $0.messages[$0.messages.count - 1].readAt = nil }
+                notify(d.childSessionID, fresh, m)
+            }
+        } else {
+            retireChild(d)
+        }
         BACDebug.log("delegation", "“\(d.title)” closed: \(v)")
     }
 
     /// The delegation is over: the child's agent ends and its session is
     /// put away (the Archived fold, readable as ever) rather than left
     /// under Ended. A request's peer is left alone.
+    /// Out of view (its Mac asleep, reconnecting): done when it's back.
     private func retireChild(_ d: Delegation) {
-        guard !d.isRequest,
-              let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
+        guard !d.isRequest else { return }
+        guard let child = sessions.session(d.childSessionID) else {
+            store.mutate(d.id) { $0.retireWhenBack = true }
+            return
+        }
+        guard !child.isDeleted, !child.isArchived else { return }
         archive(d.childSessionID)
     }
 
@@ -1597,6 +1611,12 @@ final class DelegationEngine {
 
     private func watchChildren() {
         let now = Date()
+        // Over while its session was out of view, and back: put away now.
+        for d in store.delegations where d.retireWhenBack == true {
+            guard sessions.session(d.childSessionID) != nil else { continue }
+            store.mutate(d.id) { $0.retireWhenBack = nil }
+            if let fresh = store.delegation(d.id) { retireChild(fresh) }
+        }
         // Gone too long, and back: on with it where it was. Back deleted:
         // that's the end (failed, as a deleted session's always is).
         for d in store.delegations where d.goneFrom != nil {

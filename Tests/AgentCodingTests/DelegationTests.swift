@@ -861,6 +861,43 @@ struct DelegationTests {
         #expect(child.worktreeOf == nil)
     }
 
+    /// Finding (CWE-670): cancelling or closing a gone delegate put nothing
+    /// away — its session, back after its Mac woke, showed up active, the
+    /// agent still at the work — and a closed request's peer was never told.
+    @Test("a delegate cancelled or closed while gone is put away when it's back; a closed request's peer hears it")
+    func retiredWhenBack() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        for close in [false, true] {
+            let (d, childID) = await delegated(f, childWindow: close ? 9 : 7)
+            f.engine.tick()
+            let child = try #require(f.sessions.session(childID))
+            f.sessions.remove(childID)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+            #expect(f.store.delegation(d.id)?.goneFrom != nil)
+            if close {
+                try await f.engine.close(from: f.parentID, delegationKey: d.id.uuidString, verdict: "rejected", note: nil)
+            } else {
+                try await f.engine.cancel(from: f.parentID, delegationKey: d.id.uuidString, reason: "not needed")
+            }
+            #expect(f.store.delegation(d.id)?.retireWhenBack == true)
+            f.sessions.upsert(child)
+            f.engine.tick()
+            #expect(f.sessions.session(childID)?.isArchived == true)
+            #expect(f.store.delegation(d.id)?.retireWhenBack == nil)
+        }
+        // A request closed: the peer's message is unread, owed to it.
+        let other = peer(in: f, workspace: f.profileID, nick: "asker", window: 12, title: "Asker")
+        let target = peer(in: f, workspace: f.profileID, nick: "answerer", window: 13, title: "Answerer")
+        let req = try await f.engine.request(from: other.id, to: "@answerer", text: "Look at this?")
+        try await f.engine.close(from: other.id, delegationKey: req.id.uuidString, verdict: "accepted", note: "thanks")
+        let last = f.store.delegation(req.id)?.messages.last
+        #expect(last?.to == .child && last?.text.hasPrefix("Request closed (accepted).") == true)
+        #expect(f.store.unread(for: target.id, in: req.id).contains { $0.1.id == last?.id })
+    }
+
     @Test("a session that is the child of several says which one a bare deliver means")
     func whichDelegation() async throws {
         let f = fixture()
