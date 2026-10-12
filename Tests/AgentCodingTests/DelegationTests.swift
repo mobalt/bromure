@@ -405,6 +405,7 @@ struct DelegationTests {
         await goAway()
         try await f.engine.cancel(from: f.parentID, delegationKey: d.id.uuidString, reason: "not needed")
         #expect(f.store.delegation(d.id)?.status == .cancelled && f.store.delegation(d.id)?.goneFrom == nil)
+        #expect(f.store.delegation(d.id)?.failure == nil)   // not "gone" over the cancel
         f.sessions.upsert(child)
         f.engine.tick()
         #expect(f.store.delegation(d.id)?.status == .cancelled)
@@ -422,6 +423,11 @@ struct DelegationTests {
         f.sessions.upsert(gone)
         f.engine.tick()
         #expect(f.store.delegation(d2.id)?.status == .failed && f.store.delegation(d2.id)?.goneFrom == nil)
+        // The other end hears it's over (the card said it would carry on).
+        for _ in 0..<50 where !(f.store.delegation(d2.id)?.messages.last?.text.contains("was deleted") ?? false) {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(f.store.delegation(d2.id)?.messages.last?.text == "failed — the delegate's session was deleted")
         await #expect(throws: (any Error).self) {
             try await f.engine.post(d2.id, from: .child, kind: .deliver, text: "done")
         }

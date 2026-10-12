@@ -1131,7 +1131,7 @@ final class DelegationEngine {
         let why = trimmedReason.isEmpty ? "no longer needed" : trimmedReason
         var m = DelegationMessage(kind: .cancel, from: party, to: .child, text: why)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled; $0.goneFrom = nil }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .cancel, from: party, to: .child, text: why))
         wake(d.childSessionID)
         if d.isRequest {
@@ -1164,7 +1164,7 @@ final class DelegationEngine {
         let text = (d.isRequest ? "Request closed (\(v))." : "Delivery \(v).") + (trimmedNote.isEmpty ? "" : " " + trimmedNote)
         var m = DelegationMessage(kind: .note, from: party, to: .child, text: text)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v; $0.goneFrom = nil }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .note, from: party, to: .child, text: text))
         wake(d.childSessionID)
         if !d.isRequest { retireChild(d) }
@@ -1602,9 +1602,11 @@ final class DelegationEngine {
         for d in store.delegations where d.goneFrom != nil {
             guard let child = sessions.session(d.childSessionID) else { continue }
             if child.isDeleted {
-                store.mutate(d.id) {
-                    $0.goneFrom = nil
-                    $0.failure = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+                let why = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+                store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
+                // The card said it would carry on: say it won't.
+                Task { [weak self] in
+                    _ = try? await self?.post(d.id, from: .host, kind: .note, text: "failed — \(why)")
                 }
             } else {
                 revive(d)
