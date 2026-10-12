@@ -108,4 +108,42 @@ import Testing
         delegate.bootsInFlight.end(id)
         #expect(delegate.bootsInFlight.takeStop(id) == nil)
     }
+
+    /// Finding (CWE-362): a detached reboot dropped its mark and called
+    /// launch, which then awaited Kimi provisioning (up to 30 s) before
+    /// claiming the disk — Delete / reset / revert went through meanwhile.
+    @Test("an await before launch claims the disk runs with the disk held")
+    func provisioningHoldsDisk() async {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boots-\(UUID().uuidString)", isDirectory: true)
+        let delegate = ACAppDelegate(
+            imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
+        let id = UUID()
+        var inUseDuring = false
+        await delegate.whileHoldingDisk(id) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            inUseDuring = delegate.diskInUse(id)
+        }
+        #expect(inUseDuring)
+        #expect(!delegate.diskInUse(id))
+        // Released before the re-entered launch, which claims it again.
+        #expect(delegate.bootsInFlight.begin(id))
+        delegate.bootsInFlight.end(id)
+
+        // Review: a Shutdown during the hold was kept for a registration
+        // that never came — ending the hold dropped it and the boot stayed
+        // up. It comes back to the caller, which then doesn't boot.
+        let stop = await delegate.whileHoldingDisk(id) {
+            await delegate.stopSession(id, action: .shutdown)
+        }
+        #expect(stop == .shutdown)
+        #expect(delegate.bootsInFlight.takeStop(id) == nil)
+        #expect(!delegate.diskInUse(id))
+        // Held by another boot: its stop isn't taken from it.
+        #expect(delegate.bootsInFlight.begin(id))
+        _ = delegate.bootsInFlight.deferStop(id, action: .suspend)
+        let none = await delegate.whileHoldingDisk(id) {}
+        #expect(none == nil)
+        #expect(delegate.bootsInFlight.takeStop(id) == .suspend)
+    }
 }
