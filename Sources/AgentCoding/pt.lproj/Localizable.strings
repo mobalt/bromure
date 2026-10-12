@@ -4152,3 +4152,7 @@
 "Delete workspace “%@”?" = "Excluir o espaço de trabalho “%@”?";
 "Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Remove o disco, as configurações e a chave SSH. A pasta do host montada não é alterada.";
 "Couldn't delete “%@”" = "Não foi possível excluir “%@”";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "“%@” não foi atualizado";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Ele foi iniciado no disco atual enquanto a pergunta estava aberta (uma automação o iniciou). Desligue-o e inicie-o novamente para ser perguntado de novo.";

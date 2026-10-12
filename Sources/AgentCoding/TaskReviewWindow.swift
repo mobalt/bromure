@@ -307,6 +307,9 @@ final class TaskReviewWindowManager {
                          _ line: Int?) -> Void
         var removeComment: (_ taskID: UUID, _ commentID: UUID) -> Void
         var setViewed: (_ taskID: UUID, _ path: String, _ fingerprint: String?) -> Void
+        /// A delivered card without a worktree (`awaitsRelocation`): look
+        /// for it again. True once the card points at one.
+        var relocate: (CodingTask) async -> Bool = { _ in false }
     }
 
     private let context: Context
@@ -314,9 +317,18 @@ final class TaskReviewWindowManager {
     /// Per task: the landing confirm to open as soon as the window shows
     /// (a card's context-menu Merge).
     private var pendingConfirm: [UUID: ReviewLandingRequest] = [:]
+    /// Per task: when the window last looked for a missing worktree — the
+    /// window's quick second try after a failed read doesn't look again.
+    private var relocateTried: [UUID: Date] = [:]
 
     init(context: Context) {
         self.context = context
+    }
+
+    private func mayTryRelocate(_ id: UUID) -> Bool {
+        if let at = relocateTried[id], Date().timeIntervalSince(at) < 15 { return false }
+        relocateTried[id] = Date()
+        return true
     }
 
     /// The open window for a task, if any — the E2E ui-shot hook renders it.
@@ -346,10 +358,18 @@ final class TaskReviewWindowManager {
                     return (task.assignment?.label ?? NSLocalizedString("The agent", comment: "review"), text)
                 },
                 noCode: { t()?.isNoCode == true },
-                fetch: { base, _ in
+                fetch: { [weak self] base, _ in
                     guard let task = t() else { return nil }
                     // A refresh (↻) re-reads the summary banner too.
                     await MainActor.run { request.reloads += 1 }
+                    // Delivered while the assignee's machine was out of
+                    // reach: look for the worktree now. Found, the window
+                    // loads again on the base it would have opened on.
+                    if task.awaitsRelocation, await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }),
+                       await c.relocate(task) {
+                        await MainActor.run { self?.host.reload(id) }
+                        return nil
+                    }
                     return await c.fetchReview(task, base)
                 },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },

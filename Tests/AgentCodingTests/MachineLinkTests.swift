@@ -3,7 +3,9 @@ import os
 import Testing
 @testable import bromure_ac
 
-@Suite("Attached machines (Bromure Agent Host)")
+// Serialized: every test shares MachineLinkHub.shared, and the persistence
+// test swaps its store (reloading the admissions) under the others.
+@Suite("Attached machines (Bromure Agent Host)", .serialized)
 struct MachineLinkTests {
     @Test("machine-link and machine-detach verbs parse, and nothing else does")
     func verbs() {
@@ -221,6 +223,69 @@ struct MachineLinkTests {
         let n = read(liveFar, &buf, buf.count)
         #expect(String(decoding: buf[0..<max(0, n)], as: UTF8.self) == "control\n")
         if let fd { close(fd) }
+    }
+
+    /// Server report: unix sockets "->(none)" piling up. Links go out
+    /// newest first, so the ones an agent host left behind (a restart, a
+    /// relay that went away) sat under the fresh ones, open for good.
+    @Test("links a machine hung up on are closed when it parks again, and a machine keeps a few at most")
+    func parkClosesDeadLinks() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        defer { hub.detach(id: id, owner: nil) }
+        let (dead, deadFar) = Self.link()
+        let (live, liveFar) = Self.link()
+        defer { close(liveFar) }
+        #expect(hub.park(fd: dead, id: id, name: "M", owner: nil))
+        #expect(hub.park(fd: live, id: id, name: "M", owner: nil))
+        close(deadFar)   // the machine restarted: this one is gone
+        let (fresh, freshFar) = Self.link()
+        #expect(hub.park(fd: fresh, id: id, name: "M", owner: nil))
+        #expect(hub.parkedCount(id) == 2)
+        // Past the cap the oldest go: their far ends see the close.
+        var fars = [freshFar]
+        for _ in 0..<MachineLinkHub.maxParked {
+            let (fd, far) = Self.link()
+            fars.append(far)
+            #expect(hub.park(fd: fd, id: id, name: "M", owner: nil))
+        }
+        defer { fars.forEach { close($0) } }
+        #expect(hub.parkedCount(id) == MachineLinkHub.maxParked)
+        var b: UInt8 = 0
+        #expect(read(liveFar, &b, 1) == 0 && read(freshFar, &b, 1) == 0)
+        // The newest is still the one handed out.
+        let fd = hub.open(id, verb: "control", timeout: 1)
+        var buf = [UInt8](repeating: 0, count: 16)
+        let n = read(fars[fars.count - 1], &buf, buf.count)
+        #expect(String(decoding: buf[0..<max(0, n)], as: UTF8.self) == "control\n")
+        if let fd { close(fd) }
+    }
+
+    /// Server report: fds piling up with the agent hosts off. Every call
+    /// aimed at a machine marked off waited the whole timeout for a link
+    /// (10–30 s), on the global queue — which ran out of threads, leaving
+    /// the connections accepted after it unserved.
+    @Test("a machine marked off is given up on at once, and a silent request read times out")
+    func offMachineFailsFast() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        let (fd, far) = Self.link()
+        defer { close(far); hub.detach(id: id, owner: nil) }
+        #expect(hub.park(fd: fd, id: id, name: "M", owner: nil))
+        if let taken = hub.open(id, verb: "control", timeout: 1) { close(taken) }
+        hub.setFragment(id, .init(workspace: [:], vm: [:], sessions: [], sessionIDs: [], connected: true))
+        hub.markDisconnected(id)
+        let t0 = Date()
+        #expect(hub.open(id, verb: "control", timeout: 10) == nil)
+        #expect(Date().timeIntervalSince(t0) < MachineLinkHub.offlineWait + 1)
+
+        let (a, b) = Self.link()
+        defer { close(a); close(b) }
+        ACAutomationServer.setReceiveTimeout(a, 1)
+        var byte: UInt8 = 0
+        let t1 = Date()
+        #expect(read(a, &byte, 1) < 0)
+        #expect(Date().timeIntervalSince(t1) < 3)
     }
 
     private static func link() -> (Int32, Int32) {

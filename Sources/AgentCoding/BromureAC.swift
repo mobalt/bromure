@@ -1692,10 +1692,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         requestStopSession(id, action: .shutdown)
         Task { [weak self] in
             // Wait for the session to wind down (bounded) before deleting
-            // its storage out from under a live VM.
-            for _ in 0..<24 {
+            // its storage out from under a live VM. A boot still under way
+            // is stopped when it registers (the stop above is deferred), so
+            // its time doesn't count — up to a hard cap.
+            var waited = 0
+            for _ in 0..<120 {
                 guard let self else { return }
                 if !self.diskInUse(id) { break }
+                if self.runningSessions[id] != nil { waited += 1 }
+                if waited >= 24 { break }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             guard let self else { return }
@@ -2188,6 +2193,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         bootsInFlight.diskInUse(id, running: runningSessions[id] != nil)
     }
 
+    /// A reboot's gap: the old session is out of `runningSessions`, yet a
+    /// boot remedy and the fresh VM's prepare()/start() own the disk until it
+    /// registers. Marks it booting (in use) until the returned release runs —
+    /// which leaves a mark it didn't set alone.
+    /// `work` with the workspace's disk held (booting): an await a boot
+    /// makes before `launch` claims the disk itself. Returns a stop asked
+    /// for meanwhile (Shutdown on the booting row, a clone's cleanup — kept
+    /// for the boot's registration, which this boot hasn't reached): the
+    /// caller then doesn't boot at all. Ending the hold would otherwise
+    /// drop it, and the boot that followed stayed up.
+    @discardableResult
+    func whileHoldingDisk(_ id: Profile.ID, _ work: () async -> Void) async -> Profile.CloseAction? {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        await work()
+        let stop = claimed ? bootsInFlight.takeStop(id) : nil
+        if claimed { bootsInFlight.end(id) }
+        refreshSidebar()
+        return stop
+    }
+
+    func holdDiskForRelaunch(_ id: Profile.ID) -> () -> Void {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        return { [weak self] in
+            guard let self else { return }
+            if claimed { self.bootsInFlight.end(id) }
+            self.refreshSidebar()
+        }
+    }
+
     /// Scheduled automations (sidebar "Automations"): recurring, unattended
     /// agent runs. The store persists next to the profiles dir; the engine
     /// ticks on the main run loop and fires due automations through the same
@@ -2465,6 +2501,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is the strong owner that keeps the VM alive independent of any window.
     @discardableResult
     func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        // A stop asked for during the boot (it had no session to stop then):
+        // honored now that there is one.
+        if let action = bootsInFlight.takeStop(profile.id) {
+            requestStopSession(profile.id, action: action)
+        }
         if let existing = runningSessions[profile.id] {
             existing.sandbox = sandbox
             existing.profile = profile
@@ -5772,6 +5813,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "mark-done":
                     self.codingTaskEngine.markDone(id)
+                case "locate":
+                    // A fat client's review window: a delivered card without
+                    // a worktree is looked for again; the mirror picks it up.
+                    Task { @MainActor in await self.taskDispatcher.relocateDelivery(id) }
                 case "comment-remove":
                     guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
                     else { return ["error": "comment required"] }
@@ -6360,6 +6405,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                // The boot itself, on this host's clock: a client tells a
+                // reboot by this changing — never by uptime against its own
+                // clock, which a late reply (a slow relay) moved forward.
+                "bootedAt": s.startedAt.timeIntervalSince1970,
                 "ip": s.lastIP ?? "",
                 "mounts": s.profile.folderPaths,
                 "tabs": tabs,
@@ -6664,11 +6713,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// or resolves a profile, applies `-v` mounts, persists it, then drives the
     /// normal `launch` path (so all the engine / token / boot wiring is shared)
     /// and optionally detaches for a headless `-d` run.
+    /// A `profile` that is a workspace id no workspace has: deleted, not a
+    /// name to mint a workspace under (a client still showing the deleted
+    /// one's Start button created a new workspace named with its id, and
+    /// booted it). The /vms route answers 404.
+    nonisolated static func unknownWorkspaceRefusal(_ ref: Any?) -> [String: Any]? {
+        guard let ref = ref as? String, UUID(uuidString: ref) != nil else { return nil }
+        return ["error": "No workspace with id \(ref) — it was deleted.", "notFound": true]
+    }
+
     @MainActor private func automationCreateVM(spec: [String: Any]) async -> [String: Any]? {
         // 1. Resolve an existing profile, or mint one on the fly.
         var profile: Profile
         if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
             profile = existing
+        } else if let refusal = Self.unknownWorkspaceRefusal(spec["profile"]) {
+            return refusal
         } else {
             let fallback = "cli-" + String(UUID().uuidString.prefix(8)).lowercased()
             let name = (spec["name"] as? String) ?? (spec["profile"] as? String) ?? fallback
@@ -11433,9 +11493,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The launch-time copy is updated too (`inout`): `launch` saves that
     /// copy right after (`store.touch`), which would otherwise put the old
     /// answer back over the stored record.
-    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) {
+    ///
+    /// The offer is a modal (or, remote, a suspended wait): a boot that began
+    /// meanwhile — an automation's timer fires inside the modal run loop —
+    /// has the disk open, and "Yes" must not delete it from under that VM.
+    /// Then: "No" and "Remind me later" are still recorded (they touch no
+    /// disk); "Yes" is not carried out, and says so (`upgradeSkipped`).
+    /// Either way that other boot owns the workspace: this launch stops.
+    enum UpgradeAnswerOutcome: Equatable {
+        case applied
+        case diskInUse(upgradeSkipped: Bool)
+    }
+
+    @discardableResult
+    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile,
+                                     current: String) -> UpgradeAnswerOutcome {
+        let busy = diskInUse(profile.id)
         switch index {
         case 0:
+            if busy { return .diskInUse(upgradeSkipped: true) }
             try? store.resetDisk(for: profile)
             emitDiskResetEvent(profile: profile, reason: "base_image_drift")
         case 1:
@@ -11448,6 +11524,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profile.baseImageUpgradeRemindAfter = until
             recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: nil, remindAfter: until)
         }
+        return busy ? .diskInUse(upgradeSkipped: false) : .applied
+    }
+
+    /// "Yes, upgrade" answered after the workspace started anyway (an
+    /// automation, during the prompt): what happened, and what to do.
+    static func upgradeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't upgraded", comment: "base image upgrade skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.",
+            comment: "base image upgrade skipped"))
+    }
+
+    private func showUpgradeSkipped(_ profile: Profile) {
+        let (title, message) = Self.upgradeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
     }
 
     private func recordBaseImageUpgradeAnswer(profileID: UUID, declinedFor: String?, remindAfter: Date?) {
@@ -11635,9 +11731,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // /models with the real credential first (a second or two, once per
         // credential; the result is stored on the record), then re-enter.
         if !kimiProvisioned, kimiNeedsProvisioning(profile) {
+            // The disk is held (booting) through the provisioning — up to
+            // 30 s on the network, before this launch claims it below: a
+            // delete, reset or revert in that gap went through and the
+            // re-entered launch booted whatever was left (a detached reboot
+            // had just dropped its own mark to call us). Released in the
+            // same turn as the re-entry, which claims it again.
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                let stop = await self.whileHoldingDisk(profile.id) {
+                    await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                }
+                // Stopped while it provisioned: it stays off.
+                guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else { return }
                 self.launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                             remoteInitiated: remoteInitiated, preflightResolved: preflightResolved,
                             unattended: unattended, quiet: quiet, kimiProvisioned: true)
@@ -11741,7 +11847,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case .alertSecondButtonReturn: index = 1
                 default: index = 2
                 }
-                applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+                // Another boot began during the modal: it owns the disk now.
+                if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                               current: current) {
+                    if skipped { showUpgradeSkipped(profile) }
+                    return
+                }
             }
         }
 
@@ -11949,6 +12060,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // is a detached login-boot — then it boots window-less and the session
         // lives on detached. Promote to a regular app first in case we're
         // launching from a headless/background agent.
+        // One boot per disk — claimed before the pane exists: a boot that
+        // began during a prompt above keeps the disk, and this launch leaves
+        // no pane behind.
+        guard bootsInFlight.begin(profile.id) else { return }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -11990,7 +12105,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
-        guard bootsInFlight.begin(profile.id) else { return }
         refreshSidebar()
         Task { @MainActor [self] in
             defer {
@@ -13329,6 +13443,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     v[path] = fp
                     t.reviewViewed = v.isEmpty ? nil : v
                 }
+            },
+            relocate: { [weak self] task in
+                await self?.taskDispatcher.relocateDelivery(task.id) ?? false
             }))
 
     /// Repo branches for the review window's "Merge into…" picker.
@@ -14030,8 +14147,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
-            applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+            if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                           current: current) {
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                if skipped {
+                    let (title, message) = Self.upgradeSkippedParts(profile.name)
+                    _ = await PendingPromptBroker.shared.askAsync(
+                        profileID: profile.id, title: title, message: message,
+                        buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                }
+                return
+            }
         }
+        // Deleted while the prompts were up: nothing to boot.
+        guard profiles.contains(where: { $0.id == profile.id }) else { return }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true, quiet: quiet)
     }
@@ -14070,7 +14200,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The wipe a confirmed compromise prompt performs (disk + home, keep
     /// tokens/settings), plus the bookkeeping that goes with it.
-    @MainActor private func wipeCompromised(profile: Profile) {
+    /// False: a boot began while the prompt was up (it has the disk open),
+    /// so nothing is wiped and this launch stops.
+    @MainActor func wipeCompromised(profile: Profile) -> Bool {
+        if diskInUse(profile.id) { return false }
         let session = SessionDisk(
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
@@ -14080,6 +14213,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
         refreshSidebar()
+        return true
     }
 
     private func confirmWipeAndProceed(profile: Profile) -> Bool {
@@ -14105,8 +14239,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
         }
-        wipeCompromised(profile: profile)
-        return true
+        return wipeCompromised(profile: profile)
     }
 
     /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
@@ -14121,8 +14254,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
                       NSLocalizedString("Cancel", comment: "")],
             fallback: 1) == 0 else { return false }
-        wipeCompromised(profile: profile)
-        return true
+        return wipeCompromised(profile: profile)
     }
 
     /// True while a compromise alert is up on screen. The swap-time
@@ -14942,6 +15074,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// guest "all shells exited" signal.
     @MainActor
     func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+        // Still booting: no session yet, so nothing to stop — and the VM that
+        // registers after would stay up. Stopped when it registers instead.
+        if runningSessions[profileID] == nil, bootsInFlight.deferStop(profileID, action: action) {
+            return
+        }
         guard let session = runningSessions[profileID], !session.stopping,
               let vm = session.sandbox.vm else { return }
         let sandbox = session.sandbox
@@ -15043,8 +15180,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             handleSessionStopped(profileID: profileID)
             if let profile {
                 if let remedy {
+                    // In use while the remedy works on the disk; handed to
+                    // launch's own mark (it refuses while one is set).
                     Task { @MainActor in
-                        await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        // Held while the remedy works on the disk; a stop
+                        // asked meanwhile leaves the workspace off.
+                        let stop = await self.whileHoldingDisk(profileID) {
+                            await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        }
+                        guard stop == nil else { return }
                         self.launch(profile, detached: true)
                     }
                 } else {
@@ -15460,6 +15604,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
         unregisterSession(profile.id)
+        // Out of runningSessions, but the remedy, the fresh VM's prepare() and
+        // start() still own the disk until it registers: in use (booting) for
+        // the whole gap, or a delete / reset / revert landed under the new VM.
+        let release = holdDiskForRelaunch(profile.id)
         // The reboot killed any streamed planning driver with the guest;
         // without this the hub session stays un-ended forever (no terminal
         // event, the dead driver never reconnects), pinning the plan
@@ -15480,6 +15628,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor [self] in
+            defer { release() }
             // A queued boot-failure remedy (native fsck / disk reset) runs
             // first, against the stopped VM's disk, with the pane's boot
             // overlay narrating. Only then does the fresh VM build.

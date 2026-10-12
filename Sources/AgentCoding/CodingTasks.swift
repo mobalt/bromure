@@ -287,6 +287,14 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return codeChanges == 0
     }
 
+    /// A delivered card in Review whose worktree wasn't found when it came
+    /// in (and isn't landed): the review window looks for it again
+    /// (`TaskDispatcher.relocateDelivery`).
+    var awaitsRelocation: Bool {
+        delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty
+            && landing?.phase != .landed
+    }
+
     /// Who does (and lands) the task, for cards: the assignee ("@hotfixes")
     /// or the agent a new-agent task ran ("Kimi Code").
     var workerName: String {
@@ -2632,6 +2640,9 @@ final class CodingTaskEngine {
         }
         BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
         store.mutate(taskID) {
+            // The lookup above awaited: marked done, discarded or moved on
+            // meanwhile, the card stays where it is now.
+            guard $0.stage == .inProgress || $0.stage == .planning else { return }
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
@@ -2789,6 +2800,10 @@ final class CodingTaskEngine {
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.sendBack(taskID, feedback: feedback) else { return }
             store.mutate(taskID) {
+                // The steer awaited: a card that landed, was marked done or
+                // discarded meanwhile stays as it is now (the comments still
+                // reached the agent).
+                guard $0.stage == .testing, $0.landing?.phase != .landed, $0.completion == nil else { return }
                 $0.stage = .inProgress
                 $0.lastError = nil
                 $0.landing = nil
@@ -4438,6 +4453,13 @@ final class CodingTaskEngine {
     /// that never signal done.
     func moveToInProgress(_ taskID: UUID) {
         store.mutate(taskID) {
+            // It landed (its outcome recorded) but sits in Review: Done, not
+            // back to work — clearing its landing there lost the merge.
+            if $0.stage == .testing, $0.landing?.phase == .landed, $0.completion != nil {
+                $0.stage = .done
+                if $0.completedAt == nil { $0.completedAt = Date() }
+                return
+            }
             if $0.stage == .testing || $0.stage == .planning {
                 $0.stage = .inProgress
                 $0.landing = nil   // cancels a landing under way

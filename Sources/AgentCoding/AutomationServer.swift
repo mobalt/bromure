@@ -462,9 +462,35 @@ final class ACAutomationServer {
         var linger = Darwin.linger(l_onoff: 0, l_linger: 0)
         setsockopt(clientFD, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.handleRequest(fd: clientFD)
+        // A silent client gets a timeout, not a thread for good. Long for the
+        // first byte: a fat client opens a control channel ahead of need (its
+        // spare, replaced after `SSHConnection.spareMaxAge`) and its
+        // request comes when it's used.
+        Self.setReceiveTimeout(clientFD, Self.firstByteTimeout)
+        // A thread of its own, not the global queue: a request may block for
+        // long (a /state subscription for as long as its client stays, a call
+        // waiting on a machine's link, an exec), and the global queue's ~64
+        // threads ran out — then every connection accepted after waited
+        // unserved, holding its socket after its client gave up ("->(none)"
+        // unix sockets piling up on a server).
+        let t = Thread { [weak self] in
+            guard let self else { Darwin.close(clientFD); return }
+            self.handleRequest(fd: clientFD)
         }
+        t.name = "ac-control-request"
+        t.qualityOfService = .userInitiated
+        t.start()
+    }
+
+    /// Longest wait for a connection's first byte.
+    static let firstByteTimeout: TimeInterval = 900
+    /// Then, for each next bytes of its head or body.
+    static let requestReadTimeout: TimeInterval = 60
+
+    /// SO_RCVTIMEO on `fd`; 0 = block for as long as it takes.
+    static func setReceiveTimeout(_ fd: Int32, _ seconds: TimeInterval) {
+        var tv = timeval(tv_sec: Int(seconds), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     private func handleRequest(fd: Int32) {
@@ -497,6 +523,7 @@ final class ACAutomationServer {
         while bodyStart == nil {
             let n = Darwin.read(fd, &chunk, chunk.count)
             if n <= 0 { Darwin.close(fd); return }
+            if data.isEmpty { Self.setReceiveTimeout(fd, Self.requestReadTimeout) }
             data.append(contentsOf: chunk[0..<n])
             bodyStart = headerEndIndex()
             // A header block this large is bogus — bail rather than grow forever.
@@ -564,6 +591,9 @@ final class ACAutomationServer {
             }
         }
 
+        // Read in: what follows (a subscription, a terminal, a machine link
+        // waiting for its verb) reads as long as its stream lives.
+        Self.setReceiveTimeout(fd, 0)
         route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
     }
 
@@ -927,7 +957,7 @@ final class ACAutomationServer {
                 // A handler that returns an `error` key is a clean refusal
                 // (e.g. the workspace's local model is still downloading).
                 if let err = info["error"] as? String {
-                    sendResponse(fd: fd, status: 409, body: ["error": err])
+                    sendResponse(fd: fd, status: info["notFound"] as? Bool == true ? 404 : 409, body: ["error": err])
                 } else {
                     sendResponse(fd: fd, status: 201, body: info)
                 }

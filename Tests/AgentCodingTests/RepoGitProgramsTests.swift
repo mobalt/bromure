@@ -85,6 +85,80 @@ struct RepoGitProgramsTests {
         #expect(sh(TaskLitter.status("'\(home)/nope'")).isEmpty)
     }
 
+    /// Finding (CWE-754): `git lfs install --local` also sets a `process`
+    /// filter; switched off it was blank, and a blank process filter that is
+    /// `required` failed every status — a clean checkout read as dirty.
+    @Test("a local required process filter with no global driver: a clean tree reads clean")
+    func requiredProcessFilterKeepsCleanTree() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgp-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        let iso = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh(iso + "set -e; mkdir -p \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); chmod +x \(pwn); "
+               + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; echo a > a.bin; "
+               + "git add .; git commit -qm a; "
+               + "for k in clean smudge process; do git config filter.lfs.$k \(pwn); done; "
+               + "git config filter.lfs.required true; touch a.bin")
+        #expect(sh(iso + TaskLitter.status("'\(root)'")) == "")
+        #expect(sh(iso + CodingTaskEngine.emptyBranchCommand(root: root, branch: "main", parent: "main",
+                                                               worktreeDir: root)).contains("EMPTY"))
+        // An edit still shows, and the repository's program never ran.
+        _ = sh("echo b > \(root)/a.bin")
+        #expect(sh(iso + TaskLitter.status("'\(root)'")).contains(" M a.bin"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
+    /// Finding (CWE-754): with a GLOBAL clean/smudge driver for the filter,
+    /// the blank local `process` shadowed it, and `required=false` hid the
+    /// failure — `git add` stored raw bytes and reported success. Now the
+    /// required filter fails loudly; the repository's program never runs.
+    @Test("a blank process over a global clean/smudge driver fails a required filter, never passes raw bytes")
+    func blankProcessOverGlobalDriverFails() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgq-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", marker = home + "/PWNED", pwn = home + "/pwn.sh"
+        let global = home + "/global.sh", gcfg = home + "/gitconfig"
+        let iso = "export GIT_CONFIG_GLOBAL=\(gcfg) GIT_CONFIG_NOSYSTEM=1; "
+        _ = sh("set -e; mkdir -p \(root); printf '#!/bin/sh\\ntouch \(marker)\\ncat\\n' > \(pwn); "
+               + "printf '#!/bin/sh\\nprintf FILTERED; cat\\n' > \(global); chmod +x \(pwn) \(global); "
+               + "printf '[filter \"lfs\"]\\n\\tclean = \(global)\\n\\tsmudge = \(global)\\n\\trequired = true\\n' > \(gcfg); "
+               + iso + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; "
+               + "git add .gitattributes; git commit -qm a; "
+               + "for k in clean smudge process; do git config filter.lfs.$k \(pwn); done; "
+               + "git config filter.lfs.required true; echo raw > b.bin")
+        let add = sh(iso + RepoGitPrograms.off("'\(root)'")
+                     + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(add.contains("REFUSED"))
+        #expect(sh(iso + "git -C '\(root)' ls-files b.bin").isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // Review: a user driver git reads through an include, or an
+        // includeIf gitdir: matching this repository, counts the same.
+        let inc = home + "/included"
+        _ = sh("mv \(gcfg) \(inc); printf '[include]\\n\\tpath = \(inc)\\n' > \(gcfg)")
+        let viaInclude = sh(iso + RepoGitPrograms.off("'\(root)'")
+                            + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(viaInclude.contains("REFUSED"))
+        // gitdir: matches the resolved path (/var is /private/var here;
+        // Foundation's resolvingSymlinksInPath turns it back into /var).
+        _ = sh("git -C '\(root)' reset -q; printf '[includeIf \"gitdir:%s/\"]\\n\\tpath = \(inc)\\n' "
+               + "\"$(cd '\(root)' && pwd -P)\" > \(gcfg)")
+        let viaIncludeIf = sh(iso + RepoGitPrograms.off("'\(root)'")
+                              + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(viaIncludeIf.contains("REFUSED"))
+        // Only a global smudge, under `set -e` (dash): still a user driver.
+        _ = sh("git -C '\(root)' reset -q; printf '[filter \"lfs\"]\\n\\tsmudge = \(global)\\n\\trequired = true\\n' > \(gcfg)")
+        let smudgeOnly = sh("set -e; " + iso + RepoGitPrograms.off("'\(root)'")
+                            + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(smudgeOnly.contains("REFUSED"))
+        #expect(sh(iso + "git -C '\(root)' ls-files b.bin").isEmpty)
+        // With no user driver at all, the blank process still passes through.
+        _ = sh("printf '' > \(gcfg)")
+        let passthrough = sh(iso + RepoGitPrograms.off("'\(root)'")
+                             + "git -C '\(root)' add b.bin >/dev/null 2>&1 && echo ADDED || echo REFUSED")
+        #expect(passthrough.contains("ADDED"))
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
     /// Finding: `--ignore-submodules=dirty` hid an edited submodule — the
     /// session list said "no changes yet", Discard said nothing would be
     /// lost, and removing the worktree deleted that work.
@@ -112,6 +186,58 @@ struct RepoGitProgramsTests {
         #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
                                                    squash: false)).contains("dirty"))
         #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
+    /// Finding (CWE-754): a submodule whose own `git status` fails (here a
+    /// truncated index, as a crash mid-write leaves it) printed nothing, so
+    /// the checkout read as clean and empty — and Mark done removed it.
+    @Test("a submodule whose status fails reads as a change")
+    @MainActor func failedSubmoduleStatusCounts() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgf-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/.bromure/worktrees/repo/x"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a; "
+               + "git -c protocol.file.allow=always submodule -q add \(home)/sub sub; git commit -qm sub")
+        #expect(!sh(TaskLitter.status("'\(root)'")).contains("sub"))
+        // A tracked edit, then the submodule's index cut short.
+        _ = sh("cd \(root)/sub; echo SECRET >> f; i=\"$(git rev-parse --git-dir)/index\"; "
+               + "head -c 20 \"$i\" > \"$i.t\"; mv \"$i.t\" \"$i\"")
+        #expect(sh("cd \(root)/sub && git status --porcelain >/dev/null 2>&1 || echo failed").contains("failed"))
+        #expect(sh(TaskLitter.status("'\(root)'")).contains(" M sub"))
+        #expect(sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])).contains("k\t1"))
+        #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
+                                                   squash: false)).contains("dirty"))
+    }
+
+    /// Finding (CWE-116): `core.quotePath=false` still C-quotes a path
+    /// holding `"`, `\\`, a tab or a newline, and the quoted text was looked
+    /// for on disk — an edit in such a submodule read as no change at all.
+    @Test("an edited submodule whose path git quotes still reads as a change")
+    @MainActor func quotedSubmodulePath() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgq-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/.bromure/worktrees/repo/x"
+        _ = sh("set -e; mkdir -p \(home)/sub \(root); "
+               + "cd \(home)/sub; git init -q -b main; echo one > f; git add f; git commit -qm one; "
+               + "cd \(root); git init -q -b main; echo a > a; git add a; git commit -qm a")
+        let names = ["quote\"name", "back\\slash", "new\nline", "tab\tbed", "$(touch PWN)"]
+        for (i, name) in names.enumerated() {
+            let q = BranchMergeCommands.q(name)
+            _ = sh("set -e; cd \(root); git clone -q \(home)/sub \(q); "
+                   + "git update-index --add --cacheinfo 160000,$(git -C \(q) rev-parse HEAD),\(q); git commit -qm s\(i)")
+        }
+        #expect(sh(TaskLitter.status("'\(root)'")).isEmpty)
+        for name in names {
+            let q = BranchMergeCommands.q(name)
+            _ = sh("cd \(root)/\(q) && echo SECRET-EDIT >> f")
+            let out = sh(TaskLitter.status("'\(root)'"))
+            #expect(out.hasPrefix(" M "), "\(name)")
+            #expect(sh("cd \(root); " + RepoGitPrograms.dirtySubmodules(".", nul: true)) == " M \(name)\0", "\(name)")
+            _ = sh("cd \(root)/\(q) && git checkout -q f")
+        }
+        #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
     }
 
     /// Finding: the same hidden submodule edit passed the checks that gate

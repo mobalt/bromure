@@ -89,4 +89,13 @@ struct FatClientSpareChannelTests {
         var byte: UInt8 = 0
         #expect(Darwin.read(fd, &byte, 1) <= 0)
     }
+
+    /// The control server now times out a connection that sends nothing; a
+    /// spare is exactly that until it's used. One the server already hung
+    /// up on, handed out at that moment, lost its request.
+    @Test("a spare is replaced well before the server stops waiting for its request")
+    func spareOutlivedByServerWait() {
+        #expect(SSHConnection.spareMaxAge * 2 <= ACAutomationServer.firstByteTimeout)
+        #expect(ACAutomationServer.requestReadTimeout < ACAutomationServer.firstByteTimeout)
+    }
 }

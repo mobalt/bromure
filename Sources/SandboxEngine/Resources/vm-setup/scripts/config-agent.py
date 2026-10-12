@@ -1254,6 +1254,28 @@ def _inline_piece_ends_block(line, close):
     return False
 
 
+# Inline blocks whose content is base64 or hex (a key, a certificate): a
+# line can be split anywhere without changing what it decodes to. Not
+# <http-proxy-user-pass> or <auth-user-pass>, whose lines are records (a
+# username, then a password) that a split would cut in two.
+OPENVPN_SPLITTABLE_BLOCKS = {
+    "ca", "cert", "extra-certs", "key", "dh", "pkcs12", "crl-verify",
+    "tls-auth", "tls-crypt", "tls-crypt-v2", "secret",
+}
+
+
+def _split_utf8(line, limit):
+    """``line`` cut into pieces of at most ``limit`` UTF-8 bytes, never
+    inside a character."""
+    pieces, cur = [], ""
+    for ch in line:
+        if len((cur + ch).encode("utf-8")) > limit:
+            pieces.append(cur)
+            cur = ""
+        cur += ch
+    return pieces + [cur]
+
+
 def sanitize_ovpn(text, connection_body=False):
     """``text`` without the forbidden directives, read the way OpenVPN 2.6
     reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
@@ -1265,7 +1287,9 @@ def sanitize_ovpn(text, connection_body=False):
     out, dropped = [], []
     close, keep = None, True        # inside an inline block: its close tag
     block = None                    # a <connection> block's lines, sanitized on close
-    for i, line in enumerate(text.splitlines()):
+    lines = text.splitlines()
+    block_name = None               # the inline block `close` ends, lowercased
+    for i, line in enumerate(lines):
         if i == 0 and line.startswith("\ufeff"):
             line = line[1:]
         if "\0" in line:
@@ -1302,6 +1326,16 @@ def sanitize_ovpn(text, connection_body=False):
                 out.extend(inner)
                 dropped.extend(more)
                 block = None
+            nxt = lines[i + 1] if i + 1 < len(lines) else None
+            if keep and connection_body and not ends and size == OPENVPN_LINE_MAX \
+                    and block_name in OPENVPN_SPLITTABLE_BLOCKS \
+                    and nxt is not None and not nxt.lstrip(_C_SPACE).startswith(close):
+                # A block nested in <connection> is read back (in_src_get)
+                # into 256 bytes, which gives a 255-byte line no newline: the
+                # next line (a key or certificate footer) is glued onto it.
+                # Two lines, each short enough to get its newline back.
+                out.extend(_split_utf8(line, OPENVPN_LINE_MAX - 1))
+                continue
             if keep:
                 out.append(line)
             if ends:
@@ -1333,6 +1367,7 @@ def sanitize_ovpn(text, connection_body=False):
         if inline:
             name = name[1:-1]
             close = "</%s>" % name
+            block_name = name.lower()
         keep = name.lower() not in OPENVPN_FORBIDDEN and not name.lower().startswith("pkcs11-")
         if keep and not inline and _sends_a_file(name.lower(), tokens):
             keep = False

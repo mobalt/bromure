@@ -118,6 +118,21 @@ final class RemoteHostController {
     nonisolated static func uptimeDidReset(prevBoot: Date, newBoot: Date) -> Bool {
         newBoot.timeIntervalSince(prevBoot) > 20
     }
+
+    /// The host's own boot stamp (`bootedAt`, its clock) moved forward: a new
+    /// boot. Exact, unlike the uptime guess above — a reply that arrives late
+    /// (a slow P2P relay: 20 s and more) made `now − uptime` jump forward and
+    /// read as a reboot every few seconds (boot screen, browser rebuilt).
+    /// Only hosts that don't send the stamp fall back to the guess.
+    nonisolated static func bootStampMoved(prev: Double, new: Double) -> Bool {
+        new - prev > 1
+    }
+
+    /// The boot date shown for a host that stamps its boot: a moved stamp
+    /// takes the new sample; a stable one keeps the earlier of the two.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
+        stampMoved ? derived : min(prev, derived)
+    }
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -152,6 +167,8 @@ final class RemoteHostController {
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
+    /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
+    private var bootStamps: [Profile.ID: Double] = [:]
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -764,13 +781,34 @@ final class RemoteHostController {
             appliedEpoch = epoch
             appliedGeneration = gen
         }
+        // Guard against a degenerate /state. A 200 poll whose body was truncated
+        // or failed to parse arrives as an (almost) empty snapshot, and a server
+        // whose list isn't wired yet sends an empty one. Applying it wipes
+        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell,
+        // the board, the sessions stage, and a sign-in in progress (a missing
+        // `pendingRegistration` reads as "the flow ended") — and because the
+        // workspace screen unmounts its live terminals whenever `isRunning`
+        // goes false, the screen flashes to a blank "Info" view until the next
+        // good poll repaints it. So once anything was applied, a snapshot with
+        // no `workspaces` array, or one whose host says it didn't list them,
+        // keeps the last good state — even with no workspace left to keep,
+        // since that is a steady state now. A listed, empty array is real: the
+        // last workspace was deleted — skipping it froze the mirror on the
+        // deleted row for good. (keys= reveals the cause.)
+        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
+        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
+        if degenerate, revision > 0 {
+            FatClientLog.log("apply: skipped degenerate snapshot "
+                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
+                + "kept \(profilesByID.count) workspaces")
+            return
+        }
         // First: the workspace/VM updates below already consult it.
         isAgentHost = snapshot["hostKind"] as? String == "agent-host"
         if listModel.switchboardAvailable == isAgentHost { listModel.switchboardAvailable = !isAgentHost }
 #if os(macOS)
         updateDelegationRelay()
 #endif
-        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
         let workspaces = listedWorkspaces ?? []
         let attached = Set(workspaces.compactMap { w -> UUID? in
             guard w["hostKind"] as? String == "agent-host" else { return nil }
@@ -785,24 +823,6 @@ final class RemoteHostController {
         if listModel.pendingMachines != pendingMachines { listModel.pendingMachines = pendingMachines }
         let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
         if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
-        // Guard against a degenerate /state. A 200 poll whose body was truncated
-        // or failed to parse arrives as an (almost) empty snapshot, and a server
-        // whose list isn't wired yet sends an empty one. Applying it wipes
-        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
-        // — and because the workspace screen unmounts its live terminals whenever
-        // `isRunning` goes false, the screen flashes to a blank "Info" view until
-        // the next good poll repaints it. So a snapshot with no `workspaces`
-        // array, or one whose host says it didn't list them, keeps the last
-        // good state. A listed, empty array is real: the last workspace was
-        // deleted — skipping it froze the mirror on the deleted row for good.
-        // (keys= reveals the cause.)
-        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
-        if degenerate, revision > 0, !profilesByID.isEmpty {
-            FatClientLog.log("apply: skipped degenerate snapshot "
-                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
-                + "kept \(profilesByID.count) workspaces")
-            return
-        }
         let vms = (snapshot["vms"] as? [[String: Any]]) ?? []
         let grid = (snapshot["gridLayout"] as? [String: Any]) ?? ["cells": []]
         let autos = (snapshot["automations"] as? [String: Any]) ?? [:]
@@ -919,7 +939,7 @@ final class RemoteHostController {
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
-        var rebootedIDs = Set<Profile.ID>()   // uptime reset since last poll → the VM rebooted
+        var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard
@@ -938,11 +958,28 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+            let stamp = vm["bootedAt"] as? Double
+            var stampMoved = false
+            if let stamp {
+                if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
+                    rebootedIDs.insert(id)
+                    stampMoved = true
+                }
+                bootStamps[id] = stamp
+            }
             if let up = vm["uptimeSeconds"] as? Int {
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
-                if let prev = bootTimes[id] {
+                if stamp != nil, let prev = bootTimes[id] {
+                    // The host stamps its boot: the date here (dashboard
+                    // uptime, the transcript floor) moves on a new boot only.
+                    // Otherwise only ever earlier — the most on-time sample —
+                    // never later: a late reply (its uptime short by the
+                    // delay) or a Mac that slept (awake-only uptime) moved
+                    // it forward, cutting the uptime and the transcript.
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved)
+                } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
-                        rebootedIDs.insert(id)
+                        if stamp == nil { rebootedIDs.insert(id) }
                         bootTimes[id] = derived
                     } else if abs(prev.timeIntervalSince(derived)) >= 3 {
                         bootTimes[id] = derived   // minor drift correction
@@ -1001,6 +1038,7 @@ final class RemoteHostController {
         // gone. Filtering by liveIDs here would erase the pre-reboot boot time
         // and the return would look like a first sighting (missed reboot).
         bootTimes = bootTimes.filter { profilesByID[$0.key] != nil }
+        bootStamps = bootStamps.filter { profilesByID[$0.key] != nil }
         mounts = mounts.filter { liveIDs.contains($0.key) }
         // A rebooted workspace's browser is bound to the old boot's network
         // (its IP inside the SOCKS-routed subnet); the window rebuilds it so the
@@ -1580,8 +1618,18 @@ final class RemoteHostController {
 
     private func seg(_ id: Profile.ID) -> String { ControlClient.encodeSegment(id.uuidString) }
 
-    func startWorkspace(_ id: Profile.ID) {
+    /// Gone from the mirror (deleted here or on the host) once a snapshot
+    /// is in: its stage, pop-out and settings must go, and nothing may act
+    /// on it — a missing row otherwise reads as `.off`, with a Start button.
+    func isGone(_ id: Profile.ID) -> Bool { hasSnapshot && profilesByID[id] == nil }
+
+    /// Nothing for a workspace the mirror no longer has: an older host
+    /// minted a NEW workspace for an unknown id (named with it) and booted it.
+    @discardableResult
+    func startWorkspace(_ id: Profile.ID) -> Bool {
+        guard profilesByID[id] != nil else { return false }
         send("POST", "/vms", body: ["profile": id.uuidString, "detach": true])
+        return true
     }
     func shutdownWorkspace(_ id: Profile.ID) {
         send("DELETE", "/vms/\(seg(id))", body: ["action": "shutdown"])
@@ -3085,7 +3133,11 @@ final class RemoteHostWindow: NSWindow {
             // they just approved) — re-show the boot dive screen so the reboot
             // reads as progress, not a frozen pane. Cleared when the fresh
             // roster lands (onTabsApplied).
-            if self.shownWorkspace == id { self.showBootCue(for: id) }
+            // Not over a live roster: that VM is up (its terminal is right
+            // there), whatever the reboot guess said.
+            if self.shownWorkspace == id, self.controller.tabsModel(for: id)?.rosterLive != true {
+                self.showBootCue(for: id)
+            }
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -4311,6 +4363,19 @@ final class RemoteHostWindow: NSWindow {
                 var body: [String: Any] = ["path": path]
                 if let fp { body["fingerprint"] = fp }
                 self?.controller.taskCommand(id, "viewed", body: body)
+            },
+            relocate: { [weak self] task in
+                // The host looks (one exec per candidate session); the
+                // mirror shows what it found.
+                guard let self, await self.controller.taskCommandReply(task.id, "locate", body: [:]) != nil
+                else { return false }
+                for i in 1...40 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard let t = self.controller.taskStore.task(task.id) else { return false }
+                    if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+                    if i % 6 == 0 { self.controller.foregroundKick() }
+                }
+                return false
             }))
 
     /// Native planning-conversation windows for the mirrored board — the
@@ -6727,6 +6792,49 @@ final class RemoteHostWindow: NSWindow {
         mount(host)
     }
 
+    /// A deleted workspace leaves the stage, the selection, its pop-out and
+    /// its settings window — at once after our delete (no new revision), or
+    /// at the snapshot that drops it.
+    private func leaveGoneWorkspaces() {
+        // Its browser first, while the stage/selection still name it: the
+        // pane closes (the globe and ⌘⌃B had no id left to close it with),
+        // its local browser VM stops, and the browser-MCP relay that dialed
+        // the deleted id forever ends. Its terminal surfaces are retired.
+        let release = Self.goneIDs(in: browserOpen.union(shownBrowser.map { [$0] } ?? [])
+            .union(browserControllers.keys).union(browserRelays.keys).union(termControllers.keys)
+            .union(browserModels.keys), isGone: controller.isGone)
+        for id in release {
+            if shownBrowser == id {
+                setBrowserOpen(id, false)
+            } else if browserOpen.contains(id) {
+                // Only remembered open (another workspace's browser is on
+                // screen): forgotten, never collapsing the pane that shows.
+                browserOpen.remove(id)
+                browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+                controller.listModel.browserOpenWorkspaces = browserOpen
+            }
+            browserControllers.removeValue(forKey: id)?.stop()
+            browserRelays.removeValue(forKey: id)?.stop()
+            browserModels[id] = nil
+            if shownWorkspace != id { termControllers.removeValue(forKey: id)?.retireAll() }
+        }
+        if let id = shownDashboard?.id, controller.isGone(id) { clearVMDashboard() }
+        if let id = shownWorkspace, controller.isGone(id) {
+            unmountTerminal()
+            termControllers.removeValue(forKey: id)?.retireAll()
+        }
+        if let id = controller.listModel.selectedID, controller.isGone(id) {
+            controller.listModel.selectedID = nil
+        }
+        for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
+        for id in Array(settingsWindows.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+    }
+
+    /// The ids among `ids` whose workspace is gone from the mirror.
+    nonisolated static func goneIDs(in ids: Set<Profile.ID>, isGone: (Profile.ID) -> Bool) -> [Profile.ID] {
+        ids.filter(isGone).sorted { $0.uuidString < $1.uuidString }
+    }
+
     private func clearVMDashboard() {
         dashboardHost?.removeFromSuperview()
         dashboardHost = nil
@@ -7438,6 +7546,7 @@ final class RemoteHostWindow: NSWindow {
         if reconnectHost.isHidden == showOverlay {
             reconnectHost.isHidden = !showOverlay
         }
+        leaveGoneWorkspaces()
         guard controller.revision != lastRevision else { return }
         lastRevision = controller.revision
         // Test hook: auto-select a named workspace once it's running.
