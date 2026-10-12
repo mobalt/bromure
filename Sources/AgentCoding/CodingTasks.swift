@@ -2663,7 +2663,8 @@ final class CodingTaskEngine {
             $0.lastError = nil
             $0.restartNeeded = nil
             if let dir { $0.worktreeDir = dir }
-            if let parent { $0.parentBranch = parent }
+            // Read from the guest (its registry, or HEAD): a plain branch name only.
+            if let parent, parent != branch, Self.isSafeBranchName(parent) { $0.parentBranch = parent }
             if let root { $0.rootRepo = root }
         }
         // The agent stays in its tab through review: send-back types into
@@ -2672,6 +2673,22 @@ final class CodingTaskEngine {
         // marked done or discarded — or after a long idle spell in Review
         // (`sweepIdleReview`).
         if wrote { await measureCodeChanges(taskID) }
+    }
+
+    /// The branch a Review card stands for: the one recorded, or — not yet
+    /// recorded (moved to Review while the finished agent's lookup ran) —
+    /// its live tab's: the guest may have suffixed the slug ("-2"), so the
+    /// slug alone names a branch that isn't this card's. nil: wait for it.
+    func reviewBranch(_ t: CodingTask) -> String? {
+        if let b = t.branch { return b }
+        guard let slug = t.branchSlug else { return nil }
+        return delegate?.pane(for: t.profileID)?.model.tabs
+            .first { AutomationBoard.branchMatches($0.worktreeBranch, slug: slug) }?.worktreeBranch
+    }
+
+    nonisolated static var branchPendingText: String {
+        NSLocalizedString("The branch is still being recorded — try again in a moment.",
+                          comment: "task card: Merge/Send Back on a card whose branch isn't known yet")
     }
 
     /// A card a finished agent's lookup only fills in: already in Review,
@@ -2690,8 +2707,12 @@ final class CodingTaskEngine {
         let before = t
         if t.branch == nil { t.branch = branch }
         if (t.worktreeDir ?? "").isEmpty, let dir { t.worktreeDir = dir }
-        if (t.parentBranch ?? "").isEmpty, let parent { t.parentBranch = parent }
+        if (t.parentBranch ?? "").isEmpty, let parent, parent != branch, isSafeBranchName(parent) {
+            t.parentBranch = parent
+        }
         if (t.rootRepo ?? "").isEmpty, let root { t.rootRepo = root }
+        // Merge / Send Back's "still being recorded" is moot once it is.
+        if t.lastError == branchPendingText { t.lastError = nil }
         // A delivery's "no worktree" error is moot once there is one.
         if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskDispatcher.noWorktreeText(branch) { t.lastError = nil }
         return t != before
@@ -2820,9 +2841,11 @@ final class CodingTaskEngine {
     /// confirmed; a failed one leaves them pending with the reason on the
     /// card, and Restart Session sends them.
     func sendBack(_ taskID: UUID) async {
-        // A branch not recorded (moved to Review mid-lookup) is its slug's.
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch ?? task.branchSlug.map({ "wt/\($0)" }), let delegate else { return }
+        guard let task = store.task(taskID), task.stage == .testing, let delegate else { return }
+        guard let branch = reviewBranch(task) else {
+            if task.branchSlug != nil { store.mutate(taskID) { $0.lastError = Self.branchPendingText } }
+            return
+        }
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
         let ids = Set(unsent.map(\.id))

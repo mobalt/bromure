@@ -4158,3 +4158,6 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "「%@」はアップグレードされませんでした";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "質問の表示中に現在のディスクで起動しました（オートメーションが起動しました）。シャットダウンしてから再度起動すると、もう一度確認されます。";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "ブランチをまだ記録中です。少ししてからもう一度お試しください。";

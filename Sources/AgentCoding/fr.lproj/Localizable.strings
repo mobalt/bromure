@@ -4158,3 +4158,6 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "« %@ » n’a pas été mis à niveau";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Il a démarré sur son disque actuel pendant que la question était affichée (une automatisation l’a lancé). Arrêtez-le puis redémarrez-le pour que la question vous soit reposée.";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "La branche est en cours d’enregistrement — réessayez dans un instant.";

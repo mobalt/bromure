@@ -474,12 +474,24 @@ struct TaskLandingTests {
         var done = t; done.stage = .done
         #expect(!CodingTaskEngine.fillsReview(done))
 
-        // And with no branch recorded at all, Merge still lands its slug's.
+        // A parent the guest read that isn't a plain branch name is left out.
+        var unsafe = reviewTask(s, branch: nil)
+        unsafe.branchSlug = "u"; unsafe.parentBranch = nil
+        CodingTaskEngine.fillWorktree(&unsafe, branch: "wt/u", dir: "/u", parent: "--upload-pack=x", root: "/r")
+        #expect(unsafe.parentBranch == nil && unsafe.worktreeDir == "/u")
+
+        // No branch recorded yet (and no live tab to read it from): Merge
+        // neither marks it done nor guesses the slug's name (the guest may
+        // have suffixed it) — it waits, saying why.
         let bare = reviewTask(s, branch: nil)
         s.mutate(bare.id) { $0.branchSlug = "bare" }
         engine.land(bare.id, mode: .merge)
         #expect(s.task(bare.id)?.stage == .testing)
-        #expect(s.task(bare.id)?.landing != nil)
+        #expect(s.task(bare.id)?.landing == nil)
+        #expect(s.task(bare.id)?.lastError == CodingTaskEngine.branchPendingText)
+        // The lookup then records it: the note goes.
+        s.mutate(bare.id) { CodingTaskEngine.fillWorktree(&$0, branch: "wt/bare-2", dir: "/b", parent: "main", root: "/r") }
+        #expect(s.task(bare.id)?.branch == "wt/bare-2" && s.task(bare.id)?.lastError == nil)
     }
 
     /// Board report: a bulk review gave the designated agent one message

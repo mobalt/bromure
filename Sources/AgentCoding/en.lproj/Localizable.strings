@@ -4192,3 +4192,6 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "“%@” wasn't upgraded";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "The branch is still being recorded — try again in a moment.";
