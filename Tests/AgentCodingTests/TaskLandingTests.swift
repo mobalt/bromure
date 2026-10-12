@@ -445,6 +445,24 @@ struct TaskLandingTests {
         #expect(!v.awaitsRelocation)
     }
 
+    /// Finding (CWE-362): a re-delivery whose look failed stamped "no
+    /// worktree … the diff can't be shown" on a card whose checkout the
+    /// review window's look had just found.
+    @Test("a delivery that finds no worktree leaves a card that has one without the error")
+    func missKeepsFoundCheckout() {
+        var found = CodingTask(title: "x", profileID: UUID(), tool: .claude)
+        found.stage = .testing
+        found.worktreeDir = "/w"
+        TaskDispatcher.deliveredWithoutFind(&found, branch: "wt/x")
+        #expect(found.lastError == nil && found.worktreeDir == "/w" && found.stage == .testing)
+        // No checkout: the card says why there's no diff.
+        var none = CodingTask(title: "y", profileID: UUID(), tool: .claude)
+        none.stage = .inProgress
+        TaskDispatcher.deliveredWithoutFind(&none, branch: "wt/y")
+        #expect(none.stage == .testing && none.branch == "wt/y")
+        #expect(none.lastError == TaskDispatcher.noWorktreeText("wt/y"))
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
