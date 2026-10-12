@@ -6767,13 +6767,43 @@ final class RemoteHostWindow: NSWindow {
     /// its settings window — at once after our delete (no new revision), or
     /// at the snapshot that drops it.
     private func leaveGoneWorkspaces() {
+        // Its browser first, while the stage/selection still name it: the
+        // pane closes (the globe and ⌘⌃B had no id left to close it with),
+        // its local browser VM stops, and the browser-MCP relay that dialed
+        // the deleted id forever ends. Its terminal surfaces are retired.
+        let release = Self.goneIDs(in: browserOpen.union(shownBrowser.map { [$0] } ?? [])
+            .union(browserControllers.keys).union(browserRelays.keys).union(termControllers.keys)
+            .union(browserModels.keys), isGone: controller.isGone)
+        for id in release {
+            if shownBrowser == id {
+                setBrowserOpen(id, false)
+            } else if browserOpen.contains(id) {
+                // Only remembered open (another workspace's browser is on
+                // screen): forgotten, never collapsing the pane that shows.
+                browserOpen.remove(id)
+                browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+                controller.listModel.browserOpenWorkspaces = browserOpen
+            }
+            browserControllers.removeValue(forKey: id)?.stop()
+            browserRelays.removeValue(forKey: id)?.stop()
+            browserModels[id] = nil
+            if shownWorkspace != id { termControllers.removeValue(forKey: id)?.retireAll() }
+        }
         if let id = shownDashboard?.id, controller.isGone(id) { clearVMDashboard() }
-        if let id = shownWorkspace, controller.isGone(id) { unmountTerminal() }
+        if let id = shownWorkspace, controller.isGone(id) {
+            unmountTerminal()
+            termControllers.removeValue(forKey: id)?.retireAll()
+        }
         if let id = controller.listModel.selectedID, controller.isGone(id) {
             controller.listModel.selectedID = nil
         }
         for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
         for id in Array(settingsWindows.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+    }
+
+    /// The ids among `ids` whose workspace is gone from the mirror.
+    nonisolated static func goneIDs(in ids: Set<Profile.ID>, isGone: (Profile.ID) -> Bool) -> [Profile.ID] {
+        ids.filter(isGone).sorted { $0.uuidString < $1.uuidString }
     }
 
     private func clearVMDashboard() {

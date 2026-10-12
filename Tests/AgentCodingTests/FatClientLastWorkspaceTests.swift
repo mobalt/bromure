@@ -88,4 +88,17 @@ struct FatClientLastWorkspaceTests {
         #expect(ACAppDelegate.unknownWorkspaceRefusal("my-new-workspace") == nil)
         #expect(ACAppDelegate.unknownWorkspaceRefusal(nil) == nil)
     }
+
+    /// Finding (CWE-772): deleting a workspace left its browser pane open
+    /// (the globe had no id left to close it), its local browser VM booted,
+    /// and its browser-MCP relay dialing the deleted id forever. The window
+    /// now releases everything a gone workspace still holds.
+    @Test("what a deleted workspace still holds is found: its browser, relay and terminals")
+    func goneWorkspaceResourcesFound() {
+        let gone = UUID(), alive = UUID()
+        let c = controller(with: alive)
+        c.workspaceDeleted(gone)   // never listed: gone once a snapshot is in
+        #expect(RemoteHostWindow.goneIDs(in: [gone, alive], isGone: c.isGone) == [gone])
+        #expect(RemoteHostWindow.goneIDs(in: [alive], isGone: c.isGone).isEmpty)
+    }
 }
