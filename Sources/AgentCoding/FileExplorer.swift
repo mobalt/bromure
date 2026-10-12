@@ -225,6 +225,9 @@ final class FileExplorerModel {
     /// show may hold several repositories (the home with a project in it).
     private(set) var statusOrigins: [String: (repo: String, path: String)] = [:]
     private(set) var loadError: String?
+    /// A repository's `git status` failed (see `RepoGitPrograms.failedStatus`):
+    /// its changes aren't marked — not "nothing changed".
+    private(set) var statusFailed = false
     /// True until the first listing for the current repo lands.
     private(set) var loading = false
     /// File count cap hit — tree truncated (giant repos).
@@ -477,7 +480,10 @@ final class FileExplorerModel {
             + "for d in \(probe); do git -C \"$d\" rev-parse --show-toplevel 2>/dev/null; done | sort -u "
             + "| while IFS= read -r r; do [ -n \"$r\" ] || continue; printf '\\002%s\\001' \"$r\"; "
             // The repository's own programs never run (RepoGitPrograms).
-            + "\(RepoGitPrograms.off("\"$r\""))git -C \"$r\" status --porcelain -z --ignore-submodules=dirty 2>/dev/null; \(RepoGitPrograms.dirtySubmodules("\"$r\"", nul: true))done; true; } | base64 -w0"
+            // A status that fails says so (a NUL-ended failure entry): its
+            // empty output read as "nothing changed" and hid every edit.
+            + "\(RepoGitPrograms.off("\"$r\""))git -C \"$r\" status --porcelain -z --ignore-submodules=dirty 2>/dev/null "
+            + "|| printf '%s\\0' \(shellQuote(RepoGitPrograms.statusFailedLine)); \(RepoGitPrograms.dirtySubmodules("\"$r\"", nul: true))done; true; } | base64 -w0"
         do {
             let out = try await exec(cmd)
             guard generation == refreshGeneration, root == self.root else { return }
@@ -500,6 +506,7 @@ final class FileExplorerModel {
             let (mapped, origins) = Self.mapStatuses(root: root, sections: sections)
             statuses = mapped
             statusOrigins = origins
+            statusFailed = Self.statusFailed(in: sections)
             var byDir: [String: [(name: String, isDir: Bool)]] = [:]
             if parts.count > 1 {
                 for section in parts[1].split(separator: UInt8(0x02), omittingEmptySubsequences: true) {
@@ -777,6 +784,13 @@ final class FileExplorerModel {
 
     /// `git status --porcelain -z`: entries `XY path` NUL-separated; renames
     /// carry the ORIGINAL path as one extra NUL-separated token.
+    /// Whether any repository's status came back as the failure entry.
+    nonisolated static func statusFailed(in sections: [(toplevel: String, porcelain: String)]) -> Bool {
+        sections.contains { s in
+            s.porcelain.split(separator: "\u{0}").contains { $0 == RepoGitPrograms.statusFailedLine }
+        }
+    }
+
     static func parsePorcelain(_ raw: String) -> [String: GitFileStatus] {
         var result: [String: GitFileStatus] = [:]
         let tokens = raw.split(separator: "\u{0}", omittingEmptySubsequences: true)

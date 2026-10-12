@@ -4173,3 +4173,15 @@
 
 /* task card: Review is still looking for a delivered branch's checkout */
 "Looking for the worktree…" = "正在查找工作树…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "不运行仓库自带的过滤程序，Git 就无法读取该任务的检出，因此 Bromure 无法判断它是否干净。请自行合并，然后将任务标记为完成。";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "此处 git status 失败 — 未标出已更改的文件";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git 无法读取更改";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "在此检出中，没有仓库自带的过滤程序（Bromure 不会运行它）Git 就会失败。请在终端中查看。";

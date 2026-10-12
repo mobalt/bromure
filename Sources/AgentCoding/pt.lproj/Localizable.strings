@@ -4173,3 +4173,15 @@
 
 /* task card: Review is still looking for a delivered branch's checkout */
 "Looking for the worktree…" = "Procurando o worktree…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "O Git não consegue ler o checkout da tarefa sem executar o programa de filtro do próprio repositório, por isso o Bromure não sabe se está limpo. Faça o merge você mesmo e depois marque a tarefa como concluída.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "O git status falhou aqui — os arquivos alterados não estão marcados";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "O Git não conseguiu ler as alterações";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "O Git falha neste checkout sem o programa de filtro do próprio repositório, que o Bromure não executa. Verifique-o num terminal.";

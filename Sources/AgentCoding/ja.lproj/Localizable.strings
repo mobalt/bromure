@@ -4173,3 +4173,15 @@
 
 /* task card: Review is still looking for a delivered branch's checkout */
 "Looking for the worktree…" = "ワークツリーを探しています…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "リポジトリ独自のフィルタープログラムを実行しないと Git はタスクのチェックアウトを読み取れないため、Bromure はクリーンかどうか判断できません。ご自身でマージしてから、タスクを完了にしてください。";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "ここでは git status が失敗しました — 変更されたファイルは表示されていません";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git が変更を読み取れませんでした";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "このチェックアウトでは、Bromure が実行しないリポジトリ独自のフィルタープログラムがないと Git が失敗します。ターミナルで確認してください。";
