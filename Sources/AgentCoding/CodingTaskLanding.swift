@@ -444,8 +444,10 @@ extension CodingTaskEngine {
               keepBranch: Bool = false, push: Bool = false) {
         guard let task = store.task(taskID), task.stage == .testing else { return }
         if let l = task.landing, l.phase != .needsYou { return }
-        // Nothing to land: a task without a branch is simply done.
-        guard let branch = task.branch else { markDone(taskID); return }
+        // Nothing to land: a task without a branch is simply done. One whose
+        // branch wasn't recorded (moved to Review mid-lookup) still has its
+        // slug: that's the branch, and it lands.
+        guard let branch = task.branch ?? task.branchSlug.map({ "wt/\($0)" }) else { markDone(taskID); return }
         let wanted = targetOverride ?? task.parentBranch ?? ""
         store.mutate(taskID) {
             $0.landing = TaskLanding(mode: mode, target: wanted, phase: .checking,

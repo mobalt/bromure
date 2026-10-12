@@ -445,6 +445,43 @@ struct TaskLandingTests {
         #expect(!v.awaitsRelocation)
     }
 
+    /// Finding (CWE-362): a card moved to Review while a finished agent's
+    /// worktree lookup awaited got neither branch nor checkout — the
+    /// lookup's write bailed on the stage — so Merge marked it done unmerged
+    /// and Send Back did nothing.
+    @Test("a card moved to Review mid-lookup still gets its branch, and Merge lands it")
+    func reviewMidLookupKeepsBranch() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        var t = reviewTask(s, branch: nil)
+        t.branchSlug = "fix"
+        t.parentBranch = nil; t.rootRepo = nil
+        #expect(CodingTaskEngine.fillsReview(t))
+        // The lookup's find fills in what it lacks, nothing else.
+        t.lastError = TaskDispatcher.noWorktreeText("wt/fix")
+        #expect(CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/w", parent: "main", root: "/r"))
+        #expect(t.branch == "wt/fix" && t.worktreeDir == "/w" && t.parentBranch == "main" && t.rootRepo == "/r")
+        #expect(t.stage == .testing && t.lastError == nil)
+        // Never over what it has.
+        #expect(!CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/other", parent: "dev", root: "/x"))
+        #expect(t.worktreeDir == "/w" && t.parentBranch == "main")
+        var other = t; other.branch = "wt/else"
+        #expect(!CodingTaskEngine.fillWorktree(&other, branch: "wt/fix", dir: "/w2", parent: nil, root: nil))
+        // Landed or closed: left alone.
+        var landed = t
+        landed.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+        #expect(!CodingTaskEngine.fillsReview(landed))
+        var done = t; done.stage = .done
+        #expect(!CodingTaskEngine.fillsReview(done))
+
+        // And with no branch recorded at all, Merge still lands its slug's.
+        let bare = reviewTask(s, branch: nil)
+        s.mutate(bare.id) { $0.branchSlug = "bare" }
+        engine.land(bare.id, mode: .merge)
+        #expect(s.task(bare.id)?.stage == .testing)
+        #expect(s.task(bare.id)?.landing != nil)
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")
