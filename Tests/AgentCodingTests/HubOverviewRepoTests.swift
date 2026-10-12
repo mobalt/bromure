@@ -43,4 +43,17 @@ struct HubOverviewRepoTests {
         // A single watch, picked: still that one (the picker is hidden).
         #expect(HubOverviewTab.pickedRepo("o/a", watched: ["o/a"]) == "o/a")
     }
+
+    /// Finding (CWE-670), the same in the Findings tab: stopping a watch
+    /// deletes its findings, and the tab's repository filter stayed on its
+    /// name — an empty chart and list, the picker gone once one was left.
+    @Test("the Findings tab's filter on a repository neither watched nor with findings is no filter")
+    func staleFindingsFilter() {
+        let fs = [finding("o/b")]
+        #expect(HubFindingsTab.activeRepoFilter("o/a", watched: ["o/b"], findings: fs) == nil)
+        #expect(HubFindingsTab.activeRepoFilter("o/b", watched: [], findings: fs) == "o/b")
+        // Watched, no findings yet (opened from its watch): kept.
+        #expect(HubFindingsTab.activeRepoFilter("o/c", watched: ["o/c"], findings: fs) == "o/c")
+        #expect(HubFindingsTab.activeRepoFilter(nil, watched: ["o/b"], findings: fs) == nil)
+    }
 }
