@@ -107,6 +107,12 @@ public actor ConsentBroker {
     /// other call for the same key parks here and resumes when the
     /// dialog resolves.
     private var pending: [String: [CheckedContinuation<Bool, Never>]] = [:]
+    /// Keys whose open prompt a Guardrails decision overtook (`grant`,
+    /// `deny`, session teardown): its waiters were answered with that
+    /// decision, and the prompt's own answer, when it comes, neither stores
+    /// nor allows — a "Don't allow" shrank a session deny to 5 minutes, and
+    /// an "Allow" (Return) let the in-flight request through a deny.
+    private var superseded: Set<String> = []
     /// profileID → display name. Set by `ACAppDelegate` at session
     /// launch so the dialog can say "Profile <name> wants to…".
     private var profileNames: [UUID: String] = [:]
@@ -190,6 +196,14 @@ public actor ConsentBroker {
         let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: scopeHint,
                                              choices: choices, denyIndex: choices.count - 1,
                                              timeout: timeout)
+        if superseded.remove(key) != nil {
+            // Overtaken while it was up: the newer decision stands.
+            let allow = Self.liveAllow(grant: grants[key], deny: denies[key], at: Date())
+            let waiters = pending[key] ?? []
+            pending.removeValue(forKey: key)
+            for w in waiters { w.resume(returning: allow) }
+            return allow
+        }
         let decision: Decision
         switch idx {
         case 0:  decision = .allow1hr
@@ -239,6 +253,27 @@ public actor ConsentBroker {
         pending.removeValue(forKey: key)
         for w in waiters { w.resume(returning: allow) }
         return allow
+    }
+
+    /// What a stored decision says now: a live deny refuses, a live grant
+    /// allows, neither refuses (nobody said yes).
+    nonisolated static func liveAllow(grant: Grant?, deny: Date?, at now: Date) -> Bool {
+        if let deny, deny > now { return false }
+        return (grant?.expiration ?? .distantPast) > now
+    }
+
+    private static func liveAllow(grant: Grant?, deny: DenyMemory?, at now: Date) -> Bool {
+        liveAllow(grant: grant, deny: deny?.expiration, at: now)
+    }
+
+    /// A Guardrails decision for `key` while its prompt is up: the requests
+    /// waiting on that prompt get it now, and the prompt's answer won't count.
+    private func overtakePrompt(_ key: String, allow: Bool) {
+        guard pending[key] != nil else { return }
+        superseded.insert(key)
+        let waiters = pending[key] ?? []
+        pending[key] = []
+        for w in waiters { w.resume(returning: allow) }
     }
 
     /// What became of one consent request, as the Security Timeline says it.
@@ -324,6 +359,7 @@ public actor ConsentBroker {
                                 credentialDisplayName: name, isSessionScoped: true)
         }
         denies.removeValue(forKey: key)
+        overtakePrompt(key, allow: true)
         Self.recordDecision(profileID: profileID, credentialID: credentialID,
                             credential: name, scope: "granted from the Guardrails pane",
                             outcome: Outcome(decision))
@@ -342,6 +378,7 @@ public actor ConsentBroker {
             credentialDisplayName: name,
             isSessionScoped: duration == nil)
         grants.removeValue(forKey: key)
+        overtakePrompt(key, allow: false)
         Self.recordDecision(profileID: profileID, credentialID: credentialID,
                             credential: name, scope: "denied from the Guardrails pane",
                             outcome: .deny)
@@ -363,6 +400,10 @@ public actor ConsentBroker {
         }
         for k in denies.keys where k.hasPrefix(prefix) {
             denies.removeValue(forKey: k)
+        }
+        // The session is over: a prompt still up for it allows nothing.
+        for k in pending.keys where k.hasPrefix(prefix) {
+            overtakePrompt(k, allow: false)
         }
     }
 
