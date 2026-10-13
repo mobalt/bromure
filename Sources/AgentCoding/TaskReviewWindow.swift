@@ -112,7 +112,12 @@ struct TaskReviewData: Equatable, Sendable {
         // shown alone, they read as the whole change set. A missing base (a
         // branch gone) is no such failure: the untracked files still show.
         let exists = { (rev: String) in "git rev-parse -q --verify \"\(rev)^{tree}\" >/dev/null 2>&1" }
-        let failed = "echo '\(TaskReviewData.diffFailedLine)'"
+        // The failure is noted beside the capped stream and said after it:
+        // a diff that fails after 600 KB of output had its marker cut off,
+        // and the cut-off part read as the whole change set. The rest is
+        // drained so git runs to its end (a pipe closed at the cap killed
+        // it first, and a failure further on was never seen).
+        let failed = "echo 1 > \"$dfail\""
         let untracked = "git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
             + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
             + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done"
@@ -123,7 +128,9 @@ struct TaskReviewData: Equatable, Sendable {
         return "\(enter); \(RepoGitPrograms.off("."))\(setBase)\(fallback); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
             + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | \(TaskLitter.statusFilter) | head -100; "
-            + "echo ===DIFF===; \(diff) | head -c 600000; true"
+            + "echo ===DIFF===; dfail=$(mktemp 2>/dev/null) || dfail=/tmp/bromure-review.$$; : > \"$dfail\"; "
+            + "\(diff) | { head -c 600000; cat >/dev/null; }; "
+            + "[ -s \"$dfail\" ] && printf '\\n%s\\n' '\(TaskReviewData.diffFailedLine)'; rm -f \"$dfail\"; true"
     }
 
     /// A stable fingerprint of a file's diff — "viewed" holds while it
