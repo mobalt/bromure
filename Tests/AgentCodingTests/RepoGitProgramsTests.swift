@@ -17,9 +17,13 @@ struct RepoGitProgramsTests {
         env["GIT_COMMITTER_NAME"] = "t"; env["GIT_COMMITTER_EMAIL"] = "t@t"
         if let home { env["HOME"] = home }
         p.environment = env
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        try? p.run(); p.waitUntilExit()
-        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        try? p.run()
+        // Read before waiting: an output past the pipe's buffer would block
+        // the command, and the wait, for good.
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
     }
 
     @Test("the review, the session list and the changes probe run no fsmonitor, diff program or filter")
@@ -290,6 +294,26 @@ struct RepoGitProgramsTests {
             _ = sh("cd \(root)/\(q) && git checkout -q f")
         }
         #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
+    }
+
+    /// Finding (CWE-754): a diff that failed partway (a blob git can't
+    /// read) said so in the pane, but the files it wrote before stopping
+    /// stayed listed — counted, markable as viewed, and copied by Copy Diff
+    /// as if they were the change set, the unreadable file missing.
+    @Test("a diff that fails partway keeps none of the files it wrote first")
+    func failedDiffKeepsNoFiles() throws {
+        let repo = FileManager.default.temporaryDirectory.appendingPathComponent("rgp-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: repo) }
+        _ = sh("set -e; mkdir -p \(repo); cd \(repo); git init -q -b main; "
+               + "for i in $(seq -w 1 15); do echo v1 > f$i.txt; done; git add .; git commit -qm a; "
+               + "for i in $(seq -w 1 15); do echo v2 > f$i.txt; done; git add .; git commit -qm b")
+        let command = TaskReviewData.sessionCommand(dir: repo, base: .lastCommit)
+        #expect(TaskReviewData.parse(sh(command)).files.count == 15)
+        let blob = sh("cd \(repo) && git rev-parse HEAD:f15.txt").trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = sh("rm -f \(repo)/.git/objects/\(blob.prefix(2))/\(blob.dropFirst(2))")
+        let failed = TaskReviewData.parse(sh(command))
+        #expect(failed.diffFailed)
+        #expect(failed.files.isEmpty)                    // nothing to list, mark viewed or copy
     }
 
     /// Finding (CWE-754): the required blank process (above) makes `git

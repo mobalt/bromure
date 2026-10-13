@@ -163,7 +163,9 @@ struct TaskReviewData: Equatable, Sendable {
             default: break
             }
         }
-        out.files = TaskDiffParser.parse(diffLines.joined(separator: "\n"))
+        // A failed diff's body is whatever git wrote before it stopped:
+        // never shown as the change set.
+        out.files = out.diffFailed ? [] : TaskDiffParser.parse(diffLines.joined(separator: "\n"))
         return out
     }
 }
