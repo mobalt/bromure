@@ -647,6 +647,62 @@ struct DelegationTests {
         #expect(!r.messages.contains { $0.text == DelegationEngine.backText })
     }
 
+    /// Finding (CWE-362): cancel and close checked the delegation was open,
+    /// then awaited the injection scan (off the main actor) and wrote their
+    /// ending without looking again — a recall's cancel overwritten by the
+    /// board's close (the peer typed "Request closed" after the user took
+    /// the task back), a failure the ticker just recorded wiped.
+    @Test("an ending that lands while cancel or close is being scanned stands")
+    func endingDuringScanStands() async throws {
+        let f = fixture()
+        let asker = peer(in: f, workspace: f.profileID, nick: "asker", window: 12, title: "Asker")
+        _ = peer(in: f, workspace: f.profileID, nick: "answerer", window: 13, title: "Answerer")
+        var during: (() async -> Void)?
+        f.engine.scan = { text in
+            if text.hasPrefix("during"), let run = during { during = nil; await run() }
+            return nil
+        }
+        // A close that loses to a cancel: the cancel stands, no close notice.
+        let r1 = try await f.engine.request(from: asker.id, to: "@answerer", text: "One?")
+        during = { try? await f.engine.cancel(from: asker.id, delegationKey: r1.id.uuidString, reason: "taken back") }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.close(from: asker.id, delegationKey: r1.id.uuidString, verdict: "accepted", note: "during the scan")
+        }
+        var got = try #require(f.store.delegation(r1.id))
+        #expect(got.status == .cancelled && got.verdict == nil)
+        #expect(!got.messages.contains { $0.text.hasPrefix("Request closed") })
+
+        // A cancel that loses to a close: the verdict stands.
+        let r2 = try await f.engine.request(from: asker.id, to: "@answerer", text: "Two?")
+        during = { try? await f.engine.close(from: asker.id, delegationKey: r2.id.uuidString, verdict: "rejected", note: nil) }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.cancel(from: asker.id, delegationKey: r2.id.uuidString, reason: "during the scan")
+        }
+        got = try #require(f.store.delegation(r2.id))
+        #expect(got.status == .done && got.verdict == "rejected")
+        #expect(!got.messages.contains { $0.kind == .cancel })
+
+        // Failed meanwhile (its session deleted): the failure isn't wiped.
+        let (d3, child3) = await delegated(f, childWindow: 14)
+        during = {
+            f.sessions.mutate(child3) { $0.deletedAt = Date() }
+            f.engine.tick()
+        }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.close(from: f.parentID, delegationKey: d3.id.uuidString, verdict: "accepted", note: "during the scan")
+        }
+        got = try #require(f.store.delegation(d3.id))
+        #expect(got.status == .failed && got.failure == "the delegate's session was deleted")
+
+        // A deliver that loses to a cancel: cancelled, the deliver refused.
+        let r4 = try await f.engine.request(from: asker.id, to: "@answerer", text: "Four?")
+        during = { try? await f.engine.cancel(from: asker.id, delegationKey: r4.id.uuidString, reason: "moot") }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(r4.id, from: .child, kind: .deliver, text: "during the scan: here")
+        }
+        #expect(f.store.delegation(r4.id)?.status == .cancelled)
+    }
+
     /// Finding (CWE-94): a request's close note (and a cancel's reason) is
     /// typed into the peer's prompt, but skipped the injection scan every
     /// other parent message goes through — what a steer would withhold got

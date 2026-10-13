@@ -1048,6 +1048,11 @@ final class DelegationEngine {
         }
         // Files a remote parent already landed here for this message.
         if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+        // Cancelled or closed while the scan or the copy ran: it stays so —
+        // a deliver recorded now made it delivered again.
+        if kind != .note, let now = store.delegation(delegationID), !now.status.isOpen {
+            throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+        }
         store.mutate(delegationID) { d in
             // A child that speaks has read its brief (a request's, typed as a
             // notice) — it mustn't come back out of its inbox as news.
@@ -1135,6 +1140,18 @@ final class DelegationEngine {
         throw DelegationRefusal("Your message was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Rephrase it as plain facts about the work.")
     }
 
+    /// Still open (or failed only for its session's absence) after the scan
+    /// — which leaves the main actor, so the ticker, a deliver or another
+    /// cancel/close can end it meanwhile: then nothing is recorded or sent
+    /// (the last one in overwrote the ending, and typed a close notice
+    /// after a recall, or over a failure).
+    private func stillEndable(_ d: Delegation) throws {
+        guard let now = store.delegation(d.id) else { throw DelegationRefusal("Unknown delegation.") }
+        guard now.status.isOpen || now.goneFrom != nil else {
+            throw DelegationRefusal("Delegation “\(d.title)” is already \(now.status.rawValue).")
+        }
+    }
+
     /// Stop the child: the record says why; a delegate's session is put
     /// away (a peer's is its own business).
     func cancel(from parentID: UUID, delegationKey: String, reason: String,
@@ -1150,6 +1167,7 @@ final class DelegationEngine {
         guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         try await screen(trimmedReason, on: d, kind: .cancel, from: party)
+        try stillEndable(d)
         let why = trimmedReason.isEmpty ? "no longer needed" : trimmedReason
         var m = DelegationMessage(kind: .cancel, from: party, to: .child, text: why)
         m.readAt = m.at
@@ -1184,6 +1202,7 @@ final class DelegationEngine {
         let v = verdict.lowercased() == "rejected" ? "rejected" : "accepted"
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         try await screen(trimmedNote, on: d, kind: .note, from: party)
+        try stillEndable(d)
         let text = (d.isRequest ? "Request closed (\(v))." : "Delivery \(v).") + (trimmedNote.isEmpty ? "" : " " + trimmedNote)
         var m = DelegationMessage(kind: .note, from: party, to: .child, text: text)
         m.readAt = m.at
