@@ -1774,6 +1774,10 @@ final class DelegationEngine {
     /// isn't put away, and coming back revives it (`revive`).
     private func markGone(_ d: Delegation) {
         let why = Self.goneText(d)
+        // A new absence: its "vanished" grace starts now, not at a date left
+        // from an earlier one (revived, or delivered, by a message before the
+        // roster caught up) — that ended it as deleted on the next tick.
+        vanishedSince[d.id] = nil
         store.mutate(d.id) { $0.goneFrom = $0.status; $0.status = .failed; $0.failure = why }
         BACDebug.log("delegation", "“\(d.title)” failed: \(why) (revived if it comes back)")
         Task { [weak self] in
@@ -1797,6 +1801,7 @@ final class DelegationEngine {
         if d.parentSessionID == Self.boardSessionID, let wants = boardWantsRevival, !wants(d) { return }
         store.mutate(d.id) { $0.status = was; $0.failure = nil; $0.goneFrom = nil }
         missingSince[d.id] = nil
+        vanishedSince[d.id] = nil
         BACDebug.log("delegation", "“\(d.title)”: its session is back — \(was.rawValue) again")
         Task { [weak self] in
             _ = try? await self?.post(d.id, from: .host, kind: .note, text: Self.backText)
