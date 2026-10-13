@@ -883,9 +883,10 @@ struct CodingKanbanView: View {
         for id in items.compactMap(UUID.init(uuidString:)) where id != target {
             guard let t = store.task(id), t.stage == .backlog else { continue }
             let rank = CodingTask.rank(dropping: id, before: target, in: column)
-            // No room left between the two neighbours: respace the column.
+            // No room left between the two neighbours: respace that gap,
+            // with every task the queue sorts on (not just this column).
             let changes = CodingTask.fits(rank, dropping: id, in: column) ? [(id, rank)]
-                : CodingTask.respaced(dropping: id, before: target, in: column)
+                : CodingTask.respaced(dropping: id, before: target, in: column, all: store.tasks)
             for (cid, r) in changes {
                 reorder(cid, r)
                 // The next dragged card goes after this one, in the same spot.
