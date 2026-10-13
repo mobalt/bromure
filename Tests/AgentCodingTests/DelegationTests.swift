@@ -557,6 +557,34 @@ struct DelegationTests {
         return s
     }
 
+    /// Finding (CWE-670): a delegate cancelled during a short outage is put
+    /// away when its session is back — and a request another session had on
+    /// that same child stayed open for ever (nothing may reach an archived
+    /// peer), its parent never told.
+    @Test("a session put away ends the other open delegations on it, their parents told")
+    func archivedChildEndsOpenRequests() async throws {
+        let f = fixture()
+        let (d1, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        let child = try #require(f.sessions.session(childID))
+        f.sessions.remove(childID)                        // a short outage: well under the grace
+        f.engine.tick()
+        try await f.engine.cancel(from: f.parentID, delegationKey: d1.id.uuidString, reason: "not needed")
+        f.sessions.upsert(child)                          // back
+        f.engine.tick()                                   // put away
+        f.engine.tick()
+        #expect(f.sessions.session(childID)?.isArchived == true)
+        let r = try #require(f.store.delegation(req.id))
+        #expect(r.status == .failed && r.failure == "the peer's session was put away")
+        for _ in 0..<50 where !(f.store.delegation(req.id)?.messages.last?.text.contains("put away") ?? false) {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(f.store.delegation(req.id)?.messages.last?.text == "failed — the peer's session was put away")
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()

@@ -1650,6 +1650,15 @@ final class DelegationEngine {
                 continue
             }
             missingSince[d.id] = nil
+            // Put away (archived — by the user, or with another delegation
+            // on it: a cancel in view, a retire when its Mac came back): a
+            // peer nothing may reach any more (post refuses it), so a request
+            // left open waited for ever, its parent never told. Over, then —
+            // unless it already delivered (the parent still closes that).
+            if child.isArchived, d.status != .delivered {
+                fail(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                continue
+            }
             if d.isRequest { continue }
             if d.status == .starting {
                 if child.windowIndex != nil, !child.isLaunching {
