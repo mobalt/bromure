@@ -1053,6 +1053,12 @@ final class DelegationEngine {
         }
         // Files a remote parent already landed here for this message.
         if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+        // Cancelled or closed while the scan or the copy ran: it stays so —
+        // a deliver recorded now made it delivered again.
+        if kind != .note, let now = store.delegation(delegationID),
+           !(now.status.isOpen || (deliversBack && now.goneFrom != nil)) {
+            throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+        }
         store.mutate(delegationID) { d in
             // A child that speaks has read its brief (a request's, typed as a
             // notice) — it mustn't come back out of its inbox as news.

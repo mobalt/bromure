@@ -816,6 +816,26 @@ struct DelegationTests {
         #expect(got.last?.kind == .deliver && got.last?.text == "Merged into main: 3 files.")
         #expect(!landed.messages.contains { $0.text == DelegationEngine.backText })
 
+        // Closed while that deliver was being scanned: the close stands.
+        let d2 = try await f.engine.requestFromBoard(to: hot.id, title: "Again", text: "Again.")
+        f.sessions.remove(hot.id)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        f.sessions.upsert(hot)
+        f.engine.scan = { text in
+            if text == "Late report." {
+                try? await f.engine.close(from: DelegationEngine.boardSessionID, delegationKey: d2.id.uuidString,
+                                          verdict: "accepted", note: "Merged.", by: .user)
+            }
+            return nil
+        }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(d2.id, from: .child, kind: .deliver, text: "Late report.")
+        }
+        #expect(f.store.delegation(d2.id)?.status == .done)
+
         // The board closes a done card's delegation only once its landing
         // grace is over (the report in, or the time up).
         var card = CodingTask(title: "Fix it", profileID: f.profileID, tool: .claude)
