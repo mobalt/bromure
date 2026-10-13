@@ -96,18 +96,31 @@ struct TaskReviewData: Equatable, Sendable {
             setBase = "b=$(git rev-list -1 --before=@\(Int(t.timeIntervalSince1970)) HEAD 2>/dev/null); "
                 + "[ -n \"$b\" ] || b=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         }
+        // No such commit (no commits yet, or the root's parent): against the
+        // empty tree, as `.since` does — not a failed diff.
+        let emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        let fallback: String
+        switch base {
+        case .uncommitted, .lastCommit:
+            fallback = "; git rev-parse -q --verify \"$b^{tree}\" >/dev/null 2>&1 || b=\(emptyTree)"
+        default:
+            fallback = ""
+        }
         let df = RepoGitPrograms.diffFlags
-        // A diff that fails (a filter git can't run safely) says so, and the
-        // untracked files aren't listed after it: shown alone, they read as
-        // the whole change set.
+        // A diff that fails on revisions that exist (a filter git can't run
+        // safely) says so, and the untracked files aren't listed after it:
+        // shown alone, they read as the whole change set. A missing base (a
+        // branch gone) is no such failure: the untracked files still show.
+        let exists = { (rev: String) in "git rev-parse -q --verify \"\(rev)^{tree}\" >/dev/null 2>&1" }
         let failed = "echo '\(TaskReviewData.diffFailedLine)'"
+        let untracked = "git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
+            + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
+            + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done"
         let diff = withWorktree
-            ? "{ if git diff \(df) \"$b\" -- 2>/dev/null; then git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
-                + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
-                + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done; else \(failed); fi; }"
-            : "{ git diff \(df) \"$b\" HEAD -- 2>/dev/null || \(failed); }"
+            ? "{ if git diff \(df) \"$b\" -- 2>/dev/null; then \(untracked); elif \(exists("$b")); then \(failed); else \(untracked); fi; }"
+            : "{ git diff \(df) \"$b\" HEAD -- 2>/dev/null || { \(exists("$b")) && \(exists("HEAD")) && \(failed); }; }"
         // What the repository's config names never runs (RepoGitPrograms).
-        return "\(enter); \(RepoGitPrograms.off("."))\(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
+        return "\(enter); \(RepoGitPrograms.off("."))\(setBase)\(fallback); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
             + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | \(TaskLitter.statusFilter) | head -100; "
             + "echo ===DIFF===; \(diff) | head -c 600000; true"

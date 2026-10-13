@@ -331,6 +331,16 @@ struct RepoGitProgramsTests {
         let partial = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: wt, base: .uncommitted)))
         #expect(partial.diffFailed && partial.files.isEmpty)
         _ = sh("rm \(wt)/untracked.txt; cd \(wt) && git checkout -q plain.txt")
+        // Review: a diff that fails for a missing revision isn't that. No
+        // commits yet: the staged and untracked files show, no failure; the
+        // root commit's "last commit" is its whole content.
+        let fresh = home + "/fresh"
+        _ = sh("mkdir -p \(fresh) && cd \(fresh) && git init -q && echo a > staged.txt && git add staged.txt && echo u > untracked.txt")
+        let unborn = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: fresh, base: .uncommitted)))
+        #expect(!unborn.diffFailed && Set(unborn.files.map(\.path)) == ["staged.txt", "untracked.txt"])
+        _ = sh(iso + "cd \(fresh) && git commit -qm root")
+        let rootCommit = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: fresh, base: .lastCommit)))
+        #expect(!rootCommit.diffFailed && rootCommit.files.map(\.path) == ["staged.txt"])
         #expect(FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: RepoGitPrograms.statusFailedLine + "\0")]))
         #expect(!FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: " M a.txt\0")]))
         // A real edit, status readable again: dirty, the agent commits it.
