@@ -2191,16 +2191,43 @@ enum AutomationDescriber {
     /// host's). Seen from another zone, that zone is named and the time here
     /// follows: "3:00 AM EDT (4:00 PM JST here)". The sidebar showed the next
     /// run in local time and the editor the host's wall time, unlabeled.
+    ///
+    /// The host's weekday doesn't carry over: 6:00 PM EDT is 7:00 AM JST the
+    /// next day, so a weekly run names the day it falls on here ("Sunday
+    /// 6:00 PM EDT (Monday 7:00 AM JST here)") and a weekday one the days
+    /// ("Tue–Sat 7:00 AM JST here").
     static func time(_ a: ScheduledAutomation, timeZone: TimeZone = .current,
                      viewer: TimeZone = .current, now: Date = Date()) -> String {
         var cal = Calendar.current
         cal.timeZone = timeZone
-        let date = cal.date(bySettingHour: a.hour, minute: a.minute, second: 0, of: now) ?? now
+        var date = cal.date(bySettingHour: a.hour, minute: a.minute, second: 0, of: now) ?? now
+        if a.frequency == .weekly {
+            let match = DateComponents(hour: a.hour, minute: a.minute, weekday: min(max(a.weekday, 1), 7))
+            date = cal.nextDate(after: now, matching: match, matchingPolicy: .nextTime) ?? date
+        }
         let there = clock(date, in: timeZone)
         guard differs(timeZone, viewer, at: date) else { return there }
+        var here = clock(date, in: viewer)
+        var local = Calendar.current
+        local.timeZone = viewer
+        let hostDay = cal.component(.weekday, from: date), localDay = local.component(.weekday, from: date)
+        if hostDay != localDay {
+            // How far the run moves on the calendar here: a day either way.
+            let shift = (localDay - hostDay + 7) % 7 == 1 ? 1 : -1
+            func day(_ w: Int) -> Int { (w - 1 + shift + 7) % 7 }   // 0-based symbol index
+            switch a.frequency {
+            case .weekly:
+                here = Calendar.current.weekdaySymbols[day(min(max(a.weekday, 1), 7))] + " " + here
+            case .weekdays:
+                let symbols = Calendar.current.shortWeekdaySymbols
+                here = symbols[day(2)] + "–" + symbols[day(6)] + " " + here   // Monday…Friday there
+            case .daily, .interval:
+                break   // every day there is every day here
+            }
+        }
         return String(format: NSLocalizedString("%1$@ %2$@ (%3$@ %4$@ here)",
                                                 comment: "describer: host time, host zone, local time, local zone"),
-                      there, zoneName(timeZone, at: date), clock(date, in: viewer), zoneName(viewer, at: date))
+                      there, zoneName(timeZone, at: date), here, zoneName(viewer, at: date))
     }
 
     /// A moment (a next run) in the viewer's time, its zone named when the

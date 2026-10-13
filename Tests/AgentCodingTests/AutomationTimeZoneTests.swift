@@ -66,4 +66,37 @@ struct AutomationTimeZoneTests {
         #expect(s.hasSuffix(AutomationDescriber.zoneName(elsewhere, at: Date())))
         #expect(!scheduleSummary(daily(3), timeZone: .current).contains(AutomationDescriber.zoneName(.current, at: Date())))
     }
+
+    /// Finding (CWE-682): the weekly and weekday lines put the host's day in
+    /// front of the viewer's clock — "Every Sunday at 6:00 PM EDT (7:00 AM
+    /// JST here)" runs Monday morning in Tokyo, and a Friday 6:00 PM weekday
+    /// run lands on Saturday there.
+    @Test("a weekly or weekday run that crosses midnight names the days it falls on here")
+    func weekdayCrossesMidnight() {
+        var weekly = daily(18)
+        weekly.frequency = .weekly
+        weekly.weekday = 1                                   // Sunday
+        let symbols = Calendar.current.weekdaySymbols, short = Calendar.current.shortWeekdaySymbols
+        let w = AutomationDescriber.time(weekly, timeZone: eastern, viewer: tokyo, now: now)
+        #expect(w.contains(symbols[1] + " "))                // Monday, here
+        #expect(!w.contains(symbols[0]))                     // never Sunday's clock here
+        var weekdays = daily(18)
+        weekdays.frequency = .weekdays
+        let d = AutomationDescriber.time(weekdays, timeZone: eastern, viewer: tokyo, now: now)
+        #expect(d.contains(short[2] + "–" + short[6] + " "))  // Tue–Sat
+        // Westward: Monday 1:00 AM in Tokyo is Sunday in New York.
+        var early = daily(1)
+        early.frequency = .weekly
+        early.weekday = 2
+        let back = AutomationDescriber.time(early, timeZone: tokyo, viewer: eastern, now: now)
+        #expect(back.contains(symbols[0] + " "))
+        // Same day both sides (3:00 AM EDT = 4:00 PM JST): just the clocks.
+        var same = daily(3)
+        same.frequency = .weekly
+        same.weekday = 3
+        let plain = AutomationDescriber.time(same, timeZone: eastern, viewer: tokyo, now: now)
+        #expect(!symbols.contains { plain.contains($0) })
+        // A daily line never names a day.
+        #expect(!symbols.contains { AutomationDescriber.time(daily(18), timeZone: eastern, viewer: tokyo, now: now).contains($0) })
+    }
 }
