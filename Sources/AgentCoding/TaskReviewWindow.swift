@@ -356,6 +356,10 @@ final class TaskReviewWindowManager {
         let request = pendingConfirm[id] ?? ReviewLandingRequest()
         pendingConfirm[id] = request
         if let confirm { request.mode = confirm; request.generation += 1 }
+        // A card that may yet be found is looked for from the first paint:
+        // the host's stamp (`locatingSince`) reaches a fat client a round
+        // trip later, and until then the window offered one-click Mark Done.
+        if task.awaitsRelocation { request.looking = true }
         host.open(id, title: task.title) {
             ReviewSource(
                 title: { t()?.title ?? "" },
@@ -371,7 +375,7 @@ final class TaskReviewWindowManager {
                     guard let task = t(), let text = task.mergeReport ?? task.deliverySummary else { return nil }
                     return (task.assignment?.label ?? NSLocalizedString("The agent", comment: "review"), text)
                 },
-                noCode: { t()?.isNoCode == true },
+                noCode: { !request.looking && t()?.isNoCode == true },
                 fetch: { [weak self] base, _ in
                     guard let task = t() else { return nil }
                     // A refresh (↻) re-reads the summary banner too.
@@ -384,6 +388,7 @@ final class TaskReviewWindowManager {
                     // counts (the banner also reloads when it gains one later,
                     // e.g. the host's search outlasting a fat client's wait).
                     if task.awaitsRelocation {
+                        await MainActor.run { request.looking = true }
                         if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
                             _ = await c.relocate(task)
                         }
@@ -394,6 +399,7 @@ final class TaskReviewWindowManager {
                         while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 500_000_000)
                         }
+                        await MainActor.run { request.looking = false }
                         if let now = t(), !(now.worktreeDir ?? "").isEmpty {
                             await MainActor.run { self?.reload(id) }
                             return nil
@@ -434,6 +440,10 @@ final class ReviewLandingRequest {
     var generation = 0
     /// Bumped on every diff (re)load — the banner re-reads its summary.
     var reloads = 0
+    /// This window's look for a delivered card's worktree is under way —
+    /// before the host's `locatingSince` reaches it (a fat client's round
+    /// trip): not "no code" yet, and Mark Done asks first.
+    var looking = false
 }
 
 /// Under the review header: where the branch stands, and the ways out —
@@ -470,8 +480,20 @@ struct TaskReviewBanner: View {
 
     private var noCode: Bool {
         guard let t = task() else { return false }
-        if t.isNoCode { return true }
-        return summary?.isNoCode ?? false
+        return Self.offersNoCode(t, looking: request.looking, summaryNoCode: summary?.isNoCode ?? false)
+    }
+
+    /// "No code" — the report and a one-click Mark Done (⌘⏎) — never while
+    /// the window's own look for the worktree is under way.
+    static func offersNoCode(_ t: CodingTask, looking: Bool, summaryNoCode: Bool) -> Bool {
+        guard !looking else { return false }
+        return t.isNoCode || summaryNoCode
+    }
+
+    /// The locating state (spinner, Mark Done that asks first): the host's
+    /// stamp, or this window's look before that stamp has reached it.
+    static func showsLocating(_ t: CodingTask, looking: Bool) -> Bool {
+        t.isLocating || (looking && t.awaitsRelocation)
     }
 
     var body: some View {
@@ -724,7 +746,7 @@ struct TaskReviewBanner: View {
 
     @ViewBuilder private func actions(_ t: CodingTask) -> some View {
         let landing = t.landing != nil && t.landing?.phase != .needsYou
-        if t.isLocating {
+        if Self.showsLocating(t, looking: request.looking) {
             // Still looking for the worktree: nothing to merge yet, and not
             // "no code" either — Mark Done asks first.
             ProgressView().controlSize(.small)

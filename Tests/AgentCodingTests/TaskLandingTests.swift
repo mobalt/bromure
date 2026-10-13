@@ -678,6 +678,28 @@ struct TaskLandingTests {
         #expect(!t.isLocating && !t.isNoCode)
     }
 
+    /// Finding (CWE-670): until the host's `locatingSince` reached the
+    /// window (a fat client's round trip), Review on a delivered card with
+    /// no worktree showed "No code changes" and a one-click Mark Done (⌘⏎):
+    /// a Done card drops the checkout the look then finds.
+    @Test("Review's own look counts as locating before the host's stamp arrives")
+    func windowLookIsLocating() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        #expect(t.awaitsRelocation && !t.isLocating && t.isNoCode)
+        // The window's look under way, no stamp yet: locating, never no-code.
+        #expect(TaskReviewBanner.showsLocating(t, looking: true))
+        #expect(!TaskReviewBanner.offersNoCode(t, looking: true, summaryNoCode: true))
+        // The look settled with no find: no code again.
+        #expect(!TaskReviewBanner.showsLocating(t, looking: false))
+        #expect(TaskReviewBanner.offersNoCode(t, looking: false, summaryNoCode: false))
+        // A card that isn't awaiting relocation isn't "locating" for a stale flag.
+        t.worktreeDir = "/w"
+        #expect(!TaskReviewBanner.showsLocating(t, looking: true))
+    }
+
     /// Finding (CWE-670): a fat client gave up on the host's look after a
     /// fixed 20 s, while the host was still trying sessions one after
     /// another (up to 15 s each) — and never showed the worktree found.
