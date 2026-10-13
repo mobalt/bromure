@@ -749,6 +749,36 @@ struct DelegationTests {
         #expect(f.store.delegation(d4.id)?.failure == "the peer's session was deleted")
     }
 
+    /// Finding (CWE-670): a gone child's message revived its delegation
+    /// before the roster listed it again (a Sidecar restart), but left its
+    /// "vanished" timer running — the next absence started already past the
+    /// grace and ended as "deleted" on its first tick.
+    @Test("a revived delegation's next absence gets the whole vanish grace")
+    func reviveResetsVanishTimer() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        f.engine.vanishGrace = 0.2
+        let (d, childID) = await delegated(f)
+        f.engine.tick()                                    // its host: this Mac (always reachable)
+        f.sessions.remove(childID)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()                                    // gone
+        f.engine.tick()                                    // not listed: the vanish grace starts
+        #expect(f.store.delegation(d.id)?.goneFrom != nil)
+        try? await Task.sleep(nanoseconds: 300_000_000)    // past it — but the child speaks first
+        try await f.engine.post(d.id, from: .child, kind: .report, text: "Still on it.")
+        #expect(f.store.delegation(d.id)?.goneFrom == nil && f.store.delegation(d.id)?.status.isOpen == true)
+        // Still not listed: gone again — a new absence, with its own grace.
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        f.engine.tick()
+        let again = try #require(f.store.delegation(d.id))
+        #expect(again.goneFrom != nil)                     // not ended as deleted at once
+        #expect(again.failure != "the delegate's session was deleted")
+    }
+
     /// Finding (CWE-670): the board's sync skipped a gone delegation, and
     /// its session coming back revived it — "the work carries on" for a card
     /// the user had deleted or finished, the assignee's tools working again.
