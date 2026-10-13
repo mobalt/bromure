@@ -996,20 +996,22 @@ extension CodingTaskEngine {
         // Needs you by an old answer — and once flagged, the polls that
         // follow change nothing.
         let verdict = LandingVerification.parse(out)
-        if verdict == .checkoutUnreadable,
-           Self.flagsUnreadable(observed: observed, now: store.task(task.id)?.landing) {
-            store.mutate(task.id) { $0.landing?.keepBranch = true }
-            needsYou(task.id, Self.statusFailedText)
+        if verdict == .checkoutUnreadable {
+            let effects = Self.unreadableEffects(observed: observed, now: store.task(task.id)?.landing)
+            if effects.keepBranch { store.mutate(task.id) { $0.landing?.keepBranch = true } }
+            if effects.needsYou { needsYou(task.id, Self.statusFailedText) }
         }
         return verdict
     }
 
-    /// Whether an unreadable-checkout look flags the landing: still the one
-    /// looked at (same start, same phase), and not flagged already.
-    nonisolated static func flagsUnreadable(observed: TaskLanding?, now: TaskLanding?) -> Bool {
-        guard let now, let observed, now.startedAt == observed.startedAt, now.phase == observed.phase
-        else { return false }
-        return !(now.phase == .needsYou && now.detail == statusFailedText && now.keepBranch)
+    /// What an unreadable-checkout look does to the landing: only to the
+    /// one looked at (same start). Its checkout is kept; it asks the user —
+    /// unless it moved on during the look, or already waits on the user for
+    /// any reason (this one, or the agent's own question: not replaced).
+    nonisolated static func unreadableEffects(observed: TaskLanding?,
+                                              now: TaskLanding?) -> (keepBranch: Bool, needsYou: Bool) {
+        guard let now, let observed, now.startedAt == observed.startedAt else { return (false, false) }
+        return (!now.keepBranch, now.phase == observed.phase && now.phase != .needsYou)
     }
 
     /// The verify command's word for a checkout whose status can't be read.

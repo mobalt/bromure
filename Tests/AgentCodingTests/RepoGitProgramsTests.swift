@@ -324,22 +324,25 @@ struct RepoGitProgramsTests {
 
     /// Review: the look ran on every watcher poll — an old answer put a
     /// retried landing (checking, or handed to the agent) back on Needs you.
-    @Test("an unreadable checkout flags only the landing it looked at, once")
+    @Test("an unreadable checkout flags only the landing it looked at, once, and never over a question")
     func unreadableFlagsOnlyItsLanding() {
+        typealias E = CodingTaskEngine
         let looked = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
-        #expect(CodingTaskEngine.flagsUnreadable(observed: looked, now: looked))
+        #expect(E.unreadableEffects(observed: looked, now: looked) == (true, true))
         var flagged = looked
         flagged.phase = .needsYou
-        flagged.detail = CodingTaskEngine.statusFailedText
+        flagged.detail = E.statusFailedText
         flagged.keepBranch = true
-        #expect(!CodingTaskEngine.flagsUnreadable(observed: flagged, now: flagged))   // already said
+        #expect(E.unreadableEffects(observed: flagged, now: flagged) == (false, false))   // already said
+        var asked = looked
+        asked.phase = .needsYou
+        asked.detail = "Which branch should this go into?"                               // the agent asks
+        #expect(E.unreadableEffects(observed: asked, now: asked) == (true, false))        // kept, not replaced
         let retried = TaskLanding(mode: .merge, target: "main", phase: .checking,
                                   startedAt: looked.startedAt.addingTimeInterval(30))
-        #expect(!CodingTaskEngine.flagsUnreadable(observed: flagged, now: retried))   // a Retry since
-        var handed = looked
-        handed.phase = .needsYou
-        #expect(!CodingTaskEngine.flagsUnreadable(observed: looked, now: handed))     // moved meanwhile
-        #expect(!CodingTaskEngine.flagsUnreadable(observed: looked, now: nil))
+        #expect(E.unreadableEffects(observed: flagged, now: retried) == (false, false))   // a Retry since
+        #expect(E.unreadableEffects(observed: looked, now: asked) == (true, false))       // moved meanwhile
+        #expect(E.unreadableEffects(observed: looked, now: nil) == (false, false))
     }
 
     /// Finding (CWE-754): the required blank process (above) makes `git
