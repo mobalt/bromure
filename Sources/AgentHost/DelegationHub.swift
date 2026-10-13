@@ -209,9 +209,6 @@ enum DelegationShim {
             return w.hasPrefix("w") ? w : "w-1"
         }()
         signal(SIGPIPE, SIG_IGN)
-        let lock = NSLock()
-        var sock: Int32 = -1
-        var stdinOpen = true
 
         func connectHub() -> Int32 {
             var delay = 0.2
@@ -244,59 +241,9 @@ enum DelegationShim {
         // back. A relay stream that drops — or falls silent past a call's
         // deadline — may have done it or not: those calls get an error
         // reply, never silence (Claude waited for a reply until its own
-        // 30-minute limit, a `wait` well past its timeout).
-        var pending = DelegationShimCalls()
-        var generation = 0
-        var localGenerations: Set<Int> = []
-
-        func current() -> (fd: Int32, gen: Int) {
-            lock.lock(); defer { lock.unlock() }
-            if sock < 0 { sock = connectHub(); generation += 1 }
-            return (sock, generation)
-        }
-
-        // One writer at a time (stdin's lines, the reader's resends), and a
-        // stream is never closed — nor its fd number reused by the next one —
-        // between the "still the current stream?" check and the write.
-        let writeLock = NSLock()
-
-        func drop(_ fd: Int32) {
-            writeLock.lock()
-            lock.lock()
-            if sock == fd { close(fd); sock = -1 }
-            lock.unlock()
-            writeLock.unlock()
-        }
-
-        /// Write `data` on stream `gen`, recording it as in flight there.
-        /// A failed write takes the record back so the caller sends it again
-        /// — unless the reader took it first (the stream's end): then the
-        /// reader owns it (sends it again, or reports it lost), never both.
-        enum Sent { case sent, retry, ownedByReader }
-        func send(_ data: Data, _ fd: Int32, _ gen: Int) -> Sent {
-            writeLock.lock(); defer { writeLock.unlock() }
-            lock.lock()
-            let live = sock == fd && generation == gen
-            if live { pending.sent(data, on: gen) }
-            lock.unlock()
-            guard live else { return .retry }
-            if writeLine(data, fd) { return .sent }
-            lock.lock(); defer { lock.unlock() }
-            guard let key = DelegationShimCalls.requestKey(data) else { return .retry }   // not a call: just again
-            return pending.take(key: key) != nil ? .retry : .ownedByReader
-        }
-
-        func writeLine(_ data: Data, _ fd: Int32) -> Bool {
-            data.withUnsafeBytes { raw -> Bool in
-                var base = raw.baseAddress!, rem = raw.count
-                while rem > 0 {
-                    let w = write(fd, base, rem)
-                    if w <= 0 { return false }
-                    base += w; rem -= w
-                }
-                return true
-            }
-        }
+        // 30-minute limit, a `wait` well past its timeout). Only this
+        // (reader) thread opens and closes streams: see DelegationShimStream.
+        let stream = DelegationShimStream()
 
         let out = NSLock()
         func emit(_ line: Data) {
@@ -308,15 +255,14 @@ enum DelegationShim {
         Thread.detachNewThread {
             while let line = readLine(strippingNewline: false) {
                 let data = Data(line.utf8)
-                while true {
-                    let (fd, gen) = current()
-                    let r = send(data, fd, gen)
-                    if r != .retry { break }
-                    drop(fd)
+                while let (fd, gen) = stream.current() {
+                    // stale: a newer stream took over — write there; failed:
+                    // this one is shut down, the reader reconnects.
+                    let r = stream.send(data, fd, gen)
+                    if r == .sent || r == .ownedByReader { break }
                 }
             }
-            lock.lock(); stdinOpen = false; let fd = sock; lock.unlock()
-            if fd >= 0 { shutdown(fd, SHUT_WR) }
+            stream.inputClosed()
         }
 
         // A relay that falls silent (no EOF: a half-dead link) holds its
@@ -324,60 +270,48 @@ enum DelegationShim {
         Thread.detachNewThread {
             while true {
                 Thread.sleep(forTimeInterval: 2)
-                lock.lock()
-                let overdue = pending.overdue(now: Date()).filter { !localGenerations.contains($0.gen) }
-                let fd = sock, gen = generation
-                // On a stream already gone (it died while held calls were being
-                // sent again): nobody reads it any more — answer them here.
-                // Only those still pending: one the reader settled meanwhile
-                // already has its reply.
-                let orphans = overdue.filter { $0.gen != gen || fd < 0 }.compactMap { pending.take(key: $0.key) }
-                lock.unlock()
+                let (orphans, late) = stream.watchdog()
                 for o in orphans { emit(DelegationShimCalls.lostReply(o)) }
-                guard fd >= 0, let late = overdue.first(where: { $0.gen == gen }) else { continue }
-                AgentHostLog.log("delegation: no reply to \(late.label) within \(Int(late.limit)) s — dropping the relay stream")
-                shutdown(fd, SHUT_RDWR)   // the reader sees EOF: its lost calls get errors
+                if let late {
+                    AgentHostLog.log("delegation: no reply to \(late.label) within \(Int(late.limit)) s — dropping the relay stream")
+                }
             }
         }
 
         // hub → stdout, a line at a time.
         var buf = [UInt8](repeating: 0, count: 65536)
-        var partial = Data()
+        var carry: [DelegationShimCalls.Call] = []   // held by a local stream: to send again
         while true {
-            let (fd, gen) = current()
-            let n = read(fd, &buf, buf.count)
-            if n > 0 {
+            let fd = connectHub()
+            let gen = stream.open(fd)
+            if !carry.isEmpty {
+                AgentHostLog.log("delegation: \(carry.count) held call(s) go to the relay")
+                while let h = carry.first {
+                    let r = stream.send(h.line, fd, gen)
+                    guard r == .sent || r == .ownedByReader else { break }   // this stream's gone too: its EOF follows
+                    carry.removeFirst()
+                }
+            }
+            var partial = Data()
+            while true {
+                let n = read(fd, &buf, buf.count)
+                guard n > 0 else { break }
                 partial.append(contentsOf: buf[0..<n])
                 while let nl = partial.firstIndex(of: 0x0A) {
                     let line = Data(partial[partial.startIndex...nl])
                     partial = Data(partial[(nl + 1)...])
                     if String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
                         == DelegationHub.localMarker {
-                        lock.lock(); localGenerations.insert(gen); lock.unlock()
+                        stream.markLocal(gen)
                         continue
                     }
-                    lock.lock(); pending.answered(line); lock.unlock()
+                    stream.answered(line)
                     emit(line)
                 }
-                continue
             }
-            partial = Data()
-            drop(fd)
-            lock.lock()
-            let wasLocal = localGenerations.contains(gen)
-            let held = pending.take(gen: gen)
-            let open = stdinOpen
-            lock.unlock()
+            let (wasLocal, held, open) = stream.ended(fd, gen)
             if wasLocal {
-                // Never done: again, over whatever the hub hands out now.
-                if !held.isEmpty {
-                    AgentHostLog.log("delegation: \(held.count) held call(s) go to the relay")
-                    var rest = held
-                    while let h = rest.first {
-                        let (nfd, ngen) = current()
-                        if send(h.line, nfd, ngen) != .retry { rest.removeFirst() } else { drop(nfd) }
-                    }
-                }
+                carry += held                     // never done: again, over the next stream
             } else {
                 for h in held { emit(DelegationShimCalls.lostReply(h)) }
                 if !held.isEmpty { AgentHostLog.log("delegation: relay stream lost with \(held.count) call(s) under way") }
