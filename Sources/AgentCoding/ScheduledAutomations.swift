@@ -607,13 +607,38 @@ final class ScheduledAutomationStore {
         if automations != newAutomations { automations = newAutomations }
         if runs != newRuns { runs = newRuns }
         if let newNextFires, nextFires != newNextFires { nextFires = newNextFires }
-        if let newTimeZone, scheduleTimeZone != newTimeZone { scheduleTimeZone = newTimeZone }
+        if let newTimeZone, mirroredTimeZone != newTimeZone { mirroredTimeZone = newTimeZone }
     }
 
     /// The clock the schedules run on: this Mac's, or — mirrored — the
     /// host's. "Every day at 3:00" means 3:00 there; a client elsewhere
-    /// reads it with that zone named, and its local equivalent.
-    var scheduleTimeZone: TimeZone = .current
+    /// reads it with that zone named, and its local equivalent. This Mac's
+    /// is read live: stored at launch, it stayed put when the Mac changed
+    /// zone, and the editor set hours on a clock the engine no longer used.
+    var scheduleTimeZone: TimeZone {
+        _ = systemZoneChanges
+        return mirroredTimeZone ?? .current
+    }
+    /// The host's zone, as its /state names it (fat client). nil: this Mac's.
+    private var mirroredTimeZone: TimeZone?
+    /// Bumped when this Mac changes zone: views showing the schedules' clock
+    /// redraw.
+    private var systemZoneChanges = 0
+
+    /// This Mac changed time zone: drop the system zone Foundation cached,
+    /// and the fires planted on the old clock that are still ahead — the
+    /// engine plants them again on the new one ("9:00" is 9:00 here now).
+    /// One already due stays, to run or be skipped as missed.
+    func systemTimeZoneChanged(now: Date = Date()) {
+        NSTimeZone.resetSystemTimeZone()
+        systemZoneChanges += 1
+        guard mirroredTimeZone == nil else { return }
+        let ahead = automations.filter { $0.trigger == .schedule }.map(\.id.uuidString)
+            .filter { (nextFires[$0] ?? .distantPast) > now }
+        guard !ahead.isEmpty else { return }
+        for k in ahead { nextFires[k] = nil }
+        save()
+    }
 
     /// A calendar on the schedules' clock.
     var scheduleCalendar: Calendar {
@@ -1266,6 +1291,8 @@ final class ScheduledAutomationEngine {
         self.delegate = delegate
     }
 
+    private var zoneObserver: NSObjectProtocol?
+
     /// A launched run's agent reported done (after the quiet settle) — the
     /// repository watches count a scan's findings off this.
     var onRunCompleted: ((AutomationRunRecord) -> Void)?
@@ -1301,6 +1328,15 @@ final class ScheduledAutomationEngine {
         t.tolerance = 5
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        zoneObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                BACDebug.log("automation", "time zone is now \(TimeZone.current.identifier) — replanning")
+                self.store.systemTimeZoneChanged()
+                self.tick()
+            }
+        }
         BACDebug.log("automation", "engine started — \(store.automations.count) automation(s)")
         tick()   // catch up fires missed while the app was quit
     }
@@ -1308,6 +1344,8 @@ final class ScheduledAutomationEngine {
     func stop() {
         timer?.invalidate()
         timer = nil
+        if let zoneObserver { NotificationCenter.default.removeObserver(zoneObserver) }
+        zoneObserver = nil
     }
 
     func tick(now: Date = Date()) {
@@ -1326,7 +1364,7 @@ final class ScheduledAutomationEngine {
     private func scheduleTick(_ a: ScheduledAutomation, now: Date) {
         guard let due = store.nextFire(for: a.id) else {
             // New, edited, or first-seen automation: plant the next fire.
-            let next = AutomationSchedule.nextFire(for: a, after: now)
+            let next = AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar)
             BACDebug.log("automation", "planted next fire for “\(a.name)” at \(next)")
             store.setNextFire(next, for: a.id)
             return
@@ -1343,7 +1381,7 @@ final class ScheduledAutomationEngine {
         } else {
             fire(a, now: now)
         }
-        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now), for: a.id)
+        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar), for: a.id)
     }
 
     private func eventTick(_ a: ScheduledAutomation, now: Date) {

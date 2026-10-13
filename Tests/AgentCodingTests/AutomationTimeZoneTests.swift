@@ -66,4 +66,47 @@ struct AutomationTimeZoneTests {
         #expect(s.hasSuffix(AutomationDescriber.zoneName(elsewhere, at: Date())))
         #expect(!scheduleSummary(daily(3), timeZone: .current).contains(AutomationDescriber.zoneName(.current, at: Date())))
     }
+
+    /// Finding (CWE-670): the host's schedule zone was stored once at launch.
+    /// After the Mac moved zone the editor kept setting hours on the old
+    /// clock, while the engine planted fires on the new one — a "9:00" shown
+    /// as 9:00 Eastern ran at 9:00 London. The zone is read live, the engine
+    /// plants on the editor's calendar, and a zone change replans what's ahead.
+    @Test("this Mac's schedule zone is read live; a zone change replans the fires still ahead")
+    @MainActor func hostZoneFollowsTheMac() {
+        let store = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("tz-\(UUID().uuidString).json"))
+        #expect(store.scheduleTimeZone == TimeZone.current)
+        let ahead = daily(9), due = daily(10)
+        var watch = daily(11)
+        watch.trigger = .githubPullRequest
+        store.upsert(ahead); store.upsert(due); store.upsert(watch)
+        let later = now.addingTimeInterval(3600), earlier = now.addingTimeInterval(-60)
+        store.setNextFire(later, for: ahead.id)
+        store.setNextFire(earlier, for: due.id)
+        store.setNextFire(later, for: watch.id)
+        store.systemTimeZoneChanged(now: now)
+        #expect(store.nextFire(for: ahead.id) == nil)     // replanned on the new clock
+        #expect(store.nextFire(for: due.id) == earlier)   // still due: runs (or is skipped as missed)
+        #expect(store.nextFire(for: watch.id) == later)   // not a clock schedule
+        #expect(store.scheduleTimeZone == TimeZone.current)
+
+        // A mirror keeps the host's zone, and its planned fires.
+        let mirror = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("tz-\(UUID().uuidString).json"))
+        let elsewhere = TimeZone.current.secondsFromGMT() == eastern.secondsFromGMT() ? tokyo : eastern
+        mirror.mirror(automations: [daily(9)], runs: [], nextFires: [:], timeZone: elsewhere)
+        mirror.systemTimeZoneChanged(now: now)
+        #expect(mirror.scheduleTimeZone == elsewhere)
+
+        // The engine plants on the schedules' clock — what the editor previews.
+        let engine = ScheduledAutomationEngine(store: mirror, delegate: nil)
+        let a = daily(9)
+        mirror.mirror(automations: [a], runs: [], nextFires: [:], timeZone: elsewhere)
+        engine.tick(now: now)
+        let planted = mirror.nextFire(for: a.id)
+        #expect(planted == AutomationSchedule.nextFire(for: a, after: now, calendar: mirror.scheduleCalendar))
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = elsewhere
+        #expect(planted.map { cal.component(.hour, from: $0) } == 9)
+    }
 }
