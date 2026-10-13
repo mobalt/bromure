@@ -292,6 +292,36 @@ struct RepoGitProgramsTests {
         #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
     }
 
+    /// Finding (CWE-754): a failed status with a dirty submodule listed
+    /// after it took the "unknown" arm and verified the landing — the
+    /// submodule edit, uncommitted and not in the target, read as merged.
+    @Test("a failed status that also lists work keeps the landing pending")
+    func failedStatusWithDirtySubmoduleIsPending() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgs-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let root = home + "/repo", wt = home + "/wt", subsrc = home + "/subsrc", gcfg = home + "/gitconfig"
+        let iso = "export GIT_CONFIG_GLOBAL=\(gcfg) GIT_CONFIG_NOSYSTEM=1; "
+        let filter = home + "/f.sh", pwn = home + "/pwn.sh"
+        _ = sh("set -e; mkdir -p \(root) \(subsrc); printf '#!/bin/sh\\ncat\\n' > \(filter); "
+               + "printf '#!/bin/sh\\ncat\\n' > \(pwn); chmod +x \(filter) \(pwn); "
+               + "printf '[filter \"lfs\"]\\n\\tclean = \(filter)\\n\\tsmudge = \(filter)\\n[protocol \"file\"]\\n\\tallow = always\\n' > \(gcfg); "
+               + iso + "cd \(subsrc); git init -q -b main; echo s > s.txt; git add .; git commit -qm s; "
+               + "cd \(root); git init -q -b main; echo '*.bin filter=lfs' > .gitattributes; "
+               + "echo b > x.bin; echo a > plain.txt; git add .; git commit -qm a; "
+               + "git worktree add -q -b wt/t \(wt); cd \(wt); git submodule add -q \(subsrc) sub; git commit -qm sub; "
+               + "git config filter.lfs.process \(pwn); git config filter.lfs.required false")
+        _ = sh(iso + "git -C '\(root)' update-ref refs/heads/main wt/t")   // the branch is in the target
+        _ = sh("touch -t 202001010000 \(wt)/x.bin; echo edit >> \(wt)/sub/s.txt")
+        let status = sh(iso + TaskLitter.status("'\(wt)'"))
+        #expect(status.contains(RepoGitPrograms.statusFailedLine) && status.contains("sub"))
+        let out = sh(iso + CodingTaskEngine.landingVerifyCommand(root: root, branch: "wt/t", target: "main", sourceDir: wt))
+        #expect(LandingVerification.parse(out) == .pending)
+        // The submodule clean again: in the target, the checkout unreadable.
+        _ = sh("cd \(wt)/sub && git checkout -q s.txt")
+        let clean = sh(iso + CodingTaskEngine.landingVerifyCommand(root: root, branch: "wt/t", target: "main", sourceDir: wt))
+        #expect(LandingVerification.parse(clean) == .checkoutUnreadable)
+    }
+
     /// Finding (CWE-754): the required blank process (above) makes `git
     /// status` fatal once a path it filters is stat-dirty. The failure line
     /// read as uncommitted work: Land handed a clean checkout to the agent's
@@ -321,12 +351,15 @@ struct RepoGitProgramsTests {
         #expect(check() == .statusFailed)
         // Finding (CWE-754): that status no longer skips the merge check —
         // not in the target: pending (the agent's "merged" isn't taken);
-        // in it: landed, the checkout's state flagged unknown.
+        // in it: never verified — the checkout may hold work the target
+        // doesn't (the user looks; the branch is kept).
         #expect(LandingVerification.parse(verify()) == .pending)
         let mainWas = sh(iso + "git -C '\(root)' rev-parse main").trimmingCharacters(in: .whitespacesAndNewlines)
         _ = sh(iso + "git -C '\(root)' update-ref refs/heads/main wt/t")
         let landedOut = verify()
-        #expect(LandingVerification.parse(landedOut) == .landed && landedOut.contains(CodingTaskEngine.treeUnknownWord))
+        #expect(LandingVerification.parse(landedOut) == .checkoutUnreadable)
+        #expect(LandingReportOutcome.decide(status: "merged", summary: "", prURL: nil,
+                                            verification: .checkoutUnreadable) == .checkoutUnreadable)
         _ = sh(iso + "git -C '\(root)' update-ref refs/heads/main \(mainWas)")
         #expect(sh(iso + "git -C '\(root)' rev-parse main") != sh(iso + "git -C '\(root)' rev-parse wt/t"))
         // The review and the file pane say so — not "no changes".
