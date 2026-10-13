@@ -668,7 +668,7 @@ private struct ScheduledAutomationCard: View {
                             .help(NSLocalizedString("Runs in progress", comment: ""))
                     }
                 }
-                Text(scheduleSummary(automation))
+                Text(scheduleSummary(automation, timeZone: scheduleTimeZone))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

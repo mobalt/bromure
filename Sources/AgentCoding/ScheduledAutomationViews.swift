@@ -235,8 +235,9 @@ struct AutomationsSection: View {
 }
 
 /// "Weekdays 9:00" / "Fri 17:00" / "PR · owner/repo" — the row's one-line
-/// trigger summary.
-func scheduleSummary(_ a: ScheduledAutomation) -> String {
+/// trigger summary. The time is the host's (`timeZone`): named when the
+/// viewer is elsewhere ("Daily 3:00 EDT").
+func scheduleSummary(_ a: ScheduledAutomation, timeZone: TimeZone = .current) -> String {
     switch a.trigger {
     case .githubPullRequest, .githubIssue:
         let kind = a.trigger == .githubIssue ? "Issue" : "PR"
@@ -257,7 +258,10 @@ func scheduleSummary(_ a: ScheduledAutomation) -> String {
     case .schedule:
         break
     }
-    let time = String(format: "%d:%02d", a.hour, a.minute)
+    let now = Date()
+    let zone = AutomationDescriber.differs(timeZone, .current, at: now)
+        ? " " + AutomationDescriber.zoneName(timeZone, at: now) : ""
+    let time = String(format: "%d:%02d", a.hour, a.minute) + zone
     switch a.frequency {
     case .interval:
         let m = max(5, a.intervalMinutes)

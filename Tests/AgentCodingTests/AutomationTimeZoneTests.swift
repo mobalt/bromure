@@ -56,4 +56,14 @@ struct AutomationTimeZoneTests {
         #expect(eastCal.component(.hour, from: next) == 3)
         #expect(tokyoCal.component(.hour, from: next) == 16)
     }
+
+    /// Review: the board card's schedule line ("Daily 3:00") still showed the
+    /// host's hour unlabeled.
+    @Test("the one-line schedule summary names the host's zone when it isn't the viewer's")
+    func summaryNamesZone() {
+        let elsewhere = TimeZone.current.secondsFromGMT() == eastern.secondsFromGMT() ? tokyo : eastern
+        let s = scheduleSummary(daily(3), timeZone: elsewhere)
+        #expect(s.hasSuffix(AutomationDescriber.zoneName(elsewhere, at: Date())))
+        #expect(!scheduleSummary(daily(3), timeZone: .current).contains(AutomationDescriber.zoneName(.current, at: Date())))
+    }
 }
