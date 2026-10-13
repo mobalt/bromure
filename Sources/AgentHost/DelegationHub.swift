@@ -74,9 +74,18 @@ final class DelegationHub: @unchecked Sendable {
         func picked() -> Bool { lock.lock(); defer { lock.unlock() }; return fallbacks.kicked(fd) }
         while Date() < deadline {
             if picked() { return true }
+            // Its shim hung up: out of line, or a park would spend its one
+            // offer on a stream that never reconnects.
+            if Self.peerClosed(fd) { return true }
             Thread.sleep(forTimeInterval: 0.25)
         }
         return picked()
+    }
+
+    /// The other end closed `fd` (EOF waiting, nothing unread before it).
+    static func peerClosed(_ fd: Int32) -> Bool {
+        var b: UInt8 = 0
+        return recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT) == 0
     }
 
     var hadRelay: Bool { lock.lock(); defer { lock.unlock() }; return everParked }
