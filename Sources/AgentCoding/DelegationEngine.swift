@@ -1007,7 +1007,12 @@ final class DelegationEngine {
             revive(d)
             if let fresh = store.delegation(delegationID) { d = fresh }
         }
-        guard d.status.isOpen || kind == .note else {
+        // Still failed for its absence (its session put away as it came
+        // back): its delivery lands all the same — delivered stays open on
+        // an archived session, and the parent closes it.
+        let deliversBack = from == .child && kind == .deliver && d.goneFrom != nil
+            && sessions.session(d.childSessionID)?.isDeleted != true
+        guard d.status.isOpen || kind == .note || deliversBack else {
             throw DelegationRefusal("Delegation “\(d.title)” is \(d.status.rawValue).")
         }
         let to: DelegationMessage.Party
@@ -1048,6 +1053,12 @@ final class DelegationEngine {
         }
         // Files a remote parent already landed here for this message.
         if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+        // Cancelled or closed while the scan or the copy ran: it stays so —
+        // a deliver recorded now made it delivered again.
+        if kind != .note, let now = store.delegation(delegationID),
+           !(now.status.isOpen || (deliversBack && now.goneFrom != nil)) {
+            throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+        }
         store.mutate(delegationID) { d in
             // A child that speaks has read its brief (a request's, typed as a
             // notice) — it mustn't come back out of its inbox as news.
@@ -1060,7 +1071,7 @@ final class DelegationEngine {
             switch kind {
             case .ask: d.status = .waitingForParent
             case .answer, .steer: if d.status == .waitingForParent || d.status == .starting { d.status = .working }
-            case .deliver: d.status = .delivered
+            case .deliver: d.status = .delivered; d.goneFrom = nil; d.failure = nil
             case .cancel: d.status = .cancelled
             case .report: if d.status == .starting { d.status = .working }
             case .brief, .note: break

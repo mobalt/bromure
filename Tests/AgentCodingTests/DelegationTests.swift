@@ -816,6 +816,66 @@ struct DelegationTests {
         #expect(f.store.delegation(d.id)?.goneFrom == nil && f.store.delegation(d.id)?.status.isOpen == true)
     }
 
+    /// Finding (CWE-670): a done card's assignee whose session was away
+    /// (gone, not revived — the card is done) had its landing report refused
+    /// ("is failed"), and the board's sync closed the delegation before the
+    /// report could come: the Done card kept no summary.
+    @Test("a gone board delegation's deliver lands on a done card; sync waits out the landing grace")
+    func doneCardTakesGoneReport() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        let hot = peer(in: f, workspace: f.profileID, nick: "hotfixes", window: 9)
+        var got: [DelegationMessage] = []
+        f.engine.onBoardMessage = { _, m in got.append(m) }
+        f.engine.boardWantsRevival = { _ in false }       // the card is done
+        let d = try await f.engine.requestFromBoard(to: hot.id, title: "Fix it", text: "Fix it.")
+        f.sessions.remove(hot.id)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.goneFrom != nil)
+        f.sessions.upsert(hot)                            // back, not revived
+        f.engine.tick()
+        // Anything else is still refused: it isn't back to work.
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(d.id, from: .child, kind: .report, text: "Still here.")
+        }
+        try await f.engine.post(d.id, from: .child, kind: .deliver, text: "Merged into main: 3 files.")
+        let landed = try #require(f.store.delegation(d.id))
+        #expect(landed.status == .delivered && landed.goneFrom == nil && landed.failure == nil)
+        #expect(got.last?.kind == .deliver && got.last?.text == "Merged into main: 3 files.")
+        #expect(!landed.messages.contains { $0.text == DelegationEngine.backText })
+
+        // Closed while that deliver was being scanned: the close stands.
+        let d2 = try await f.engine.requestFromBoard(to: hot.id, title: "Again", text: "Again.")
+        f.sessions.remove(hot.id)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        f.sessions.upsert(hot)
+        f.engine.scan = { text in
+            if text == "Late report." {
+                try? await f.engine.close(from: DelegationEngine.boardSessionID, delegationKey: d2.id.uuidString,
+                                          verdict: "accepted", note: "Merged.", by: .user)
+            }
+            return nil
+        }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(d2.id, from: .child, kind: .deliver, text: "Late report.")
+        }
+        #expect(f.store.delegation(d2.id)?.status == .done)
+
+        // The board closes a done card's delegation only once its landing
+        // grace is over (the report in, or the time up).
+        var card = CodingTask(title: "Fix it", profileID: f.profileID, tool: .claude)
+        card.stage = .done
+        #expect(!TaskDispatcher.closesNow(card, inLandingGrace: true))
+        #expect(TaskDispatcher.closesNow(card, inLandingGrace: false))
+        card.stage = .testing
+        #expect(!TaskDispatcher.closesNow(card, inLandingGrace: false))
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()
