@@ -17,13 +17,21 @@ struct DelegationShimCalls {
     }
     private(set) var calls: [Call] = []
 
-    /// How long a call may go unanswered on a relay: a blocking tool
-    /// (`wait`, `ask`, `request`: up to 50 s on the server) gets its own
-    /// timeout plus a margin; anything else a generous bound.
+    /// How long a call may go unanswered on a relay. A call that carries
+    /// files copies them between machines (booting the recipient if it's off,
+    /// each copy allowed 30 min), and `delegate` may boot a workspace: those
+    /// get a bound past a boot and a whole copy — cut short, the shim told
+    /// the agent the link dropped while the work still ran, and a retry did
+    /// it twice. A blocking call (`wait`, `ask`, `request`: up to 50 s on the
+    /// server) gets its own timeout plus a margin; anything else 5 minutes.
+    static let transferBound: TimeInterval = 40 * 60
+
     static func limit(method: String, params: [String: Any]?) -> TimeInterval {
         guard method == "tools/call" else { return 60 }
         let name = params?["name"] as? String ?? ""
         let args = params?["arguments"] as? [String: Any]
+        let files = (args?["files"] as? [Any])?.isEmpty == false
+        if files || name == "delegate" { return transferBound }
         if ["wait", "ask", "request"].contains(name) {
             let t = (args?["timeout_seconds"] as? Double) ?? Double(args?["timeout_seconds"] as? Int ?? 50)
             return min(max(t, 0), 50) + 40

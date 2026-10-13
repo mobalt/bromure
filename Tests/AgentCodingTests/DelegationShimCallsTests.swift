@@ -51,6 +51,16 @@ struct DelegationShimCallsTests {
         #expect(Set(c.overdue(now: t0.addingTimeInterval(91)).map(\.key))
                 == [DelegationShimCalls.key(1), DelegationShimCalls.key(2)])
         #expect(c.overdue(now: t0.addingTimeInterval(301)).count == 3)
+        // Review: a call that copies files (or starts a delegate, booting a
+        // workspace) may run past a boot and a 30-minute copy — not cut at
+        // 90 s or 5 min while the work goes on.
+        var long = DelegationShimCalls()
+        long.sent(call(4, "request", ["timeout_seconds": 30, "files": ["~/a.txt"]]), on: 1, now: t0)
+        long.sent(call(5, "delegate"), on: 1, now: t0)
+        long.sent(call(6, "deliver", ["files": ["~/out.tgz"]]), on: 1, now: t0)
+        long.sent(call(7, "request", ["timeout_seconds": 30, "files": []]), on: 1, now: t0)
+        #expect(long.overdue(now: t0.addingTimeInterval(1900)).map(\.key) == [DelegationShimCalls.key(7)])
+        #expect(long.overdue(now: t0.addingTimeInterval(DelegationShimCalls.transferBound + 1)).count == 4)
     }
 
     @Test("a lost call gets an error reply with its own id — a tool result for a tool call")
