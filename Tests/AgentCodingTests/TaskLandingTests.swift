@@ -653,6 +653,45 @@ struct TaskLandingTests {
         #expect(armed.moved(sent))
     }
 
+    /// Finding (CWE-682): "to the bottom" ranked a card a whole second past
+    /// the last one — a card created in that second (ranked by when it was
+    /// created) sorted above it, and could be what its assignee ran next.
+    /// And a gap bisected until its midpoint equals a neighbour is caught.
+    @Test("a card sent to the bottom stays below cards created after the drop; a collapsed gap doesn't fit")
+    func bottomStaysBottom() {
+        let s = store()
+        let now = Date()
+        var last = CodingTask(title: "last", profileID: UUID(), tool: .claude)
+        last.createdAt = now.addingTimeInterval(-0.3)
+        var moved = CodingTask(title: "moved", profileID: UUID(), tool: .claude)
+        moved.createdAt = now.addingTimeInterval(-60)
+        s.upsert(last); s.upsert(moved)
+        let r = CodingTask.rank(dropping: moved.id, before: nil, in: s.backlogTasks(), now: now)
+        s.mutate(moved.id) { $0.queueRank = r }
+        var fresh = CodingTask(title: "fresh", profileID: UUID(), tool: .claude)
+        fresh.createdAt = now.addingTimeInterval(0.5)
+        s.upsert(fresh)
+        #expect(s.backlogTasks().map(\.title) == ["last", "moved", "fresh"])
+        // Bisecting one gap: once the midpoint lands on a neighbour, it no
+        // longer fits (the drag then respaces instead of saving it).
+        func ranked(_ title: String, _ rank: Double) -> CodingTask {
+            var t = CodingTask(title: title, profileID: UUID(), tool: .claude)
+            t.queueRank = rank
+            return t
+        }
+        let a = ranked("a", 1_760_000_000)
+        var b = ranked("b", 1_760_000_001)
+        let m = CodingTask(title: "m", profileID: UUID(), tool: .claude)
+        var exhausted = false
+        for _ in 0..<64 {
+            let col = [a, b, m].sorted(by: CodingTask.backlogOrder)
+            let mid = CodingTask.rank(dropping: m.id, before: b.id, in: col)
+            if !CodingTask.fits(mid, dropping: m.id, in: col) { exhausted = true; break }
+            b.queueRank = mid    // the next drop lands in the shrinking gap
+        }
+        #expect(exhausted)
+    }
+
     /// Finding (CWE-670): while Review looked for a delivered card's
     /// worktree, the card read as "no code" — the window said there was no
     /// diff and offered Mark Done in one click (⌘⏎), which closed the card
