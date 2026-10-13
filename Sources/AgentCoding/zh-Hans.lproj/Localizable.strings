@@ -4185,7 +4185,6 @@
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "在此检出中，没有仓库自带的过滤程序（Bromure 不会运行它）Git 就会失败。请在终端中查看。";
 
-<<<<<<< HEAD
 /* fat client title bar: requests on their way */
 "Sending %d…" = "正在发送 %d 项…";
 
@@ -4200,7 +4199,7 @@
 
 /* automation editor: time zone */
 "%@ (the host's time)" = "%@（主机时间）";
-=======
+
 /* automation editor */
 "Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "每次运行都从这里开始，在新分支上：请选择工作区中该触发器所监视仓库的克隆。";
 
@@ -4209,4 +4208,3 @@
 
 /* automation editor */
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此窗口无法读取工作区的 GitHub 令牌——请以 所有者/仓库 的形式输入仓库。";
->>>>>>> wt/more-automation-woes-261013-0125
