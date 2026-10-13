@@ -37,10 +37,8 @@ struct QuickTaskReturnTests {
             .frame(width: 800, height: 700, alignment: .top))
         p.makeKeyAndOrderFront(nil)
         spin(0.5)
-        print("first responder:", String(describing: p.firstResponder))
         for c in "fix it" { key(p, String(c), code: 0) }
         key(p, "\r", code: 36)
-        print("added:", added)
         #expect(added.map(\.0) == ["fix it"])
         p.orderOut(nil)
     }
@@ -72,9 +70,16 @@ struct QuickTaskReturnTests {
         key(p, "\t", code: 48)
         spin(0.3)
         for c in "c" { key(p, String(c), code: 0) }
+        // An input method still composing: its ↩ is the IME's, not an add.
+        let editor = p.firstResponder as? NSTextView
+        editor?.setMarkedText("か", selectedRange: NSRange(location: 1, length: 0),
+                              replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(QuickTaskView.composing(in: p))
+        editor?.unmarkText()
+        #expect(!QuickTaskView.composing(in: p))
         key(p, "\r", code: 36)
         #expect(added.map(\.0) == ["one", "two"])
-        #expect(added.map(\.1) == ["a\nb", "c"])
+        #expect(added.map(\.1) == ["a\nb", "cか"])
         #expect(added.map(\.2) == [true, false])
         p.orderOut(nil)
     }
