@@ -280,6 +280,7 @@ public actor ConsentBroker {
         guard let waiters = pending.removeValue(forKey: key) else { return }
         if let token = promptTokens.removeValue(forKey: key) {
             superseded.insert(token)
+            RemoteConsent.withdraw(token: token)   // a terminal prompt
             Task { @MainActor in ConsentPanelPresenter.shared.withdraw(token: token) }
         }
         for w in waiters { w.resume(returning: allow) }

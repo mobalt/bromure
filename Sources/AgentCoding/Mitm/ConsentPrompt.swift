@@ -67,7 +67,8 @@ enum ConsentPrompt {
             let idx = await Task.detached {
                 RemoteConsent.choose(profileID: profileID, title: title, message: body,
                                      choices: choices,
-                                     timeoutSeconds: max(1, deadline.timeIntervalSinceNow))
+                                     timeoutSeconds: max(1, deadline.timeIntervalSinceNow),
+                                     token: token)
             }.value
             return idx == denyIndex ? nil : idx
         case .localAlert:
