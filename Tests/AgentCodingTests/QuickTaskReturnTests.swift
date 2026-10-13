@@ -122,4 +122,30 @@ struct QuickTaskReturnTests {
         #expect(added.first?.1 == .newAgent)
         p.orderOut(nil)
     }
+
+    /// Finding (CWE-670): ↩ in Details filed the task under the old chip
+    /// while the @ list was open — and ⌘↩ in the title still did: neither
+    /// picked the highlighted row, the "@" left in the title.
+    @Test("⌘↩ in the title with the @ list open picks first, like ↩")
+    func commandReturnInTitlePicksSuggestion() {
+        _ = NSApplication.shared
+        var added: [(String, TaskAssignment?, Bool)] = []
+        let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
+                                 folder: "~", workspaceName: "W", initialAssignment: nil,
+                                 onAdd: { t, _, a, k in added.append((t, a, k)) }, onClose: {})
+        let p = Panel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                      styleMask: [.borderless, .fullSizeContentView], backing: .buffered, defer: false)
+        p.contentView = NSHostingView(rootView: view.padding(.top, 16)
+            .frame(width: 800, height: 700, alignment: .top))
+        p.makeKeyAndOrderFront(nil)
+        spin(0.5)
+        for c in "one @" { key(p, String(c), code: 0) }
+        key(p, "\r", code: 36, mods: .command)
+        #expect(added.isEmpty)
+        key(p, "\r", code: 36, mods: .command)
+        #expect(added.map(\.0) == ["one"])
+        #expect(added.first?.1 == .newAgent)
+        #expect(added.first?.2 == true)
+        p.orderOut(nil)
+    }
 }

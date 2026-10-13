@@ -374,6 +374,17 @@ struct QuickTaskView: View {
 
     // MARK: Actions
 
+    /// Every ↩ that files (title, Details, with or without ⌘): the @/#
+    /// list still open picks its highlighted row first, as the row says —
+    /// only the next ↩ adds, under the assignee just picked.
+    private func pickOrSubmit(keepOpen: Bool) {
+        if let s = suggestions.first {
+            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
+        } else {
+            submit(keepOpen: keepOpen)
+        }
+    }
+
     private func submit(keepOpen: Bool) {
         guard !trimmed.isEmpty else { return }
         onAdd(trimmed, details.trimmingCharacters(in: .whitespacesAndNewlines), assignment, keepOpen)
@@ -444,16 +455,10 @@ struct QuickTaskView: View {
                     .font(.system(size: 21, weight: .medium))
                     .focused($focus, equals: .title)
                     .onChange(of: title) { highlighted = 0 }
-                    .onSubmit {
-                        if let s = suggestions.first {
-                            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
-                        } else {
-                            submit(keepOpen: false)
-                        }
-                    }
+                    .onSubmit { pickOrSubmit(keepOpen: false) }
                     .onKeyPress(keys: [.return]) { press in
                         guard press.modifiers.contains(.command) else { return .ignored }
-                        submit(keepOpen: true)
+                        pickOrSubmit(keepOpen: true)
                         return .handled
                     }
                     .onKeyPress(.tab) { tab(fromDetails: false) }
@@ -507,12 +512,7 @@ struct QuickTaskView: View {
                         guard press.modifiers.isDisjoint(with: [.option, .shift]),
                               !Self.composing(in: NSApp.currentEvent?.window ?? NSApp.keyWindow)
                         else { return .ignored }
-                        // The title's @/# list still open: ↩ picks, as it says.
-                        if let s = suggestions.first {
-                            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
-                        } else {
-                            submit(keepOpen: press.modifiers.contains(.command))
-                        }
+                        pickOrSubmit(keepOpen: press.modifiers.contains(.command))
                         return .handled
                     }
                     .onKeyPress(.tab) { tab(fromDetails: true) }
