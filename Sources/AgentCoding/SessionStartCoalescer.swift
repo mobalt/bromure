@@ -49,18 +49,22 @@ final class SessionStartCoalescer: @unchecked Sendable {
     static func key(_ req: AgentSessionRequest) -> String {
         key(profile: req.profileID.uuidString, tool: req.tool.rawValue, cwd: req.cwd, cloneURL: req.cloneURL,
             message: req.openingMessage, instructions: req.instructions, room: req.roomID?.uuidString,
-            attachments: req.attachments.map { attachment(name: $0.name, bytes: $0.data.count) })
+            attachments: req.attachments.map { a in
+                // A dropped folder (no bytes yet): which folder, not "0 bytes".
+                a.folder.map { "\(a.name):folder:\($0.standardizedFileURL.path)" }
+                    ?? attachment(name: a.name, bytes: a.data.count)
+            })
     }
 
-    /// A start on an attached machine from this host's window, keyed on what
-    /// it sends (no instructions, no folders) — as the hub keys a client's
-    /// same start from its body, so the two share one slot.
+    /// A start on an attached machine from this host's window: keyed on what
+    /// the user chose — its instructions and every drop, folders included —
+    /// as the hub keys a client's from its body. Leaving them out (they
+    /// aren't all in the body sent) let a Start with another preset, or with
+    /// a folder, open the session started without it.
     static func machineKey(_ req: AgentSessionRequest, machine: UUID, room: UUID?) -> String {
         var keyed = req
         keyed.profileID = machine
         keyed.roomID = room
-        keyed.instructions = nil
-        keyed.attachments = req.attachments.filter { $0.folder == nil }
         return key(keyed)
     }
 
