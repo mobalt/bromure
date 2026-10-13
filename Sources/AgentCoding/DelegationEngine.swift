@@ -1694,10 +1694,10 @@ final class DelegationEngine {
             vanishedSince[d.id] = nil
             if child.isDeleted {
                 endGone(d, deleted)
-            } else if retiring.contains(child.id) {
+            } else if retiring.contains(child.id) || Self.putAwayForGood(child) {
                 // Put away this very tick for another of its delegations (on
                 // an attached Mac the archive is only queued, the mirror still
-                // shows it live): not back to work.
+                // shows it live), or landed, its checkout gone: not back to work.
                 endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
             } else if !child.isArchived {
                 revive(d)
@@ -1725,6 +1725,12 @@ final class DelegationEngine {
             missingSince[d.id] = nil
             if d.childHost == nil, let host = Self.childHost(of: child.id, sessions) {
                 store.mutate(d.id) { $0.childHost = host }
+            }
+            // Landed — archived with its checkout removed — can't be
+            // resumed: nothing it was asked will be done.
+            if Self.putAwayForGood(child), d.status != .delivered {
+                fail(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                continue
             }
             // Archived: paused, not over — Bromure's own put-away already
             // ended what it had to (`endOthers`); the user's archive, Undo
@@ -1817,6 +1823,12 @@ final class DelegationEngine {
         Task { [weak self] in
             _ = try? await self?.post(d.id, from: .host, kind: .note, text: Self.backText)
         }
+    }
+
+    /// Archived with no folder to resume in (a landed branch session, its
+    /// checkout removed): unlike the user's archive, there's no way back.
+    nonisolated static func putAwayForGood(_ s: AgentSession) -> Bool {
+        s.isArchived && s.folderMissing == true
     }
 
     nonisolated static let backText = "the session is back — the work carries on"

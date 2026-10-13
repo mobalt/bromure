@@ -620,6 +620,40 @@ struct DelegationTests {
         #expect(f.store.delegation(req.id)?.status.isOpen == true)
     }
 
+    /// Review: a landed branch session is archived with its checkout
+    /// removed — no message brings it back, so a pause would be for ever.
+    @Test("a session landed and put away for good, its folder gone, ends what's open on it")
+    func landedSessionEndsDelegations() async throws {
+        let f = fixture()
+        let (d, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        f.sessions.mutate(childID) { $0.folderMissing = true }
+        f.sessions.setArchived(childID, true)
+        f.engine.tick()
+        #expect(f.store.delegation(req.id)?.status == .failed)
+        #expect(f.store.delegation(req.id)?.failure == "the peer's session was put away")
+        #expect(f.store.delegation(d.id)?.failure == "the delegate's session was put away")
+        // Gone first, then back landed: over too, not waiting.
+        let (d2, child2) = await delegated(f, childWindow: 8)
+        f.engine.absenceGrace = 0
+        f.engine.tick()
+        let row = try #require(f.sessions.session(child2))
+        f.sessions.remove(child2)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        var landed = row
+        landed.folderMissing = true
+        landed.archivedAt = Date()
+        f.sessions.upsert(landed)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom == nil && f.store.delegation(d2.id)?.status == .failed)
+    }
+
     @Test("a delegate cancelled in view is put away, and that ends the requests others had on it")
     func cancelInViewEndsOthers() async throws {
         let f = fixture()
