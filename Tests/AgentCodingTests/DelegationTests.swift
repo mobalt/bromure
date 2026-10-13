@@ -709,6 +709,47 @@ struct DelegationTests {
         #expect(f.store.delegation(req2.id)?.verdict == "rejected")
     }
 
+    /// Review: a deliver awaits its scan (and any file copy); a cancel or a
+    /// close landing meanwhile was undone — the deliver then set delivered.
+    @Test("a cancel or close that lands while a deliver is being scanned sticks")
+    func endedDuringDeliverSticks() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        let asker = peer(in: f, workspace: f.profileID, nick: "asker", window: 12, title: "Asker")
+        let row = peer(in: f, workspace: f.profileID, nick: "answerer", window: 13, title: "Answerer")
+        // Open: cancelled during the scan.
+        let req = try await f.engine.request(from: asker.id, to: "@answerer", text: "Look at this?")
+        f.engine.scan = { text in
+            if text == "Late answer." {
+                try? await f.engine.cancel(from: asker.id, delegationKey: req.id.uuidString, reason: "moot")
+            }
+            return nil
+        }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(req.id, from: .child, kind: .deliver, text: "Late answer.")
+        }
+        #expect(f.store.delegation(req.id)?.status == .cancelled)
+        // Gone (its session away), the deliver on its way back: closed meanwhile.
+        let req2 = try await f.engine.request(from: asker.id, to: "@answerer", text: "And this?")
+        f.sessions.remove(row.id)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(req2.id)?.goneFrom == .working)
+        var archived = row; archived.archivedAt = Date()
+        f.sessions.upsert(archived)
+        f.engine.scan = { text in
+            if text == "Back with it." {
+                try? await f.engine.close(from: asker.id, delegationKey: req2.id.uuidString, verdict: "rejected", note: nil)
+            }
+            return nil
+        }
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(req2.id, from: .child, kind: .deliver, text: "Back with it.")
+        }
+        #expect(f.store.delegation(req2.id)?.status == .done && f.store.delegation(req2.id)?.verdict == "rejected")
+    }
+
     /// Finding (CWE-94): a request's close note (and a cancel's reason) is
     /// typed into the peer's prompt, but skipped the injection scan every
     /// other parent message goes through — what a steer would withhold got
