@@ -638,6 +638,21 @@ final class TaskDispatcher {
 
     // MARK: Housekeeping
 
+    /// Whether a board delegation's session coming back should pick the work
+    /// up again: its card still there and not done.
+    func wantsRevival(_ d: Delegation) -> Bool {
+        Self.wantsRevival(d, tasks: delegate?.codingTaskStore.tasks ?? [])
+    }
+
+    nonisolated static func wantsRevival(_ d: Delegation, tasks: [CodingTask]) -> Bool {
+        guard let task = tasks.first(where: { $0.delegationID == d.id }) else { return false }
+        return task.stage != .done
+    }
+
+    /// The board delegations `sync` settles: open ones, and gone ones (their
+    /// machine away) — the cancel or close is on the record when it's back.
+    nonisolated static func syncs(_ d: Delegation) -> Bool { d.status.isOpen || d.goneFrom != nil }
+
     /// Close the requests of tasks that are over, and cancel the ones whose
     /// card is gone — the assignee hears either way.
     func sync() {
@@ -645,7 +660,9 @@ final class TaskDispatcher {
         pump()
         let engine = delegate.delegationEngine
         let tasks = delegate.codingTaskStore.tasks
-        for d in engine.store.delegations(parent: DelegationEngine.boardSessionID) where d.status.isOpen {
+        // A gone one too (its machine away): left alone, a deleted or finished
+        // card's delegation came back to life with its session.
+        for d in engine.store.delegations(parent: DelegationEngine.boardSessionID) where Self.syncs(d) {
             guard let task = tasks.first(where: { $0.delegationID == d.id }) else {
                 Task { try? await engine.cancel(from: DelegationEngine.boardSessionID,
                                                 delegationKey: d.id.uuidString,

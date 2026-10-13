@@ -749,6 +749,43 @@ struct DelegationTests {
         #expect(f.store.delegation(d4.id)?.failure == "the peer's session was deleted")
     }
 
+    /// Finding (CWE-670): the board's sync skipped a gone delegation, and
+    /// its session coming back revived it — "the work carries on" for a card
+    /// the user had deleted or finished, the assignee's tools working again.
+    @Test("a gone board delegation whose card is deleted or done isn't revived; sync settles it")
+    func boardGoneNotRevivedForFinishedCard() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        let hot = peer(in: f, workspace: f.profileID, nick: "hotfixes", window: 9)
+        f.engine.onBoardMessage = { _, _ in }
+        let d = try await f.engine.requestFromBoard(to: hot.id, title: "Fix it", text: "Fix it.")
+        f.sessions.remove(hot.id)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        let gone = try #require(f.store.delegation(d.id))
+        #expect(gone.goneFrom != nil && gone.status == .failed)
+        #expect(TaskDispatcher.syncs(gone))
+        // The card: deleted (none points at it), or done.
+        var card = CodingTask(title: "Fix it", profileID: f.profileID, tool: .claude)
+        card.delegationID = d.id
+        #expect(!TaskDispatcher.wantsRevival(gone, tasks: []))
+        card.stage = .done
+        #expect(!TaskDispatcher.wantsRevival(gone, tasks: [card]))
+        f.engine.boardWantsRevival = { _ in false }
+        f.sessions.upsert(hot)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(f.store.delegation(d.id)?.goneFrom != nil)
+        #expect(!(f.store.delegation(d.id)?.messages.contains { $0.text == DelegationEngine.backText } ?? true))
+        // Still on the board and not done: back to work.
+        card.stage = .testing
+        #expect(TaskDispatcher.wantsRevival(gone, tasks: [card]))
+        f.engine.boardWantsRevival = { _ in true }
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.goneFrom == nil && f.store.delegation(d.id)?.status.isOpen == true)
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()
