@@ -725,6 +725,54 @@ struct TaskLandingTests {
         #expect(exhausted)
     }
 
+    /// Finding (CWE-682): the bottom rank is a millisecond past now, but
+    /// tasks.json and the /state snapshot write `createdAt` in whole
+    /// seconds — after a relaunch (or on a fat client) a task created later
+    /// that second came back above the card just sent to the bottom.
+    @Test("a card sent to the bottom stays below a task created later that second, saved and loaded")
+    func bottomSurvivesReload() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tasks-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let s = CodingTaskStore(fileURL: url)
+        let n = Date().timeIntervalSince1970.rounded(.down) - 10
+        let drop = Date(timeIntervalSince1970: n + 0.4)
+        var moved = CodingTask(title: "moved", profileID: UUID(), tool: .claude)
+        moved.createdAt = drop.addingTimeInterval(-60)
+        s.upsert(moved)
+        let r = CodingTask.rank(dropping: moved.id, before: nil, in: s.backlogTasks(), now: drop)
+        s.mutate(moved.id) { $0.queueRank = r }
+        var fresh = CodingTask(title: "fresh", profileID: UUID(), tool: .claude)
+        fresh.createdAt = Date(timeIntervalSince1970: n + 0.9)
+        s.upsert(fresh)
+        #expect(s.backlogTasks().map(\.title) == ["moved", "fresh"])
+
+        // Relaunch: read back from tasks.json.
+        #expect(CodingTaskStore(fileURL: url).backlogTasks().map(\.title) == ["moved", "fresh"])
+
+        // The fat client: the /state snapshot's encoding, decoded as
+        // applyTasks does.
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let mirrored = try s.tasks.map { t -> CodingTask in
+            let dict = try #require(ACAppDelegate.codableToDict(t))
+            return try dec.decode(CodingTask.self, from: JSONSerialization.data(withJSONObject: dict))
+        }
+        #expect(mirrored.filter { $0.stage == .backlog }.sorted(by: CodingTask.backlogOrder)
+            .map(\.title) == ["moved", "fresh"])
+
+        // An older build's file (no exact time) loads as before; a date set
+        // without it keeps its own second.
+        var legacy = fresh
+        legacy.createdAtExact = nil
+        #expect(legacy.createdTime == n + 0.9)
+        let old = try dec.decode(CodingTask.self, from: JSONSerialization.data(withJSONObject:
+            try #require(ACAppDelegate.codableToDict(legacy))))
+        #expect(old.createdTime == n)
+        var moved2 = fresh
+        moved2.createdAtExact = n + 0.9 - 5
+        #expect(moved2.createdTime == moved2.createdAt.timeIntervalSince1970)
+    }
+
     /// Finding (CWE-670): while Review looked for a delivered card's
     /// worktree, the card read as "no code" — the window said there was no
     /// diff and offered Mark Done in one click (⌘⏎), which closed the card
