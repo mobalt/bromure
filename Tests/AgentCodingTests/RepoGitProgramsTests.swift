@@ -17,9 +17,13 @@ struct RepoGitProgramsTests {
         env["GIT_COMMITTER_NAME"] = "t"; env["GIT_COMMITTER_EMAIL"] = "t@t"
         if let home { env["HOME"] = home }
         p.environment = env
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        try? p.run(); p.waitUntilExit()
-        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        try? p.run()
+        // Read before waiting: an output past the pipe's buffer would block
+        // the command, and the wait, for good.
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
     }
 
     @Test("the review, the session list and the changes probe run no fsmonitor, diff program or filter")
@@ -290,6 +294,31 @@ struct RepoGitProgramsTests {
             _ = sh("cd \(root)/\(q) && git checkout -q f")
         }
         #expect(!FileManager.default.fileExists(atPath: root + "/PWN"))
+    }
+
+    /// Finding (CWE-754): the review's diff is capped at 600 KB, and its
+    /// failure marker came after the diff: a diff that failed past the cap
+    /// (an unreadable blob, after 1.3 MB of output) lost the marker, and its
+    /// first 600 KB read as the whole change set.
+    @Test("a diff that fails past the 600 KB cap still says so; a big clean one doesn't")
+    func failedDiffPastTheCap() throws {
+        let repo = FileManager.default.temporaryDirectory.appendingPathComponent("rgd-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: repo) }
+        // 30 files, ~45 KB of diff each: about 1.3 MB in all.
+        _ = sh("set -e; mkdir -p \(repo); cd \(repo); git init -q -b main; "
+               + "for i in $(seq -w 1 30); do seq 1 6000 | sed \"s/^/v1 $i line /\" > f$i.txt; done; "
+               + "git add .; git -c user.name=t -c user.email=t@t commit -qm a; "
+               + "for i in $(seq -w 1 30); do sed -i.bak 's/^v1/v2/' f$i.txt; rm f$i.txt.bak; done; "
+               + "git add .; git -c user.name=t -c user.email=t@t commit -qm b")
+        let command = TaskReviewData.sessionCommand(dir: repo, base: .lastCommit)
+        let big = TaskReviewData.parse(sh(command))
+        #expect(!big.diffFailed && !big.files.isEmpty)   // large, not failed
+        // The last file's new blob is gone: git fails after writing the rest.
+        let blob = sh("cd \(repo) && git rev-parse HEAD:f30.txt").trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = sh("rm -f \(repo)/.git/objects/\(blob.prefix(2))/\(blob.dropFirst(2))")
+        let failed = TaskReviewData.parse(sh(command))
+        #expect(failed.diffFailed)
+        #expect(failed.files.isEmpty)                    // the part before the failure isn't the change set
     }
 
     /// Finding (CWE-754): the required blank process (above) makes `git
