@@ -26,6 +26,10 @@ final class DelegationShimStream: @unchecked Sendable {
     private let writeLock = NSLock()
     private var sock: Int32 = -1
     private var generation = 0
+    /// The generation the reader is on, until its `ended` (0: between
+    /// streams). Its calls are its own to settle — a reply may already sit in
+    /// its buffer, even after the stream was shut down.
+    private var readerGen = 0
     private var pending = DelegationShimCalls()
     private var localGenerations: Set<Int> = []
     private var inputOpen = true
@@ -55,6 +59,7 @@ final class DelegationShimStream: @unchecked Sendable {
         cond.lock(); defer { cond.unlock() }
         sock = fd
         generation += 1
+        readerGen = generation
         if !inputOpen { shutdown(fd, SHUT_WR) }
         cond.broadcast()
         return generation
@@ -77,6 +82,7 @@ final class DelegationShimStream: @unchecked Sendable {
         writeLock.lock(); defer { writeLock.unlock() }
         cond.lock()
         if sock == fd, generation == gen { sock = -1 }
+        if readerGen == gen { readerGen = 0 }
         let wasLocal = localGenerations.remove(gen) != nil
         let held = pending.take(gen: gen)
         let open = inputOpen
@@ -136,15 +142,17 @@ final class DelegationShimStream: @unchecked Sendable {
 
     // MARK: Watchdog
 
-    /// Calls past their deadline: on a stream no longer current, answered
-    /// here (`orphans`); on the current one, that stream is shut down (its
-    /// reader answers them) — checked and done under one lock, so it's never
-    /// a stream that replaced the one it looked at.
+    /// Calls past their deadline: on the stream the reader is on, that
+    /// stream is shut down (once — the reader answers them at its EOF, after
+    /// any reply it already read); on one the reader has left, answered here
+    /// (`orphans`). Checked and done under one lock, so it's never a stream
+    /// that replaced the one it looked at.
     func watchdog(now: Date = Date()) -> (orphans: [DelegationShimCalls.Call], late: DelegationShimCalls.Call?) {
         cond.lock(); defer { cond.unlock() }
         let overdue = pending.overdue(now: now).filter { !localGenerations.contains($0.gen) }
-        let orphans = overdue.filter { $0.gen != generation || sock < 0 }.compactMap { pending.take(key: $0.key) }
-        let late = sock >= 0 ? overdue.first(where: { $0.gen == generation }) : nil
+        let orphans = overdue.filter { $0.gen != readerGen }.compactMap { pending.take(key: $0.key) }
+        let live = sock >= 0 && generation == readerGen
+        let late = live ? overdue.first(where: { $0.gen == readerGen }) : nil
         if late != nil { abandonLocked(sock, generation) }
         return (orphans, late)
     }

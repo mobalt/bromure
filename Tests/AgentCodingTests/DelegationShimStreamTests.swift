@@ -120,6 +120,26 @@ struct DelegationShimStreamTests {
         _ = s.ended(a, genA)
     }
 
+    @Test("after shutting a late stream down, the watchdog leaves its calls to the reader")
+    func watchdogLeavesShutStreamToReader() {
+        signal(SIGPIPE, SIG_IGN)
+        let s = DelegationShimStream()
+        let (a, hubA) = pair()
+        defer { close(hubA) }
+        let gen = s.open(a)
+        #expect(s.send(call(1, "list_peers"), a, gen) == .sent)
+        let later = Date().addingTimeInterval(400)
+        let first = s.watchdog(now: later)
+        #expect(first.late?.key == DelegationShimCalls.key(1))
+        #expect(first.orphans.isEmpty)
+        // The reader hasn't reached EOF yet — its reply may be in its buffer.
+        let second = s.watchdog(now: later.addingTimeInterval(2))
+        #expect(second.orphans.isEmpty && second.late == nil)
+        s.answered(Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8))
+        let (_, held, _) = s.ended(a, gen)
+        #expect(held.isEmpty)                      // one reply, the real one
+    }
+
     @Test("stdin closing half-closes the current stream and the next one")
     func inputClosedHalfCloses() {
         signal(SIGPIPE, SIG_IGN)
