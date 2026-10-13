@@ -796,6 +796,12 @@ final class RemoteHostController {
                             } else {
                                 self.peerFailStreak = 0
                                 FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
+                                // Everything closing the window drops (what
+                                // reconnecting by hand did and this didn't):
+                                // the pooled SSH connections over the old path
+                                // too, half-open ones included — the next dial
+                                // starts clean.
+                                SSHDialer.shared.closeHost(host.id)
                                 P2PBroker.shared.closePeer(pid)
                             }
                         }

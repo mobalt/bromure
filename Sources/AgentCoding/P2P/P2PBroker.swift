@@ -602,6 +602,12 @@ final class P2PBroker: @unchecked Sendable {
 
     // MARK: Dialer role
 
+    /// A failed establish that heard nothing from the peer suspects our
+    /// signaling socket; one that got frames (the path failed) doesn't.
+    static func recyclesChannel(after stage: ConnectionReport.FailureStage) -> Bool {
+        stage == .signaling
+    }
+
     struct ResolvedEndpoint {
         let host: String       // always "127.0.0.1"
         let port: Int
@@ -805,6 +811,7 @@ final class P2PBroker: @unchecked Sendable {
             try await session.send(.offer, payload: P2PSignalPayload(note: "connect"), via: ch)
         } catch {
             FatClientLog.log("p2p: offer send failed: \(error)")
+            ch.recycle()
             await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .signaling))
             return nil
         }
@@ -906,6 +913,11 @@ final class P2PBroker: @unchecked Sendable {
             let stage: ConnectionReport.FailureStage = session.gotPeerFrame ? .ice : .signaling
             FatClientLog.log("p2p: no viable path to \(peerDeviceID.prefix(8)) "
                 + "(\(tried.count) candidates tried)")
+            // Not one frame back from the peer: our offer likely went out on a
+            // signaling socket that's dead but still reads open (a half-open
+            // TCP after a dropout). Every later attempt would vanish the same
+            // way, so open a fresh one for the next.
+            if Self.recyclesChannel(after: stage) { ch.recycle() }
             await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: stage))
             return nil
         }
