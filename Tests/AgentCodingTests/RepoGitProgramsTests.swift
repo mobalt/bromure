@@ -322,6 +322,26 @@ struct RepoGitProgramsTests {
         #expect(LandingVerification.parse(clean) == .checkoutUnreadable)
     }
 
+    /// Review: the look ran on every watcher poll — an old answer put a
+    /// retried landing (checking, or handed to the agent) back on Needs you.
+    @Test("an unreadable checkout flags only the landing it looked at, once")
+    func unreadableFlagsOnlyItsLanding() {
+        let looked = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+        #expect(CodingTaskEngine.flagsUnreadable(observed: looked, now: looked))
+        var flagged = looked
+        flagged.phase = .needsYou
+        flagged.detail = CodingTaskEngine.statusFailedText
+        flagged.keepBranch = true
+        #expect(!CodingTaskEngine.flagsUnreadable(observed: flagged, now: flagged))   // already said
+        let retried = TaskLanding(mode: .merge, target: "main", phase: .checking,
+                                  startedAt: looked.startedAt.addingTimeInterval(30))
+        #expect(!CodingTaskEngine.flagsUnreadable(observed: flagged, now: retried))   // a Retry since
+        var handed = looked
+        handed.phase = .needsYou
+        #expect(!CodingTaskEngine.flagsUnreadable(observed: looked, now: handed))     // moved meanwhile
+        #expect(!CodingTaskEngine.flagsUnreadable(observed: looked, now: nil))
+    }
+
     /// Finding (CWE-754): the required blank process (above) makes `git
     /// status` fatal once a path it filters is stat-dirty. The failure line
     /// read as uncommitted work: Land handed a clean checkout to the agent's

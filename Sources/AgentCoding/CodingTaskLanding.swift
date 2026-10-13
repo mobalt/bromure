@@ -643,11 +643,19 @@ extension CodingTaskEngine {
             guard let t = store.task(id), t.stage == .testing,
                   t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou,
                   t.landing?.batchLead == leadID else { continue }
-            let seen = await landingVerified(t)
+            let verdict = await landingVerification(t)
+            let seen: Bool? = switch verdict {
+            case .landed: true
+            case .pending, .remoteUnreachable, .checkoutUnreadable: false
+            case .unknown: nil
+            }
             // The look awaited: still this batch's card, still waiting? (A
             // Retry meanwhile replaced its landing — not this report's.)
             guard let now = store.task(id), now.stage == .testing, now.landing?.batchLead == leadID,
                   now.landing?.phase == .agentLanding || now.landing?.phase == .needsYou else { continue }
+            // In the target, its checkout unreadable: the look said why
+            // (statusFailedText) — not "isn't in the target".
+            if verdict == .checkoutUnreadable { continue }
             if seen == true {
                 finishLanding(id, verified: true, by: nil)
             } else if seen == nil, reportedMerged, t.delegationID != nil {
@@ -972,6 +980,7 @@ extension CodingTaskEngine {
     func landingVerification(_ task: CodingTask) async -> LandingVerification {
         guard let delegate, let branch = task.branch, let root = task.rootRepo,
               let target = task.landingTarget, !target.isEmpty else { return .unknown }
+        let observed = store.task(task.id)?.landing
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.landingVerifyCommand(root: root, branch: branch, target: target,
@@ -982,12 +991,25 @@ extension CodingTaskEngine {
         // hold work the target doesn't. The branch and checkout are kept
         // (the cleanup's force-remove would take that work with it), and
         // the user looks, as when the fast path can't read it.
+        // Only on the landing this look was for: a Retry meanwhile (a new
+        // landing, checking or handed to the agent) isn't sent back to
+        // Needs you by an old answer — and once flagged, the polls that
+        // follow change nothing.
         let verdict = LandingVerification.parse(out)
-        if verdict == .checkoutUnreadable {
+        if verdict == .checkoutUnreadable,
+           Self.flagsUnreadable(observed: observed, now: store.task(task.id)?.landing) {
             store.mutate(task.id) { $0.landing?.keepBranch = true }
             needsYou(task.id, Self.statusFailedText)
         }
         return verdict
+    }
+
+    /// Whether an unreadable-checkout look flags the landing: still the one
+    /// looked at (same start, same phase), and not flagged already.
+    nonisolated static func flagsUnreadable(observed: TaskLanding?, now: TaskLanding?) -> Bool {
+        guard let now, let observed, now.startedAt == observed.startedAt, now.phase == observed.phase
+        else { return false }
+        return !(now.phase == .needsYou && now.detail == statusFailedText && now.keepBranch)
     }
 
     /// The verify command's word for a checkout whose status can't be read.
