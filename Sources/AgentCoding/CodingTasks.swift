@@ -47,7 +47,14 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// diff that was seen.
     var reviewViewed: [String: String]?
 
-    var createdAt: Date
+    var createdAt: Date { didSet { createdAtExact = createdAt.timeIntervalSince1970 } }
+    /// `createdAt` to the fraction of a second. tasks.json and the /state
+    /// snapshot write it as an ISO-8601 string in whole seconds — and stay
+    /// so: a build on macOS 14 / iOS 17 rejects a fraction there, and would
+    /// drop every task. The Backlog ranks on creation time, and a card sent
+    /// to the bottom sits a millisecond past now: truncated, a task created
+    /// later that second reloaded above it. nil: saved before this existed.
+    var createdAtExact: Double?
     /// When the task last changed (the store stamps it). nil: not since
     /// it was created.
     var updatedAt: Date?
@@ -202,6 +209,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.rootRepo = rootRepo
         self.comments = comments
         self.createdAt = createdAt
+        self.createdAtExact = createdAt.timeIntervalSince1970
         self.startedAt = startedAt
         self.testingAt = testingAt
         self.completedAt = completedAt
@@ -285,14 +293,23 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     }
 
     /// Its place in the Backlog and in its assignee's queue: top runs first.
-    var backlogRank: Double { queueRank ?? createdAt.timeIntervalSince1970 }
+    var backlogRank: Double { queueRank ?? createdTime }
+
+    /// When it was created, with the fraction `createdAt` loses on disk and
+    /// over the wire — unless `createdAt` was since set elsewhere (an older
+    /// build doesn't keep `createdAtExact` in step).
+    var createdTime: Double {
+        let whole = createdAt.timeIntervalSince1970
+        guard let exact = createdAtExact, abs(exact - whole) < 1 else { return whole }
+        return exact
+    }
 
     /// Backlog order: by rank, oldest first among equals, then by id — a
     /// total order, so cards created the same second don't swap places
     /// between redraws (Swift's sort isn't stable).
     static func backlogOrder(_ a: CodingTask, _ b: CodingTask) -> Bool {
         if a.backlogRank != b.backlogRank { return a.backlogRank < b.backlogRank }
-        if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+        if a.createdTime != b.createdTime { return a.createdTime < b.createdTime }
         return a.id.uuidString < b.id.uuidString
     }
 
