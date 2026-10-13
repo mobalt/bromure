@@ -149,11 +149,26 @@ struct SessionStartCoalescerTests {
         let m = UUID()
         let file = DroppedFile(name: "a.txt", data: Data("hello".utf8), isImage: false)
         var req = AgentSessionRequest(profileID: UUID(), tool: .claude, cwd: "~")
-        req.openingMessage = "go"; req.instructions = "not sent"; req.attachments = [file]
+        req.openingMessage = "go"; req.instructions = "be terse"; req.attachments = [file]
         let hub = SessionStartCoalescer.key(profile: m.uuidString, tool: "claude", cwd: "~", cloneURL: nil,
-                                            message: "go", instructions: nil, room: nil,
+                                            message: "go", instructions: "be terse", room: nil,
                                             attachments: [SessionStartCoalescer.attachment(wire: file.wireDictionary)])
         #expect(SessionStartCoalescer.machineKey(req, machine: m, room: nil) == hub)
+        // Finding (CWE-670): another preset, or a folder dropped too, is
+        // another start — never the first one's session.
+        var otherPreset = req; otherPreset.instructions = "be thorough"
+        #expect(SessionStartCoalescer.machineKey(otherPreset, machine: m, room: nil) != hub)
+        var noPreset = req; noPreset.instructions = nil
+        #expect(SessionStartCoalescer.machineKey(noPreset, machine: m, room: nil) != hub)
+        var withFolder = req
+        withFolder.attachments.append(DroppedFile(name: "src", data: Data(), isImage: false,
+                                                  folder: URL(fileURLWithPath: "/tmp/src")))
+        #expect(SessionStartCoalescer.machineKey(withFolder, machine: m, room: nil) != hub)
+        var otherFolder = req
+        otherFolder.attachments.append(DroppedFile(name: "src", data: Data(), isImage: false,
+                                                   folder: URL(fileURLWithPath: "/tmp/other/src")))
+        #expect(SessionStartCoalescer.machineKey(otherFolder, machine: m, room: nil)
+                != SessionStartCoalescer.machineKey(withFolder, machine: m, room: nil))
         // Past the window: a deliberate new one.
         #expect(token(c.claim(key(), now: now + 11)) != nil)
     }
