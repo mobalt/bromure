@@ -314,20 +314,37 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return (others[i - 1].backlogRank + after) / 2
     }
 
-    /// New ranks for the whole column, one apart, with `moving` just above
-    /// `target` (nil: at the bottom) — when there's no room left between two
-    /// neighbours (cards created the same second, or many drags into one
-    /// gap): the midpoint would equal one of them and the card would snap
-    /// back. Only the cards whose rank changes.
-    static func respaced(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask]) -> [(UUID, Double)] {
-        guard let card = ordered.first(where: { $0.id == moving }) else { return [] }
-        var order = ordered.filter { $0.id != moving }
-        let at = target.flatMap { t in order.firstIndex { $0.id == t } } ?? order.count
-        order.insert(card, at: at)
-        let base = (ordered.map(\.backlogRank).min() ?? 0).rounded(.down)
-        return order.enumerated().compactMap { i, t in
-            let r = base + Double(i)
-            return t.backlogRank == r ? nil : (t.id, r)
+    /// New ranks when there's no room left between `target` and the card
+    /// above it (cards created the same second, or many drags into one gap):
+    /// the midpoint would equal one of them and the card would snap back.
+    /// Only that gap is respaced: every task (`all` — not just the column on
+    /// show: a hidden brief, a card in progress keep ranks the queue sorts
+    /// on) ranked between those two neighbours, in its order, with `moving`
+    /// just above `target`, spread over the open interval to the nearest
+    /// ranks outside — so nobody else changes place. Renumbering the visible
+    /// column from its minimum jumped the tasks it didn't show. Only the
+    /// ranks that change.
+    static func respaced(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                         all: [CodingTask]) -> [(UUID, Double)] {
+        let others = ordered.filter { $0.id != moving }
+        guard let card = ordered.first(where: { $0.id == moving }) ?? all.first(where: { $0.id == moving })
+        else { return [] }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }), i > 0 else {
+            return [(moving, rank(dropping: moving, before: target, in: ordered))]
+        }
+        let lowRank = others[i - 1].backlogRank, highRank = others[i].backlogRank
+        let (x, y) = (min(lowRank, highRank), max(lowRank, highRank))
+        let rest = all.filter { $0.id != moving }
+        var cluster = rest.filter { $0.backlogRank >= x && $0.backlogRank <= y }.sorted(by: backlogOrder)
+        let at = cluster.firstIndex { $0.id == target } ?? cluster.count
+        cluster.insert(card, at: at)
+        let lo = rest.map(\.backlogRank).filter { $0 < x }.max() ?? (x - 1)
+        let hi = rest.map(\.backlogRank).filter { $0 > y }.min() ?? (y + 1)
+        let step = (hi - lo) / Double(cluster.count + 1)
+        return cluster.enumerated().compactMap { n, t in
+            let r = lo + step * Double(n + 1)
+            if t.id != moving, let old = rest.first(where: { $0.id == t.id }), old.backlogRank == r { return nil }
+            return (t.id, r)
         }
     }
 

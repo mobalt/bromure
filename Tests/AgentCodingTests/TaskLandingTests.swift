@@ -492,10 +492,43 @@ struct TaskLandingTests {
         let moving = column[2].id, target = column[1].id
         let r = CodingTask.rank(dropping: moving, before: target, in: column)
         #expect(!CodingTask.fits(r, dropping: moving, in: column))
-        for (id, rank) in CodingTask.respaced(dropping: moving, before: target, in: column) {
+        for (id, rank) in CodingTask.respaced(dropping: moving, before: target, in: column, all: s2.tasks) {
             s2.mutate(id) { $0.queueRank = rank }
         }
         #expect(s2.backlogTasks().map(\.id) == [column[0].id, moving, column[1].id])
+    }
+
+    /// Finding (CWE-670): a tight-gap respace renumbered the visible column
+    /// from floor(min) and left every other ranked task where it was — a
+    /// card in progress (back to the Backlog on Stop) or a hidden brief that
+    /// sat between two cards jumped to the end of the queue, or ahead of it.
+    @Test("a respace renumbers only the exhausted gap, every other task keeping its place")
+    func respaceIsLocal() {
+        func card(_ title: String, _ rank: Double, stage: CodingTask.Stage = .backlog) -> CodingTask {
+            var t = CodingTask(title: title, profileID: UUID(), tool: .claude)
+            t.queueRank = rank
+            t.stage = stage
+            return t
+        }
+        let a = card("A", 1000), c = card("C", 2000)
+        let running = card("running", 1500, stage: .inProgress)          // between A and C, off the column
+        let d = card("D", 3000), e = card("E", 3000), f = card("F", 4000)
+        let hidden = card("hidden brief", 3000)                           // same rank as D and E, not shown
+        let column = [a, c, d, e, f].sorted(by: CodingTask.backlogOrder)
+        let all = column + [running, hidden]
+        // F dropped onto E: D and E share a rank — no midpoint.
+        let mid = CodingTask.rank(dropping: f.id, before: e.id, in: column)
+        #expect(!CodingTask.fits(mid, dropping: f.id, in: column))
+        let changes = Dictionary(uniqueKeysWithValues: CodingTask.respaced(dropping: f.id, before: e.id,
+                                                                           in: column, all: all))
+        func rank(_ t: CodingTask) -> Double { changes[t.id] ?? t.backlogRank }
+        // Nothing outside the gap moved; the running card still sits between A and C.
+        #expect(changes[a.id] == nil && changes[c.id] == nil && changes[running.id] == nil)
+        #expect(rank(a) < rank(running) && rank(running) < rank(c))
+        // Inside: F just above E, the tasks there in their order, all above C.
+        #expect(rank(c) < rank(d) && rank(d) < rank(f) && rank(f) < rank(e))
+        let gap = [d, hidden, e, f].map(rank)
+        #expect(Set(gap).count == 4 && gap.allSatisfy { $0 > rank(c) })
     }
 
     /// Finding (CWE-670): a delegated batch's landing steer that failed
