@@ -133,6 +133,47 @@ struct HostAgentKeysTests {
         #expect(Self.roundTrip(fd, signOther)?.first == 5)
     }
 
+    /// Finding (CWE-285): "Require approval" turned on for a running
+    /// session was read only at launch — the host-agent key kept signing and
+    /// a Guardrails "Deny for the rest of the session" (badge and all) was
+    /// never asked, until a cold boot.
+    @Test("A live edit gates a host-agent key at once, and a Guardrails deny then stops its signatures")
+    func liveApprovalGate() async throws {
+        let fx = try Fixture()
+        let broker = ConsentBroker()
+        let server = SSHAgentServer(consent: broker)
+        let profile = UUID()
+        let key = ImportedSSHKey(label: "yubikey", filename: "", publicKeyText: fx.picked,
+                                 hostAgentSocket: fx.socket)
+        var old = Profile(name: "w", tool: .claude, authMode: .token)
+        old.importedSSHKeys = [key]
+        var new = old
+        new.importedSSHKeys[0].requireApproval = true
+        server.setHostAgentKeys(ACAppDelegate.hostAgentKeys(old), for: profile)
+        server.setImportedKeyApprovals(ACAppDelegate.importedKeyApprovals(old), for: profile)
+        await broker.deny(profileID: profile, credentialID: ConsentCredentialID.sshKey(key.id.uuidString),
+                          for: nil, credentialDisplayName: "yubikey")
+        let fd = Self.connect(server, profileID: profile)
+        defer { close(fd) }
+        let sign = Data([13]) + Self.string(Self.blob(fx.picked))
+            + Self.string(Data("challenge".utf8)) + Data([0, 0, 0, 0])
+        #expect(Self.roundTrip(fd, sign)?.first == 14)   // ungated at launch: the deny isn't asked
+        // The live refresh's rebuild: gated now, and the deny holds.
+        server.setImportedKeyApprovals(ACAppDelegate.liveImportedKeyApprovals(from: old, to: new), for: profile)
+        #expect(Self.roundTrip(fd, sign)?.first == 5)
+
+        // A gated key taken off the list stays loaded until the restart:
+        // it stays gated, never let through ungated.
+        var removed = new
+        removed.importedSSHKeys = []
+        #expect(ACAppDelegate.liveImportedKeyApprovals(from: new, to: removed)[Self.blob(fx.picked)] != nil)
+        #expect(ACAppDelegate.hostAgentKeys(removed).isEmpty)
+        // Turned off on purpose: ungated.
+        var off = new
+        off.importedSSHKeys[0].requireApproval = false
+        #expect(ACAppDelegate.liveImportedKeyApprovals(from: new, to: off).isEmpty)
+    }
+
     @Test("Another workspace gets none of the picked keys")
     func otherWorkspaceIsolated() throws {
         let fx = try Fixture()

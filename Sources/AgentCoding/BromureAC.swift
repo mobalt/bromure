@@ -11029,6 +11029,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if old.sshKeyRequiresApproval != new.sshKeyRequiresApproval, let engine = mitmEngine {
             engine.sshAgent.setKeys(loadAgentKeys(for: new), for: new.id)
         }
+        // The imported and host-agent keys' gates too: "Require approval"
+        // turned on was only read at launch — the key kept signing, and a
+        // Guardrails deny (badge and all) was never asked, until a cold boot.
+        if old.importedSSHKeys != new.importedSSHKeys, let engine = mitmEngine {
+            engine.sshAgent.setImportedKeyApprovals(Self.liveImportedKeyApprovals(from: old, to: new), for: new.id)
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(new), for: new.id)
+        }
 
         // Transparent (IP-stack) interception on/off is a live L3/L4 flip of
         // the VM's switch port — no reboot, and BEFORE the guard so it applies
@@ -11835,26 +11842,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // process), so the broker is consulted just before that
             // forward. Keys without `publicKeyText` (no .pub on import)
             // can't be matched by blob and will sign without a prompt.
-            var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
-            for k in profile.importedSSHKeys where k.requireApproval {
-                guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
-                else { continue }
-                approvals[blob] = SSHAgentServer.ImportedApproval(
-                    label: k.label,
-                    consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
-            }
-            engine.sshAgent.setImportedKeyApprovals(approvals, for: profile.id)
+            engine.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
             // Keys picked out of a host agent (YubiKey & co.): the allow-
             // list of blobs the VM may see and sign with through that
             // agent. Nothing else it holds is reachable.
-            var hostAgentKeys: [Data: String] = [:]
-            for k in profile.importedSSHKeys {
-                guard let socket = k.hostAgentSocket,
-                      let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
-                else { continue }
-                hostAgentKeys[blob] = socket
-            }
-            engine.sshAgent.setHostAgentKeys(hostAgentKeys, for: profile.id)
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
         } else {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
@@ -15586,7 +15578,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Returns nil for empty / malformed input — callers that can't
     /// resolve a blob skip the consent gate (better than refusing to
     /// sign for keys we can't identify).
+    /// The imported keys whose signing asks first (`requireApproval`), by
+    /// public-key blob. Keys without a public key can't be matched by blob
+    /// and sign without a prompt.
+    nonisolated static func importedKeyApprovals(_ profile: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
+        for k in profile.importedSSHKeys where k.requireApproval {
+            guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            approvals[blob] = SSHAgentServer.ImportedApproval(
+                label: k.label, consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
+        }
+        return approvals
+    }
+
+    /// A running session's gates after a live edit: the saved profile's —
+    /// plus a gated key taken off the list, which stays loaded in the agent
+    /// until the restart: still gated, never let through ungated.
+    nonisolated static func liveImportedKeyApprovals(from old: Profile, to new: Profile)
+        -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals = importedKeyApprovals(new)
+        let kept = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+        for (blob, a) in importedKeyApprovals(old) where !kept.contains(blob) { approvals[blob] = a }
+        return approvals
+    }
+
+    /// Host-agent keys (YubiKey & co.) the VM may see and sign with: blob → socket.
+    nonisolated static func hostAgentKeys(_ profile: Profile) -> [Data: String] {
+        var keys: [Data: String] = [:]
+        for k in profile.importedSSHKeys {
+            guard let socket = k.hostAgentSocket,
+                  let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            keys[blob] = socket
+        }
+        return keys
+    }
+
     private func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
+        Self.sshPublicKeyBlob(fromOpenSSHText: text)
+    }
+
+    nonisolated static func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
         let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
             .first?
             .trimmingCharacters(in: .whitespaces) ?? ""
