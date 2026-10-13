@@ -60,7 +60,8 @@ struct DelegationShimCallsTests {
         long.sent(call(6, "deliver", ["files": ["~/out.tgz"]]), on: 1, now: t0)
         long.sent(call(7, "request", ["timeout_seconds": 30, "files": []]), on: 1, now: t0)
         #expect(long.overdue(now: t0.addingTimeInterval(1900)).map(\.key) == [DelegationShimCalls.key(7)])
-        #expect(long.overdue(now: t0.addingTimeInterval(DelegationShimCalls.transferBound + 1)).count == 4)
+        // No bound fits a copy (folders, many files, a tunnel): never timed out.
+        #expect(long.overdue(now: t0.addingTimeInterval(7 * 24 * 3600)).map(\.key) == [DelegationShimCalls.key(7)])
     }
 
     @Test("a lost call gets an error reply with its own id — a tool result for a tool call")
