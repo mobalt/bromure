@@ -60,6 +60,10 @@ enum LandingVerification: Equatable, Sendable {
     /// credentials, a dead URL): whether it's pushed is unknown, whatever
     /// the local merge says.
     case remoteUnreachable
+    /// In the target, but the task's checkout can't be read (`git status`
+    /// fails): whether it holds work the target doesn't is unknown — never
+    /// verified, the user looks.
+    case checkoutUnreadable
     /// The machine couldn't be asked.
     case unknown
 
@@ -67,7 +71,9 @@ enum LandingVerification: Equatable, Sendable {
     static func parse(_ out: String?) -> LandingVerification {
         guard let out else { return .unknown }
         if out.contains("NOREMOTE") { return .remoteUnreachable }
-        if out.contains("LANDED") { return .landed }
+        if out.contains("LANDED") {
+            return out.contains(CodingTaskEngine.treeUnknownWord) ? .checkoutUnreadable : .landed
+        }
         if out.contains("PENDING") { return .pending }
         return .unknown
     }
@@ -85,6 +91,9 @@ enum LandingReportOutcome: Equatable, Sendable {
     /// be checked — the user looks (the branch is kept), never Done on
     /// the agent's word.
     case remoteUnchecked
+    /// In the target, its checkout unreadable: the user looks (the branch
+    /// and checkout are kept).
+    case checkoutUnreadable
     case prOpened(String?)
     case blocked(String)
     case invalid(String)
@@ -105,6 +114,7 @@ enum LandingReportOutcome: Equatable, Sendable {
             case .landed: return .finishVerified
             case .pending: return .notYet
             case .remoteUnreachable: return .remoteUnchecked
+            case .checkoutUnreadable: return .checkoutUnreadable
             case .unknown: return .finishUnverified
             }
         case "pr_opened":
@@ -287,7 +297,11 @@ extension CodingTaskEngine {
                 // checkout's state is unknown, but whether the branch is in
                 // the target isn't — still looked at, never "unknown" (an
                 // agent's "merged" then went Done unchecked).
-                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo \(Self.treeUnknownWord); "
+                // Anything else listed with it (a dirty submodule, printed
+                // after the failure) is uncommitted work: pending.
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then "
+                + "if printf '%s\\n' \"$s\" | grep -vqxF '\(RepoGitPrograms.statusFailedLine)'; then echo PENDING; exit 0; fi; "
+                + "echo \(Self.treeUnknownWord); "
                 + "elif [ -n \"$s\" ]; then echo PENDING; exit 0; fi; fi; "
         }
         func inRef(_ t: String) -> String {
@@ -629,11 +643,19 @@ extension CodingTaskEngine {
             guard let t = store.task(id), t.stage == .testing,
                   t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou,
                   t.landing?.batchLead == leadID else { continue }
-            let seen = await landingVerified(t)
+            let verdict = await landingVerification(t)
+            let seen: Bool? = switch verdict {
+            case .landed: true
+            case .pending, .remoteUnreachable, .checkoutUnreadable: false
+            case .unknown: nil
+            }
             // The look awaited: still this batch's card, still waiting? (A
             // Retry meanwhile replaced its landing — not this report's.)
             guard let now = store.task(id), now.stage == .testing, now.landing?.batchLead == leadID,
                   now.landing?.phase == .agentLanding || now.landing?.phase == .needsYou else { continue }
+            // In the target, its checkout unreadable: the look said why
+            // (statusFailedText) — not "isn't in the target".
+            if verdict == .checkoutUnreadable { continue }
             if seen == true {
                 finishLanding(id, verified: true, by: nil)
             } else if seen == nil, reportedMerged, t.delegationID != nil {
@@ -948,7 +970,7 @@ extension CodingTaskEngine {
     func landingVerified(_ task: CodingTask) async -> Bool? {
         switch await landingVerification(task) {
         case .landed: return true
-        case .pending, .remoteUnreachable: return false
+        case .pending, .remoteUnreachable, .checkoutUnreadable: return false
         case .unknown: return nil
         }
     }
@@ -958,19 +980,38 @@ extension CodingTaskEngine {
     func landingVerification(_ task: CodingTask) async -> LandingVerification {
         guard let delegate, let branch = task.branch, let root = task.rootRepo,
               let target = task.landingTarget, !target.isEmpty else { return .unknown }
+        let observed = store.task(task.id)?.landing
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.landingVerifyCommand(root: root, branch: branch, target: target,
                                                sourceDir: task.worktreeDir,
                                                remote: task.landing.flatMap { $0.pushes ? $0.remote : nil }),
             timeout: 30)
-        // Landed, its checkout unreadable: the branch and checkout are kept —
-        // the cleanup's force-remove would take uncommitted work with it.
+        // In the target, its checkout unreadable: never verified — it may
+        // hold work the target doesn't. The branch and checkout are kept
+        // (the cleanup's force-remove would take that work with it), and
+        // the user looks, as when the fast path can't read it.
+        // Only on the landing this look was for: a Retry meanwhile (a new
+        // landing, checking or handed to the agent) isn't sent back to
+        // Needs you by an old answer — and once flagged, the polls that
+        // follow change nothing.
         let verdict = LandingVerification.parse(out)
-        if verdict == .landed, let out, out.contains(Self.treeUnknownWord) {
-            store.mutate(task.id) { $0.landing?.keepBranch = true }
+        if verdict == .checkoutUnreadable {
+            let effects = Self.unreadableEffects(observed: observed, now: store.task(task.id)?.landing)
+            if effects.keepBranch { store.mutate(task.id) { $0.landing?.keepBranch = true } }
+            if effects.needsYou { needsYou(task.id, Self.statusFailedText) }
         }
         return verdict
+    }
+
+    /// What an unreadable-checkout look does to the landing: only to the
+    /// one looked at (same start). Its checkout is kept; it asks the user —
+    /// unless it moved on during the look, or already waits on the user for
+    /// any reason (this one, or the agent's own question: not replaced).
+    nonisolated static func unreadableEffects(observed: TaskLanding?,
+                                              now: TaskLanding?) -> (keepBranch: Bool, needsYou: Bool) {
+        guard let now, let observed, now.startedAt == observed.startedAt else { return (false, false) }
+        return (!now.keepBranch, now.phase == observed.phase && now.phase != .needsYou)
     }
 
     /// The verify command's word for a checkout whose status can't be read.
@@ -1314,6 +1355,8 @@ extension CodingTaskEngine {
                 "Couldn't reach %@ to check the push — the branch is kept. Check it's pushed, then mark it done or retry.",
                 comment: "task landing: the remote couldn't be fetched to verify a push"), remote))
             return (true, "Recorded, but Bromure couldn't fetch '\(remote)' to check the push — the user will look. Stop here.")
+        case .checkoutUnreadable:
+            return (true, "Recorded, but git can't read the task's checkout, so Bromure can't tell whether it's all in '\(l.target)' — the user will look. Stop here.")
         case .notYet:
             return (false, "'\(fresh.branch ?? "")' isn't in '\(l.target)' yet (or its checkout still has uncommitted changes) — finish landing it, then report again.")
         case .prOpened(let url):
