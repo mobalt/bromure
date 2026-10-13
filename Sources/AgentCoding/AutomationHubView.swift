@@ -2861,9 +2861,14 @@ struct WatchEditorSheet: View {
         repoError = nil
         tokenRejected = false
         guard workspace?.hasGitHubToken == true else { return }
+        // Another workspace picked meanwhile (the task cancelled): its late
+        // reply — or its 401, which disabled Save — isn't this one's.
         do {
-            repoChoices = try await fetchRepos(draft.profileID)
+            let repos = try await fetchRepos(draft.profileID)
+            guard !Task.isCancelled else { return }
+            repoChoices = repos
         } catch {
+            guard !Task.isCancelled else { return }
             let ns = error as NSError
             if ns.domain == "GitHubPoller", ns.code == 401 {
                 tokenRejected = true
