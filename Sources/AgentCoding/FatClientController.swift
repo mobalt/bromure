@@ -56,6 +56,19 @@ final class RemoteHostController {
     /// without the link having gone quiet long enough to call it down): a
     /// calm indicator, content stays live.
     private(set) var linkSlow = false
+    /// What the user sent that the host hasn't answered yet (an action, a
+    /// typed prompt, a new session), since when — the window's "Sending…"
+    /// cue. On a slow link (a train, a tunnel) they wait in the queue
+    /// behind a poll, and nothing showed they were still on their way.
+    private(set) var outgoing: [UUID: Date] = [:]
+
+    func beginOutgoing() -> UUID {
+        let id = UUID()
+        outgoing[id] = Date()
+        return id
+    }
+
+    func endOutgoing(_ id: UUID) { outgoing[id] = nil }
     /// The measured link, one line ("request RTT 820 ms (min 610, ±90) ·
     /// 1.4 MB/s · P2P relay"), for the slow-link indicator's tooltip and the
     /// debug state. Refreshed on every poll outcome.
@@ -815,13 +828,17 @@ final class RemoteHostController {
     private func send(_ method: String, _ path: String, body: [String: Any]? = nil,
                       then refresh: Bool = true) {
         let host = self.host
+        // On its way from now — queued behind a poll included — until the
+        // host answers (or the request fails).
+        let token = beginOutgoing()
         pollQueue.async { [weak self] in
             FatClientLog.log("send START \(method) \(path)")   // paired with DONE — a START with no DONE = a hung request blocking the serial pollQueue
             let client = RemoteTransport.client(for: host)
             let resp = try? client.request(method, path, body: body)
             FatClientLog.log("send DONE \(method) \(path) status=\(resp?.status ?? -1)")
-            if refresh {
-                DispatchQueue.main.async { self?.pollOnce() }
+            DispatchQueue.main.async {
+                self?.endOutgoing(token)
+                if refresh { self?.pollOnce() }
             }
         }
     }
@@ -1523,6 +1540,8 @@ final class RemoteHostController {
         // connection, not only after the next (up to 5 s) heartbeat poll.
         ConsolePresence.shared.noteMirror()
         let idle = String(ConsolePresence.shared.idleMillis())
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request(
                 "POST", "/agent-sessions/start", body: body,
@@ -2273,6 +2292,8 @@ final class RemoteHostController {
               let targetJSON = try? JSONSerialization.jsonObject(with: data) else { return .unsupported }
         let host = self.host
         let path = "/vms/\(seg(id))/type"
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             // Staging, typing and confirming can take ~20 s on the server.
             try RemoteTransport.bulkClient(for: host)
@@ -3207,6 +3228,14 @@ final class RemoteHostWindow: NSWindow {
         title = "Remote — \(controller.host.name)"
         isReleasedWhenClosed = false
         observeLinkSubtitle()
+        // "Sending…" in the title bar while something the user sent is
+        // still on its way.
+        let sending = NSTitlebarAccessoryViewController()
+        sending.layoutAttribute = .trailing
+        let sendingView = NSHostingView(rootView: OutgoingIndicator(controller: controller))
+        sendingView.frame = NSRect(x: 0, y: 0, width: 120, height: 28)
+        sending.view = sendingView
+        addTitlebarAccessoryViewController(sending)
         buildLayout()
         buildToolbar()
         showGrid()
@@ -7994,3 +8023,51 @@ extension RemoteHostController: RemoteDelegationLink {
         return (data, size, (r["eof"] as? Bool) ?? data.isEmpty)
     }
 }
+
+#if os(macOS)
+/// The title bar's "Sending…" cue: an upload arrow that pulses while what
+/// the user sent (an action, a prompt, a new session) is still on its way —
+/// shown only past a beat, so a quick link never flickers it.
+struct OutgoingIndicator: View {
+    let controller: RemoteHostController
+    @State private var shown = false
+
+    static let delay: TimeInterval = 0.4
+
+    /// Whether the cue shows: something still on its way for a beat.
+    static func shows(oldest: Date?, now: Date = Date()) -> Bool {
+        guard let oldest else { return false }
+        return now.timeIntervalSince(oldest) >= delay
+    }
+
+    var body: some View {
+        let count = controller.outgoing.count
+        HStack(spacing: 4) {
+            if shown, count > 0 {
+                Image(systemName: "arrow.up.circle")
+                    .symbolEffect(.pulse, options: .repeating)
+                    .foregroundStyle(.secondary)
+                Text(count > 1
+                     ? String(format: NSLocalizedString("Sending %d…", comment: "fat client title bar: requests on their way"), count)
+                     : NSLocalizedString("Sending…", comment: "fat client title bar: a request on its way"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.2), value: shown && count > 0)
+        .help(NSLocalizedString("Still sending to the host — the link is slow", comment: "fat client title bar"))
+        .task(id: controller.outgoing.values.min()) {
+            // Only once the oldest still-pending send has waited a beat.
+            guard let oldest = controller.outgoing.values.min() else { shown = false; return }
+            let wait = Self.delay - Date().timeIntervalSince(oldest)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            if !Task.isCancelled { shown = Self.shows(oldest: controller.outgoing.values.min()) }
+        }
+    }
+}
+#endif
+
