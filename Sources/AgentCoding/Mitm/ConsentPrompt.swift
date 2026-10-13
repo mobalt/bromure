@@ -32,7 +32,10 @@ enum ConsentPrompt {
                        choices: [String], denyIndex: Int,
                        style: NSAlert.Style = .informational,
                        detailText: String? = nil,
-                       timeout: TimeInterval = ConsentPrompt.defaultTimeout) async -> Int? {
+                       timeout: TimeInterval = ConsentPrompt.defaultTimeout,
+                       token: UUID = UUID()) async -> Int? {
+        // `token`: the caller's handle to take the question back
+        // (`ConsentPanelPresenter.withdraw(token:)`) — it then returns nil.
         // ONE deadline for every surface and for the held request: fixed
         // here, when the question is asked. The panel counts down to it, the
         // watchdog denies at it, the remote surfaces get what's left of it —
@@ -45,6 +48,7 @@ enum ConsentPrompt {
             // a prompt because a mirror happens to be connected.
             let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
             let idx = await race(
+                token: token,
                 remote: {
                     await PendingPromptBroker.shared.answerAsync(
                         profileID: profileID, title: title, message: body,
@@ -70,7 +74,7 @@ enum ConsentPrompt {
             let idx = await ConsentPanelPresenter.shared.presentOffMain(
                 profileID: profileID, title: title, message: message, choices: choices,
                 denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout,
-                deadline: deadline)
+                token: token, deadline: deadline)
             return idx == denyIndex ? nil : idx
         }
     }
@@ -83,9 +87,8 @@ extension ConsentPrompt {
     /// answers (a dismissal or its deadline is its deny). The loser is
     /// withdrawn: the remote task is cancelled (its prompt leaves `/state`),
     /// the local panel closed (`withdraw(token:)`).
-    static func race(remote: @escaping @Sendable () async -> Int?,
+    static func race(token: UUID = UUID(), remote: @escaping @Sendable () async -> Int?,
                      local: @escaping @Sendable (UUID) async -> Int?) async -> Int? {
-        let token = UUID()
         return await withTaskGroup(of: (Bool, Int?).self) { group in
             group.addTask { (true, await remote()) }
             group.addTask { (false, await local(token)) }

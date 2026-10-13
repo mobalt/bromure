@@ -107,12 +107,16 @@ public actor ConsentBroker {
     /// other call for the same key parks here and resumes when the
     /// dialog resolves.
     private var pending: [String: [CheckedContinuation<Bool, Never>]] = [:]
-    /// Keys whose open prompt a Guardrails decision overtook (`grant`,
-    /// `deny`, session teardown): its waiters were answered with that
-    /// decision, and the prompt's own answer, when it comes, neither stores
-    /// nor allows — a "Don't allow" shrank a session deny to 5 minutes, and
-    /// an "Allow" (Return) let the in-flight request through a deny.
-    private var superseded: Set<String> = []
+    /// The open prompt's handle per key (`ConsentPrompt.choose`'s token).
+    private var promptTokens: [String: UUID] = [:]
+    /// Prompts a Guardrails decision overtook (`grant`, `deny`, session
+    /// teardown): withdrawn, their waiters answered with that decision and
+    /// their key freed; the prompt's own answer, if one still comes, neither
+    /// stores nor allows — a "Don't allow" shrank a session deny to 5
+    /// minutes, and an "Allow" (Return) let the in-flight request through a
+    /// deny. Left up, the panel held the key: after a revoke, its Allow was
+    /// ignored and every new request parked on it and was refused.
+    private var superseded: Set<UUID> = []
     /// profileID → display name. Set by `ACAppDelegate` at session
     /// launch so the dialog can say "Profile <name> wants to…".
     private var profileNames: [UUID: String] = [:]
@@ -180,6 +184,8 @@ public actor ConsentBroker {
             }
         }
         pending[key] = []
+        let token = UUID()
+        promptTokens[key] = token
 
         let profileName = profileNames[profileID] ?? "(unknown workspace)"
         // Non-modal, with a deadline (no answer → deny); routed to a fat
@@ -195,15 +201,14 @@ public actor ConsentBroker {
         let timeout = ConsentPrompt.defaultTimeout
         let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: scopeHint,
                                              choices: choices, denyIndex: choices.count - 1,
-                                             timeout: timeout)
-        if superseded.remove(key) != nil {
-            // Overtaken while it was up: the newer decision stands.
-            let allow = Self.liveAllow(grant: grants[key], deny: denies[key], at: Date())
-            let waiters = pending[key] ?? []
-            pending.removeValue(forKey: key)
-            for w in waiters { w.resume(returning: allow) }
-            return allow
+                                             timeout: timeout, token: token)
+        if superseded.remove(token) != nil {
+            // Overtaken while it was up: the newer decision stands. Its
+            // waiters and its key went with the overtake (the key may be a
+            // newer prompt's by now).
+            return Self.liveAllow(grant: grants[key], deny: denies[key], at: Date())
         }
+        promptTokens.removeValue(forKey: key)
         let decision: Decision
         switch idx {
         case 0:  decision = .allow1hr
@@ -268,11 +273,15 @@ public actor ConsentBroker {
 
     /// A Guardrails decision for `key` while its prompt is up: the requests
     /// waiting on that prompt get it now, and the prompt's answer won't count.
+    /// The prompt is withdrawn (its asker returns now) and the key freed: a
+    /// later request — after a revoke, say — asks afresh instead of parking
+    /// on a panel whose answer no longer counts.
     private func overtakePrompt(_ key: String, allow: Bool) {
-        guard pending[key] != nil else { return }
-        superseded.insert(key)
-        let waiters = pending[key] ?? []
-        pending[key] = []
+        guard let waiters = pending.removeValue(forKey: key) else { return }
+        if let token = promptTokens.removeValue(forKey: key) {
+            superseded.insert(token)
+            Task { @MainActor in ConsentPanelPresenter.shared.withdraw(token: token) }
+        }
         for w in waiters { w.resume(returning: allow) }
     }
 
