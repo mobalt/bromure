@@ -4476,18 +4476,10 @@ final class RemoteHostWindow: NSWindow {
                 // Until the host's look ends (it tries one session after
                 // another): as long as the mirror shows it looking, within
                 // `locateWindow`; 20 s for a host that never shows it (older).
-                var sawLocating = false
-                let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
-                var i = 0
-                while Date() < deadline {
-                    i += 1
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    let t = self.controller.taskStore.task(task.id)
-                    if t?.isLocating == true { sawLocating = true }
-                    if let done = CodingTask.locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
-                    if i % 6 == 0 { self.controller.foregroundKick() }
-                }
-                return false
+                // Review closed (the task cancelled) ends it at once.
+                let controller = self.controller
+                return await CodingTask.awaitLocate(task: { controller.taskStore.task(task.id) },
+                                                    kick: { controller.foregroundKick() })
             }))
 
     /// Native planning-conversation windows for the mirrored board — the

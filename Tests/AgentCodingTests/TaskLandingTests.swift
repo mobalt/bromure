@@ -702,6 +702,35 @@ struct TaskLandingTests {
         #expect(CodingTask.locateOutcome(nil, sawLocating: true, polls: 3) == false)
     }
 
+    /// Finding (CWE-400): closing Review cancelled the fat client's wait on
+    /// the host's look; its sleep then threw at once and the loop spun the
+    /// main actor flat out for the rest of the look (up to 10 min).
+    @Test("a cancelled locate wait stops at once instead of spinning")
+    @MainActor func locateWaitStopsWhenCancelled() async {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        t.locatingSince = Date()   // the host keeps looking the whole time
+        let card = t
+        var polls = 0
+        let wait = Task { @MainActor in
+            await CodingTask.awaitLocate(task: { polls += 1; return card }, kick: {})
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        wait.cancel()
+        let started = Date()
+        let found = await wait.value
+        #expect(!found)
+        #expect(Date().timeIntervalSince(started) < 1)
+        #expect(polls < 10)    // ~2 a second until cancelled, not thousands after
+        // Not cancelled, the look's end still settles it.
+        var later = t
+        later.worktreeDir = "/w"
+        let laterCard = later
+        #expect(await CodingTask.awaitLocate(interval: 10_000_000, task: { laterCard }, kick: {}))
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

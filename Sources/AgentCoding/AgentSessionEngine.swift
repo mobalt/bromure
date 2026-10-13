@@ -1873,7 +1873,9 @@ final class AgentSessionEngine {
         }
         defer { pendingBoots.remove(profileID) }
         var deadline = Date().addingTimeInterval(Self.bootTimeout)
-        while Date() < deadline {
+        // Cancelled, the sleep throws at once: without this check the loop
+        // execs into the machine back to back until the boot timeout.
+        while Date() < deadline, !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
                 deadline = Date().addingTimeInterval(Self.bootTimeout)
