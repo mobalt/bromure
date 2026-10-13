@@ -3219,6 +3219,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let view = AutomationEditorView(
             store: delegate.scheduledAutomationStore,
             profiles: delegate.profiles,
+            listFolders: { [weak delegate] pid, path in await delegate?.listGuestFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,

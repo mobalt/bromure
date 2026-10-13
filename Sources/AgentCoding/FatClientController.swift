@@ -977,6 +977,7 @@ final class RemoteHostController {
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
             p.memoryGB = spec.memoryGB
+            p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
             // surfaces render the workspace's colors/fonts (absent = fall back
             // to this device's own terminal defaults, like resolveStyle does).
@@ -2389,6 +2390,17 @@ final class RemoteHostController {
     /// A refusal throws: a GitHub 401 as GitHubPoller/401 (the editors'
     /// "token rejected"), anything else (an older host without the route
     /// too) as an error the editor shows above its free-text field.
+    /// A workspace's other agents from the host's list (tool + auth mode;
+    /// no keys) — an older host sends none: the primary only, as before.
+    nonisolated static func additionalTools(from w: [String: Any], primary: Profile.Tool) -> [Profile.ToolSpec] {
+        ((w["additionalTools"] as? [[String: Any]]) ?? []).compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)), tool != primary
+            else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
     var automationSources: AutomationSources {
         let host = self.host
         return AutomationSources { body in
@@ -4233,6 +4245,7 @@ final class RemoteHostWindow: NSWindow {
                 controller.credentials(for: id).map { ($0.github, $0.linear) }
             },
             sources: controller.automationSources,
+            listFolders: { [controller] pid, path in await controller.listSessionFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,

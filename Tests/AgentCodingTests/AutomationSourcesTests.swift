@@ -47,4 +47,24 @@ struct AutomationSourcesTests {
             #expect(ns.domain == "GitHubPoller" && ns.code == 401)
         }
     }
+
+    /// Board report: on a fat client the automation editor offered only
+    /// the workspace's primary agent — the host's state carried no other.
+    @Test("a fat client's workspace has every agent the host lists (tool and sign-in, no keys)")
+    func additionalAgents() {
+        let w: [String: Any] = ["additionalTools": [
+            ["tool": "grok", "authMode": "subscription"],
+            ["tool": "codex", "authMode": "token"],
+            ["tool": "claude", "authMode": "token"],      // the primary again: dropped
+            ["tool": "nope"],                             // unknown: dropped
+        ]]
+        let specs = RemoteHostController.additionalTools(from: w, primary: .claude)
+        #expect(specs.map(\.tool) == [.grok, .codex])
+        #expect(specs.first?.authMode == .subscription && specs.allSatisfy { $0.apiKey == nil })
+        var p = Profile(name: "codereview", tool: .claude, authMode: .token)
+        p.additionalTools = specs
+        #expect(p.allToolSpecs.map(\.tool) == [.claude, .grok, .codex])
+        // An older host: the primary only, as before.
+        #expect(RemoteHostController.additionalTools(from: [:], primary: .claude).isEmpty)
+    }
 }

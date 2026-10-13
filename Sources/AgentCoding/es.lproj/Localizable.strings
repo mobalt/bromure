@@ -4187,6 +4187,7 @@
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git falla en esta copia de trabajo sin el programa de filtro propio del repositorio, que Bromure no ejecuta. Revísala en una terminal.";
 
+<<<<<<< HEAD
 /* fat client title bar: requests on their way */
 "Sending %d…" = "Enviando %d…";
 
@@ -4201,3 +4202,13 @@
 
 /* automation editor: time zone */
 "%@ (the host's time)" = "%@ (hora del anfitrión)";
+=======
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Cada ejecución empieza aquí, en una rama nueva: elige el clon, en el espacio de trabajo, del repositorio que vigila el disparador.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Cada ejecución empieza aquí, en una rama nueva: elige el clon de %@ en el espacio de trabajo.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Esta ventana no puede leer el token de GitHub del espacio de trabajo: escribe el repositorio como propietario/repositorio.";
+>>>>>>> wt/more-automation-woes-261013-0125

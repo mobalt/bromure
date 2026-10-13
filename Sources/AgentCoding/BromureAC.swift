@@ -6369,6 +6369,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "hasGitHubToken": p.hasGitHubCredential,
                 "hasLinearToken": !p.linearToken.isEmpty,
                 "askBeforeUseLabels": p.askBeforeUseCredentialLabels,
+                // Its other agents (which, and how they sign in — never a
+                // key): a fat client's automation editor offered only the
+                // primary one.
+                "additionalTools": p.additionalTools.filter { $0.tool != p.tool }.map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
             ]
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
