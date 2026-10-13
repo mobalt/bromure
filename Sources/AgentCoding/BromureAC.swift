@@ -2784,6 +2784,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// profile (its own, or the shared one it inherits). Fed to the model
     /// overlay so a signed-in subscription authenticates at launch even when the
     /// Models pane's mirror flag hasn't synced.
+    /// The agents a workspace can run, for every agent picker (automation,
+    /// task, a new session): the same set a new session counts as ready. A
+    /// plain Mac runs whatever agent its user installed.
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        if attachedMachines[p.id] != nil {
+            return p.allToolSpecs + Profile.Tool.allCases
+                .filter { t in !p.allToolSpecs.contains { $0.tool == t } }
+                .map { Profile.ToolSpec(tool: $0, authMode: .token) }
+        }
+        return p.readyToolSpecs(ModelSettingsStore.shared.effective(for: p),
+                                subscribed: subscribedProviders(for: p))
+    }
+
     func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
         guard let e = mitmEngine else { return [] }
         var s = Set<ModelProvider>()
@@ -6376,6 +6389,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // key): a fat client's automation editor offered only the
                 // primary one.
                 "additionalTools": p.additionalTools.filter { $0.tool != p.tool }.map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
+                // The agents it can run (set up there, or through the Models
+                // settings / a shared sign-in) — what a fat client's agent
+                // pickers offer. Its mirror sees none of the host's models.
+                "readyTools": readyToolSpecs(for: p).map {
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
             ]
@@ -12099,7 +12118,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -15466,7 +15488,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,

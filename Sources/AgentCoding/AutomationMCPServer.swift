@@ -23,6 +23,9 @@ final class AutomationMCPServer: MCPLineHandler {
     private let runNow: (UUID) -> Void
     /// The repository watches' engine — the findings tools.
     private let watches: () -> RepoWatchEngine?
+    /// The agents the workspace can run (its Models settings and sign-ins
+    /// included), as the editor offers them.
+    private let readyTools: (Profile) -> [Profile.Tool]
 
     init(profileID: Profile.ID,
          store: @escaping () -> ScheduledAutomationStore?,
@@ -30,7 +33,8 @@ final class AutomationMCPServer: MCPLineHandler {
          save: @escaping (ScheduledAutomation) -> Void,
          remove: @escaping (UUID) -> Void,
          runNow: @escaping (UUID) -> Void,
-         watches: @escaping () -> RepoWatchEngine? = { nil }) {
+         watches: @escaping () -> RepoWatchEngine? = { nil },
+         readyTools: @escaping (Profile) -> [Profile.Tool] = { $0.allToolSpecs.map(\.tool) }) {
         self.profileID = profileID
         self.store = store
         self.profile = profile
@@ -38,6 +42,7 @@ final class AutomationMCPServer: MCPLineHandler {
         self.remove = remove
         self.runNow = runNow
         self.watches = watches
+        self.readyTools = readyTools
     }
 
     // MARK: JSON-RPC
@@ -447,7 +452,7 @@ final class AutomationMCPServer: MCPLineHandler {
         }
         if let v = args["tool"] as? String {
             guard let t = Profile.Tool(rawValue: v) else { return "unknown tool \(v)" }
-            let configured = profile.allToolSpecs.map(\.tool)
+            let configured = readyTools(profile)
             guard configured.contains(t) else {
                 return "\(t.displayName) isn't set up on this machine (available: "
                     + configured.map(\.rawValue).joined(separator: ", ") + ")"

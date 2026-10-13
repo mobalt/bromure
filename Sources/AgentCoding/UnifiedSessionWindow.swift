@@ -2059,10 +2059,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 await delegate?.listGuestFolders(profileID: pid, path: path)
             },
             readyTools: { [weak delegate] p in
-                // A plain Mac runs whatever agent its user installed.
-                if delegate?.attachedMachines[p.id] != nil { return Set(Profile.Tool.allCases) }
-                return p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
-                                     subscribed: delegate?.subscribedProviders(for: p) ?? [])
+                Set((delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool))
             },
             peerMentions: { [weak delegate] pid in
                 delegate?.peerMentions(forWorkspace: pid, excluding: nil) ?? []
@@ -3219,6 +3216,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let view = AutomationEditorView(
             store: delegate.scheduledAutomationStore,
             profiles: delegate.profiles,
+            toolSpecs: { [weak delegate] p in delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
             listFolders: { [weak delegate] pid, path in await delegate?.listGuestFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
@@ -3433,6 +3431,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 store: delegate.codingTaskStore,
                 model: listModel,
                 profilesProvider: { [weak self] in self?.acDelegate?.profiles ?? [] },
+                toolSpecs: { [weak self] p in self?.acDelegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
                 actions: CodingKanbanView.Actions(
                     start: { [weak self] id in self?.acDelegate?.codingTaskEngine.start(id) },
                     plan: { [weak self] id in
