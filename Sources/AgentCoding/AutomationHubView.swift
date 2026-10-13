@@ -373,6 +373,7 @@ struct AutomationHubView: View {
                 workspaces: workspaces(),
                 promptGuardInstalled: promptGuardInstalled(),
                 fetchRepos: actions.fetchRepos,
+                scheduleTimeZone: automationStore.scheduleTimeZone,
                 onEditWorkspace: { id in
                     hub.editingWatch = nil
                     actions.editWorkspace(id)
@@ -2512,6 +2513,8 @@ struct WatchEditorSheet: View {
     let workspaces: [WatchWorkspaceChoice]
     let promptGuardInstalled: Bool
     let fetchRepos: (UUID) async throws -> [String]
+    /// The clock scans run on (the host's): the hour picker is that time.
+    var scheduleTimeZone: TimeZone = .current
     var onEditWorkspace: (UUID) -> Void
     var onCancel: () -> Void
     var onSave: (WatchedRepo, Bool) -> Void
@@ -2524,6 +2527,7 @@ struct WatchEditorSheet: View {
     init(draft: WatchedRepo, isNew: Bool, workspaces: [WatchWorkspaceChoice],
          promptGuardInstalled: Bool,
          fetchRepos: @escaping (UUID) async throws -> [String],
+         scheduleTimeZone: TimeZone = .current,
          onEditWorkspace: @escaping (UUID) -> Void,
          onCancel: @escaping () -> Void,
          onSave: @escaping (WatchedRepo, Bool) -> Void) {
@@ -2534,6 +2538,7 @@ struct WatchEditorSheet: View {
         self.workspaces = workspaces
         self.promptGuardInstalled = promptGuardInstalled
         self.fetchRepos = fetchRepos
+        self.scheduleTimeZone = scheduleTimeZone
         self.onEditWorkspace = onEditWorkspace
         self.onCancel = onCancel
         self.onSave = onSave
@@ -2701,6 +2706,12 @@ struct WatchEditorSheet: View {
                                 }
                                 .labelsHidden()
                                 .fixedSize()
+                                if AutomationDescriber.differs(scheduleTimeZone, .current, at: Date()) {
+                                    Text(String(format: NSLocalizedString("%@ (the host's time)", comment: "automation editor: time zone"),
+                                                AutomationDescriber.zoneName(scheduleTimeZone, at: Date())))
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }

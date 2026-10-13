@@ -184,8 +184,12 @@ struct AutomationsSection: View {
         }
         if let next = store.automations.filter(\.enabled)
             .compactMap({ store.nextFire(for: $0.id) }).min() {
+            // Local time — with its zone named when the schedules run on
+            // another clock (the host's): "16:00" alone read as the host's.
+            let zone = AutomationDescriber.differs(store.scheduleTimeZone, .current, at: next)
+                ? " " + AutomationDescriber.zoneName(.current, at: next) : ""
             parts.append(String(format: NSLocalizedString("next %@", comment: ""),
-                                Self.fireFormatter.string(from: next)))
+                                Self.fireFormatter.string(from: next) + zone))
         }
         if !parts.isEmpty { return parts.joined(separator: " · ") }
         // Name the destination, not a "board" the hub never calls itself.
@@ -231,8 +235,9 @@ struct AutomationsSection: View {
 }
 
 /// "Weekdays 9:00" / "Fri 17:00" / "PR · owner/repo" — the row's one-line
-/// trigger summary.
-func scheduleSummary(_ a: ScheduledAutomation) -> String {
+/// trigger summary. The time is the host's (`timeZone`): named when the
+/// viewer is elsewhere ("Daily 3:00 EDT").
+func scheduleSummary(_ a: ScheduledAutomation, timeZone: TimeZone = .current) -> String {
     switch a.trigger {
     case .githubPullRequest, .githubIssue:
         let kind = a.trigger == .githubIssue ? "Issue" : "PR"
@@ -253,7 +258,10 @@ func scheduleSummary(_ a: ScheduledAutomation) -> String {
     case .schedule:
         break
     }
-    let time = String(format: "%d:%02d", a.hour, a.minute)
+    let now = Date()
+    let zone = AutomationDescriber.differs(timeZone, .current, at: now)
+        ? " " + AutomationDescriber.zoneName(timeZone, at: now) : ""
+    let time = String(format: "%d:%02d", a.hour, a.minute) + zone
     switch a.frequency {
     case .interval:
         let m = max(5, a.intervalMinutes)
@@ -620,7 +628,7 @@ struct AutomationEditorView: View {
     /// current draft, exactly as the engine will compute it on save.
     private var nextFirePreview: Date? {
         guard draft.trigger == .schedule, draft.enabled else { return nil }
-        return AutomationSchedule.nextFire(for: draft, after: Date())
+        return AutomationSchedule.nextFire(for: draft, after: Date(), calendar: store.scheduleCalendar)
     }
 
     /// Comma-separated text ↔ the label list.
@@ -695,12 +703,14 @@ struct AutomationEditorView: View {
 
     private var timeBinding: Binding<Date> {
         Binding(
+            // On the schedules' clock (the host's): the picker shows, and
+            // sets, the time there.
             get: {
-                Calendar.current.date(bySettingHour: draft.hour, minute: draft.minute,
-                                      second: 0, of: Date()) ?? Date()
+                store.scheduleCalendar.date(bySettingHour: draft.hour, minute: draft.minute,
+                                            second: 0, of: Date()) ?? Date()
             },
             set: { date in
-                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                let c = store.scheduleCalendar.dateComponents([.hour, .minute], from: date)
                 draft.hour = c.hour ?? 9
                 draft.minute = c.minute ?? 0
             })
@@ -774,7 +784,7 @@ struct AutomationEditorView: View {
         let upstream = draft.chainedAutomationID.flatMap { store.automation($0)?.name }
         let steps: [(String, String, String)] = [
             ("bolt.fill", NSLocalizedString("When", comment: "automation summary"),
-             AutomationDescriber.when(draft, upstreamName: upstream)),
+             AutomationDescriber.when(draft, upstreamName: upstream, timeZone: store.scheduleTimeZone)),
             ("terminal.fill", NSLocalizedString("What", comment: "automation summary"),
              AutomationDescriber.what(draft, workspace: selectedProfile?.name ?? "?")),
             ("tray.full.fill", NSLocalizedString("Then", comment: "automation summary"),
@@ -1146,6 +1156,14 @@ struct AutomationEditorView: View {
                            displayedComponents: .hourAndMinute)
                     .labelsHidden()
                     .frame(width: 110)
+                    .environment(\.timeZone, store.scheduleTimeZone)
+                if AutomationDescriber.differs(store.scheduleTimeZone, .current, at: Date()) {
+                    // The host's clock, named: "3:00" alone read as local.
+                    Text(String(format: NSLocalizedString("%@ (the host's time)", comment: "automation editor: time zone"),
+                                AutomationDescriber.zoneName(store.scheduleTimeZone, at: Date())))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         // An explicit caption so the question shows on iOS too (a bare Picker
@@ -1160,7 +1178,7 @@ struct AutomationEditorView: View {
         }
         if let next = nextFirePreview {
             Label(String(format: NSLocalizedString("Next run: %@", comment: ""),
-                         next.formatted(date: .abbreviated, time: .shortened)),
+                         AutomationDescriber.moment(next, scheduleTimeZone: store.scheduleTimeZone)),
                   systemImage: "clock")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

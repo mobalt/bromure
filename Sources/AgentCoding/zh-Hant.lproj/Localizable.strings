@@ -2400,7 +2400,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "在左側註冊一個來源。除非你在右側另選，每個代理程式都使用其供應商的預設模型。";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "登入你要使用的供應商，或貼上 API 金鑰。每個代理程式隨後使用其供應商的預設模型——如有需要，可在右側選擇特定模型，現在或之後在「偏好設定 → 模型」中設定。";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d 個模型";
 "%d need you" = "%d 個需要你處理";
@@ -4197,3 +4196,9 @@
 
 /* fat client title bar */
 "Still sending to the host — the link is slow" = "仍在傳送到主機——連線較慢";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@（本地 %3$@ %4$@）";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@（主機時間）";

@@ -2397,7 +2397,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "左側でソースを登録してください。右側で選ばない限り、各エージェントはプロバイダの既定モデルを使います。";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "使用するプロバイダにサインインするか、API キーを貼り付けてください。各エージェントはプロバイダの既定モデルを使います。特定のモデルを使う場合は右側で選択できます（後から「環境設定 → モデル」でも変更できます）。";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d 個のモデル";
 "%d need you" = "%d 件が対応待ち";
@@ -4194,3 +4193,9 @@
 
 /* fat client title bar */
 "Still sending to the host — the link is slow" = "ホストへ送信中です — 回線が遅くなっています";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@（こちらでは %3$@ %4$@）";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@（ホストの時刻）";

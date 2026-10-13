@@ -2397,7 +2397,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Registrieren Sie links eine Quelle. Jeder Agent nutzt das Standardmodell seines Anbieters, sofern Sie rechts kein anderes wählen.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Melden Sie sich bei den gewünschten Anbietern an oder fügen Sie API-Schlüssel ein. Jeder Agent nutzt dann das Standardmodell seines Anbieters — wählen Sie rechts bei Bedarf ein bestimmtes, jetzt oder später unter Einstellungen → Modelle.";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d Modell(e)";
 "%d need you" = "%d brauchen Sie";
@@ -4194,3 +4193,9 @@
 
 /* fat client title bar */
 "Still sending to the host — the link is slow" = "Wird noch an den Host gesendet – die Verbindung ist langsam";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ hier)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (Zeit des Hosts)";
