@@ -495,6 +495,13 @@ struct QuickTaskView: View {
                     .font(.system(size: 13))
                     .lineLimit(1...5)
                     .focused($focus, equals: .details)
+                    // ↩ adds from here too (it used to do nothing, leaving
+                    // ⇥⇥ the only way on); ⌥↩ / ⇧↩ make a new line.
+                    .onKeyPress(keys: [.return]) { press in
+                        guard press.modifiers.isDisjoint(with: [.option, .shift]) else { return .ignored }
+                        submit(keepOpen: press.modifiers.contains(.command))
+                        return .handled
+                    }
                     .onKeyPress(.tab) { tab(fromDetails: true) }
                     .padding(.leading, 34)
                     .transition(.opacity.combined(with: .move(edge: .top)))
