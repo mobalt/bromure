@@ -66,6 +66,12 @@ public final class SSHAgentServer: @unchecked Sendable {
         importedApprovals[profileID] = entries
     }
 
+    /// The approvals in force for a profile's running session.
+    public func importedKeyApprovals(for profileID: UUID) -> [Data: ImportedApproval] {
+        lock.lock(); defer { lock.unlock() }
+        return importedApprovals[profileID] ?? [:]
+    }
+
     public func clearImportedKeyApprovals(for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         importedApprovals.removeValue(forKey: profileID)
