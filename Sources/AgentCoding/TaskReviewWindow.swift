@@ -369,6 +369,21 @@ final class TaskReviewWindowManager {
         host.reload(id)
     }
 
+    /// Ask for the look (`relocate`) and wait for it, counted in
+    /// `request.relocating` until it is over. Its own task: a re-open
+    /// cancels this load, and a fat client's wait for the host's stamp then
+    /// gave up at once — the count dropped while the host was still looking,
+    /// and the next load read "no code", then "Can't reach the machine".
+    static func look(for task: CodingTask, request: ReviewLandingRequest,
+                     relocate: @escaping (CodingTask) async -> Bool) async {
+        await MainActor.run { request.relocating += 1 }
+        let look = Task {
+            _ = await relocate(task)
+            await MainActor.run { request.relocating -= 1 }
+        }
+        await look.value
+    }
+
     private func mayTryRelocate(_ id: UUID) -> Bool {
         if let at = relocateTried[id], Date().timeIntervalSince(at) < 15 { return false }
         relocateTried[id] = Date()
@@ -422,13 +437,16 @@ final class TaskReviewWindowManager {
                         // one still waits doesn't end "looking" under it.
                         await MainActor.run { request.lookers += 1; request.openedLooking = false }
                         if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
-                            _ = await c.relocate(task)
+                            await Self.look(for: task, request: request, relocate: c.relocate)
                         }
                         // Another look may still be under way (a second
-                        // window's, the host's for a fat client): its outcome
-                        // is this load's — not "can't reach the machine".
+                        // window's, the host's for a fat client — or an
+                        // earlier fetch of this window still asking, before
+                        // the host's stamp shows here): its outcome is this
+                        // load's — not "can't reach the machine".
                         let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
-                        while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
+                        while await MainActor.run(body: { request.othersLooking(isLocating: t()?.isLocating == true) }),
+                              Date() < deadline, !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 500_000_000)
                         }
                         await MainActor.run { request.lookers -= 1 }
@@ -479,6 +497,16 @@ final class ReviewLandingRequest {
     var looking: Bool { openedLooking || lookers > 0 }
     var openedLooking = false
     var lookers = 0
+    /// Fetches still inside their own `relocate` call. On a fat client the
+    /// host's `locatingSince` shows only after that call's round trip, so a
+    /// refresh then saw nothing locating, read no worktree as unreachable,
+    /// and painted "Can't reach the machine" under "Looking for the
+    /// worktree…".
+    var relocating = 0
+
+    /// Whether a fetch past its own look still waits for someone else's: a
+    /// fetch asking right now, or the card's locating stamp.
+    func othersLooking(isLocating: Bool) -> Bool { relocating > 0 || isLocating }
 }
 
 /// Under the review header: where the branch stands, and the ways out —
