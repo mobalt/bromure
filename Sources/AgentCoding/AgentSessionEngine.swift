@@ -577,7 +577,7 @@ final class AgentSessionEngine {
     func archive(_ id: UUID) {
         guard let s = store.session(id) else { return }
         BACDebug.log("sessions", "archive “\(s.title)”")
-        if Self.tabProvenHere(s), delegate?.pane(for: s.profileID) != nil { close(id) }
+        if tabClosableNow(s), delegate?.pane(for: s.profileID) != nil { close(id) }
         store.mutate(id) { $0.launchingSince = nil }
         store.setArchived(id, true)
     }
@@ -605,7 +605,7 @@ final class AgentSessionEngine {
             return
         }
         store.setDeleted(id)
-        if Self.tabProvenHere(s) { killTabIfShown(store.session(id) ?? s) }
+        if tabClosableNow(s) { killTabIfShown(store.session(id) ?? s) }
     }
 
     /// Whether a session's tab may be ended by its stored index right now:
@@ -616,6 +616,15 @@ final class AgentSessionEngine {
     /// tab only once the probe proves it's this session's (boot, window id).
     nonisolated static func tabProvenHere(_ s: AgentSession) -> Bool {
         s.windowIndex != nil && s.agentAlive == true
+    }
+
+    /// `tabProvenHere`, or a tab bound from the live roster this run and not
+    /// stamped yet (the probe is throttled, so Archive right after a launch
+    /// lands before it): left to `reapArchived`, that one could never be
+    /// proven — no window id is stamped once it's put away — so it was let
+    /// go with its agent running, and adopted back as a new session.
+    func tabClosableNow(_ s: AgentSession) -> Bool {
+        Self.tabProvenHere(s) || store.boundThisRun(s)
     }
 
     /// Kill a deleted session's tab when its workspace is up — once per
