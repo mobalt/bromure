@@ -1186,6 +1186,13 @@ final class DelegationEngine {
     /// Out of view (its Mac asleep, reconnecting): done when it's back.
     private func retireChild(_ d: Delegation) {
         guard !d.isRequest else { return }
+        // What it was still owed (a steer typed nowhere while its Mac was
+        // away) is moot now: left owed, the next notice pass resumed the
+        // session with it — relaunching a delegate that was being put away.
+        if let fresh = store.delegation(d.id) {
+            let owed = fresh.messages.filter { $0.to == .child && ($0.readAt == nil || $0.noticedAt == nil) }.map(\.id)
+            if !owed.isEmpty { store.markNoticed(owed); store.markRead(owed) }
+        }
         guard let child = sessions.session(d.childSessionID) else {
             store.mutate(d.id) { $0.retireWhenBack = true }
             return
@@ -1483,6 +1490,9 @@ final class DelegationEngine {
         // and is never typed in or resumed for.
         guard !items.isEmpty, let s = sessions.session(sessionID), delegate != nil, !s.isDeleted, !s.isArchived
         else { return }
+        // About to be put away (a delegate over while its Mac was away, back
+        // now): never resumed or typed into first.
+        if store.delegations.contains(where: { $0.childSessionID == sessionID && $0.retireWhenBack == true }) { return }
         if s.isLaunching { return }
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)
