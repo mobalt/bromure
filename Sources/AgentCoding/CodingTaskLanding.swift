@@ -63,10 +63,9 @@ enum LandingVerification: Equatable, Sendable {
     /// The machine couldn't be asked.
     case unknown
 
-    /// The verify command's output. STATUSFAILED: the checkout's status
-    /// can't be read — not known, never "not there yet" for ever.
+    /// The verify command's output.
     static func parse(_ out: String?) -> LandingVerification {
-        guard let out, !out.contains("STATUSFAILED") else { return .unknown }
+        guard let out else { return .unknown }
         if out.contains("NOREMOTE") { return .remoteUnreachable }
         if out.contains("LANDED") { return .landed }
         if out.contains("PENDING") { return .pending }
@@ -304,8 +303,12 @@ extension CodingTaskEngine {
         var cmd = RepoGitPrograms.off(q(root))
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ]; then s=$(\(TaskLitter.status(q(src)))); "
-                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo STATUSFAILED; exit 0; fi; "
-                + "if [ -n \"$s\" ]; then echo PENDING; exit 0; fi; fi; "
+                // A status that fails (a filter git can't run safely): the
+                // checkout's state is unknown, but whether the branch is in
+                // the target isn't — still looked at, never "unknown" (an
+                // agent's "merged" then went Done unchecked).
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo \(Self.treeUnknownWord); "
+                + "elif [ -n \"$s\" ]; then echo PENDING; exit 0; fi; fi; "
         }
         func inRef(_ t: String) -> String {
             // Revisions after --end-of-options: never an option, whatever
@@ -981,8 +984,17 @@ extension CodingTaskEngine {
                                                sourceDir: task.worktreeDir,
                                                remote: task.landing.flatMap { $0.pushes ? $0.remote : nil }),
             timeout: 30)
-        return LandingVerification.parse(out)
+        // Landed, its checkout unreadable: the branch and checkout are kept —
+        // the cleanup's force-remove would take uncommitted work with it.
+        let verdict = LandingVerification.parse(out)
+        if verdict == .landed, let out, out.contains(Self.treeUnknownWord) {
+            store.mutate(task.id) { $0.landing?.keepBranch = true }
+        }
+        return verdict
     }
+
+    /// The verify command's word for a checkout whose status can't be read.
+    nonisolated static let treeUnknownWord = "TREEUNKNOWN"
 
     nonisolated static let statusFailedText = NSLocalizedString(
         "Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done.",
