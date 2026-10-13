@@ -3622,6 +3622,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         delegationEngine.onBoardMessage = { [weak self] d, m in
             self?.taskDispatcher.handle(d, m)
         }
+        delegationEngine.boardWantsRevival = { [weak self] d in
+            self?.taskDispatcher.wantsRevival(d) ?? true
+        }
         taskDispatcher.start()
         // ⇧⌥Space from any app: the Quick Task panel.
         QuickTaskHotKey.register { [weak self] in self?.quickTaskPanel.toggle() }

@@ -189,6 +189,10 @@ final class DelegationEngine {
     static let boardLabel = "the Coding Tasks board"
     /// A message for the board (an ask, a report, a delivery, a host note).
     var onBoardMessage: (@MainActor (Delegation, DelegationMessage) -> Void)?
+    /// Whether the board still wants this delegation of its own back when its
+    /// session returns — not when the card was deleted or is done meanwhile
+    /// (the board's sync then cancels or closes it).
+    var boardWantsRevival: (@MainActor (Delegation) -> Bool)?
 
     /// A child may delegate in turn, this deep.
     static let maxDepth = 3
@@ -1692,6 +1696,9 @@ final class DelegationEngine {
     /// its status before, and the other end hears it.
     func revive(_ d: Delegation) {
         guard let was = store.delegation(d.id)?.goneFrom else { return }
+        // A board task deleted or finished during the outage: no "the work
+        // carries on" (which cleared the card's error), no tools again.
+        if d.parentSessionID == Self.boardSessionID, let wants = boardWantsRevival, !wants(d) { return }
         store.mutate(d.id) { $0.status = was; $0.failure = nil; $0.goneFrom = nil }
         missingSince[d.id] = nil
         BACDebug.log("delegation", "“\(d.title)”: its session is back — \(was.rawValue) again")
