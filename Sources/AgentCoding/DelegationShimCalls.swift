@@ -43,6 +43,13 @@ struct DelegationShimCalls {
         (try? JSONSerialization.data(withJSONObject: ["k": id])).map { String(decoding: $0, as: UTF8.self) } ?? "\(id)"
     }
 
+    /// The key of a request line's id (nil: not a request).
+    static func requestKey(_ line: Data) -> String? {
+        guard let msg = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              msg["method"] is String, let id = msg["id"] else { return nil }
+        return key(id)
+    }
+
     /// A request line (one with a method and an id) is in flight from now.
     mutating func sent(_ line: Data, on gen: Int, now: Date = Date()) {
         guard let msg = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],

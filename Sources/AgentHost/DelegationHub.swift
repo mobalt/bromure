@@ -268,15 +268,22 @@ enum DelegationShim {
             writeLock.unlock()
         }
 
-        /// Write `data` on stream `gen` (recording it as in flight there) —
-        /// false when that stream is gone or the write failed.
-        func send(_ data: Data, _ fd: Int32, _ gen: Int) -> Bool {
+        /// Write `data` on stream `gen`, recording it as in flight there.
+        /// A failed write takes the record back so the caller sends it again
+        /// — unless the reader took it first (the stream's end): then the
+        /// reader owns it (sends it again, or reports it lost), never both.
+        enum Sent { case sent, retry, ownedByReader }
+        func send(_ data: Data, _ fd: Int32, _ gen: Int) -> Sent {
             writeLock.lock(); defer { writeLock.unlock() }
             lock.lock()
             let live = sock == fd && generation == gen
             if live { pending.sent(data, on: gen) }
             lock.unlock()
-            return live && writeLine(data, fd)
+            guard live else { return .retry }
+            if writeLine(data, fd) { return .sent }
+            lock.lock(); defer { lock.unlock() }
+            guard let key = DelegationShimCalls.requestKey(data) else { return .retry }   // not a call: just again
+            return pending.take(key: key) != nil ? .retry : .ownedByReader
         }
 
         func writeLine(_ data: Data, _ fd: Int32) -> Bool {
@@ -303,7 +310,8 @@ enum DelegationShim {
                 let data = Data(line.utf8)
                 while true {
                     let (fd, gen) = current()
-                    if send(data, fd, gen) { break }
+                    let r = send(data, fd, gen)
+                    if r != .retry { break }
                     drop(fd)
                 }
             }
@@ -321,8 +329,9 @@ enum DelegationShim {
                 let fd = sock, gen = generation
                 // On a stream already gone (it died while held calls were being
                 // sent again): nobody reads it any more — answer them here.
-                let orphans = overdue.filter { $0.gen != gen || fd < 0 }
-                for o in orphans { _ = pending.take(key: o.key) }
+                // Only those still pending: one the reader settled meanwhile
+                // already has its reply.
+                let orphans = overdue.filter { $0.gen != gen || fd < 0 }.compactMap { pending.take(key: $0.key) }
                 lock.unlock()
                 for o in orphans { emit(DelegationShimCalls.lostReply(o)) }
                 guard fd >= 0, let late = overdue.first(where: { $0.gen == gen }) else { continue }
@@ -366,7 +375,7 @@ enum DelegationShim {
                     var rest = held
                     while let h = rest.first {
                         let (nfd, ngen) = current()
-                        if send(h.line, nfd, ngen) { rest.removeFirst() } else { drop(nfd) }
+                        if send(h.line, nfd, ngen) != .retry { rest.removeFirst() } else { drop(nfd) }
                     }
                 }
             } else {
