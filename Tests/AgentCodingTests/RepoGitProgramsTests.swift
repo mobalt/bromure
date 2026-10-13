@@ -319,7 +319,15 @@ struct RepoGitProgramsTests {
         _ = sh("touch -t 202001010000 \(wt)/x.bin")
         #expect(sh(iso + TaskLitter.status("'\(wt)'")).contains(RepoGitPrograms.statusFailedLine))
         #expect(check() == .statusFailed)
-        #expect(LandingVerification.parse(verify()) == .unknown)
+        // Finding (CWE-754): that status no longer skips the merge check —
+        // not in the target: pending (the agent's "merged" isn't taken);
+        // in it: landed, the checkout's state flagged unknown.
+        #expect(LandingVerification.parse(verify()) == .pending)
+        let mainWas = sh(iso + "git -C '\(root)' rev-parse main").trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = sh(iso + "git -C '\(root)' update-ref refs/heads/main wt/t")
+        let landedOut = verify()
+        #expect(LandingVerification.parse(landedOut) == .landed && landedOut.contains(CodingTaskEngine.treeUnknownWord))
+        _ = sh(iso + "git -C '\(root)' update-ref refs/heads/main \(mainWas)")
         #expect(sh(iso + "git -C '\(root)' rev-parse main") != sh(iso + "git -C '\(root)' rev-parse wt/t"))
         // The review and the file pane say so — not "no changes".
         let review = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: wt, base: .uncommitted)))
