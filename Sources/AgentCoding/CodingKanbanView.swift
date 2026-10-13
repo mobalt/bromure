@@ -1104,27 +1104,17 @@ struct CodingKanbanView: View {
                     .help(NSLocalizedString(
                         "Merges every selected task into its target in one go: Bromure merges the clean ones itself; the rest go to one agent, which merges them all, fixes conflicts and runs the checks once.",
                         comment: "review column"))
-                    .confirmationDialog(
-                        String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), selected.count),
-                        isPresented: $confirmingBatchMerge, titleVisibility: .visible
-                    ) {
-                        Button(NSLocalizedString("Merge", comment: "landing confirm")) {
-                            mergeBatch(selected.map(\.id), false)
-                            selectedReview.removeAll()
-                        }
-                        Button(NSLocalizedString("Merge & Push", comment: "landing confirm")) {
-                            mergeBatch(selected.map(\.id), true)
-                            selectedReview.removeAll()
-                        }
-                        Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
-                    } message: {
-                        Text(String(format: NSLocalizedString(
-                            "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
-                            comment: "review column: batch merge"),
-                            Set(selected.compactMap(\.landingTarget)).sorted().joined(separator: ", "),
-                            selected.first?.workerName ?? "")
-                            // What's approved, in full: a card shows three lines of its title.
-                            + "\n\n" + selected.map { "• \($0.title)" }.joined(separator: "\n"))
+                    .sheet(isPresented: $confirmingBatchMerge) {
+                        BatchMergeSheet(
+                            titles: selected.map(\.title),
+                            targets: Set(selected.compactMap(\.landingTarget)).sorted(),
+                            agentName: selected.first?.workerName ?? "",
+                            onCancel: { confirmingBatchMerge = false },
+                            onConfirm: { push in
+                                confirmingBatchMerge = false
+                                mergeBatch(selected.map(\.id), push)
+                                selectedReview.removeAll()
+                            })
                     }
                     Button(NSLocalizedString("Clear", comment: "plan column")) { selectedReview.removeAll() }
                         .controlSize(.small)
@@ -1257,6 +1247,75 @@ struct CodingKanbanView: View {
 /// Hover-revealed ✕ on a kanban card, behind a confirmation so a stray
 /// click can't nuke a task. Removal deletes the card only — a running
 /// agent session, its branch, and its worktree are untouched.
+/// "Merge N tasks?" — a sheet, not a confirmation dialog: every approved
+/// title is listed, and a long batch grew the alert past the screen, its
+/// buttons out of reach. The list scrolls; the buttons stay put.
+struct BatchMergeSheet: View {
+    let titles: [String]
+    let targets: [String]
+    let agentName: String
+    let onCancel: () -> Void
+    let onConfirm: (_ push: Bool) -> Void
+    /// Button titles: Cancel, Merge, Merge & Push (a test passes others).
+    var labels = (cancel: NSLocalizedString("Cancel", comment: ""),
+                  merge: NSLocalizedString("Merge", comment: "landing confirm"),
+                  push: NSLocalizedString("Merge & Push", comment: "landing confirm"))
+    /// iPhone: the sheet fills the screen, no fixed width.
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    @ViewBuilder private var buttons: some View {
+        Button(labels.cancel, action: onCancel)
+            .keyboardShortcut(.cancelAction)
+        Button(labels.merge) { onConfirm(false) }
+            .keyboardShortcut(.defaultAction)
+        // ⌘↩: the one that also pushes.
+        Button(labels.push) { onConfirm(true) }
+            .keyboardShortcut(.return, modifiers: .command)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), titles.count))
+                .font(.system(size: 15, weight: .semibold))
+            Text(String(format: NSLocalizedString(
+                "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
+                comment: "review column: batch merge"),
+                targets.joined(separator: ", "), agentName))
+                .font(.system(size: 12.5))
+                .fixedSize(horizontal: false, vertical: true)
+            // What's approved, in full: a card shows three lines of its title.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(titles.enumerated()), id: \.offset) { _, title in
+                        Text("• \(title)")
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(minHeight: min(CGFloat(titles.count) * 20 + 16, 260), maxHeight: 260)
+            .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+            // Three buttons side by side don't fit every language (German
+            // runs past the width): then they stack, Merge & Push still on
+            // screen.
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Spacer()
+                    buttons
+                }
+                VStack(alignment: .trailing, spacing: 8) {
+                    buttons
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(20)
+        .frame(width: hSize == .compact ? nil : 460)
+    }
+}
+
 private struct RemovableCard: ViewModifier {
     let title: String
     let stage: CodingTask.Stage
