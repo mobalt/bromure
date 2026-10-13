@@ -1222,6 +1222,25 @@ final class DelegationEngine {
         }
         guard !child.isDeleted, !child.isArchived else { return }
         archive(d.childSessionID)
+        endOthers(on: d.childSessionID, except: d.id)
+    }
+
+    /// Bromure just put this session away, its delegation over: a request
+    /// another session had on it can't go on (nothing may reach it now),
+    /// so it ends here, its parent told — rather than waiting for ever.
+    /// Only here: a session the user archives (Undo, or a message brings
+    /// it back) or the 3-day sweep puts away is a pause, not an end — its
+    /// delegations stay open, the "bring it back first" refusal holds, and
+    /// the work carries on once it's back.
+    private func endOthers(on childID: UUID, except id: UUID) {
+        for o in store.delegations where o.childSessionID == childID && o.id != id {
+            let why = o.isRequest ? "the peer's session was put away" : "the delegate's session was put away"
+            if o.goneFrom != nil {
+                endGone(o, why)          // waiting for it to come back: it won't
+            } else if o.status.isOpen, o.status != .delivered {
+                fail(o, why)
+            }
+        }
     }
 
     // MARK: Inbox
@@ -1675,14 +1694,16 @@ final class DelegationEngine {
             vanishedSince[d.id] = nil
             if child.isDeleted {
                 endGone(d, deleted)
-            } else if child.isArchived || retiring.contains(child.id) {
-                // Archived — or being put away this very tick for another of
-                // its delegations (on an attached Mac the archive is only
-                // queued, the mirror still shows it live): not back to work.
+            } else if retiring.contains(child.id) {
+                // Put away this very tick for another of its delegations (on
+                // an attached Mac the archive is only queued, the mirror still
+                // shows it live): not back to work.
                 endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
-            } else {
+            } else if !child.isArchived {
                 revive(d)
             }
+            // Archived by the user (or the 3-day sweep) while gone: still
+            // waiting — it revives once the session is brought back.
         }
         for d in store.delegations where d.status.isOpen {
             if let child = sessions.session(d.childSessionID), child.isDeleted {
@@ -1705,15 +1726,10 @@ final class DelegationEngine {
             if d.childHost == nil, let host = Self.childHost(of: child.id, sessions) {
                 store.mutate(d.id) { $0.childHost = host }
             }
-            // Put away (archived — by the user, or with another delegation
-            // on it: a cancel in view, a retire when its Mac came back): a
-            // peer nothing may reach any more (post refuses it), so a request
-            // left open waited for ever, its parent never told. Over, then —
-            // unless it already delivered (the parent still closes that).
-            if child.isArchived, d.status != .delivered {
-                fail(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
-                continue
-            }
+            // Archived: paused, not over — Bromure's own put-away already
+            // ended what it had to (`endOthers`); the user's archive, Undo
+            // and the 3-day sweep only wait for the session to come back.
+            if child.isArchived { continue }
             if d.isRequest { continue }
             if d.status == .starting {
                 if child.windowIndex != nil, !child.isLaunching {

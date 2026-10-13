@@ -585,6 +585,56 @@ struct DelegationTests {
         #expect(f.store.delegation(req.id)?.messages.last?.text == "failed — the peer's session was put away")
     }
 
+    /// Finding (CWE-670): watchChildren took any archived child as the
+    /// end — the user's Archive (its 6 s Undo), the stage's "your next
+    /// message brings it back", the 3-day sweep of an ended delegate — and
+    /// failed its open delegations; bringing the session back left them
+    /// failed, every steer refused.
+    @Test("archiving a session pauses its delegations; brought back, they carry on")
+    func archivePausesDelegations() async throws {
+        let f = fixture()
+        let (d, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        let before = try #require(f.store.delegation(d.id)).status
+        // The user archives it (or the sweep does): ticks go by.
+        f.sessions.setArchived(childID, true)
+        for _ in 0..<3 { f.engine.tick() }
+        #expect(f.store.delegation(d.id)?.status == before)
+        #expect(f.store.delegation(req.id)?.status.isOpen == true)
+        #expect(f.store.delegation(d.id)?.failure == nil && f.store.delegation(req.id)?.failure == nil)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(!(f.store.delegation(req.id)?.messages.contains { $0.text.contains("put away") } ?? true))
+        // Archived: a steer waits for it to be brought back…
+        do {
+            try await f.engine.post(d.id, from: .parent, kind: .steer, text: "Also the tests.")
+            Issue.record("a steer to an archived session went through")
+        } catch is DelegationRefusal {}
+        // …Undo / its next message brings it back, and it goes through.
+        f.sessions.setArchived(childID, false)
+        f.engine.tick()
+        try await f.engine.post(d.id, from: .parent, kind: .steer, text: "Also the tests.")
+        #expect(f.store.delegation(d.id)?.status.isOpen == true)
+        #expect(f.store.delegation(req.id)?.status.isOpen == true)
+    }
+
+    @Test("a delegate cancelled in view is put away, and that ends the requests others had on it")
+    func cancelInViewEndsOthers() async throws {
+        let f = fixture()
+        let (d, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        try await f.engine.cancel(from: f.parentID, delegationKey: d.id.uuidString, reason: "not needed")
+        f.engine.tick()
+        #expect(f.sessions.session(childID)?.isArchived == true)
+        let r = try #require(f.store.delegation(req.id))
+        #expect(r.status == .failed && r.failure == "the peer's session was put away")
+    }
+
     /// Finding (CWE-670): a steer the delegate never got (its Mac away) was
     /// still owed after the parent cancelled — the next notice pass resumed
     /// the session with it before retire-when-back archived it, relaunching
@@ -703,7 +753,8 @@ struct DelegationTests {
         #expect(ended.goneFrom == nil && ended.status == .failed)
         #expect(ended.failure == "the delegate's session was deleted")
 
-        // Archived while gone: ended, not revived.
+        // Archived by the user while gone: a pause, not the end — still
+        // waiting, and back to work once the session is brought back.
         let (d2, child2) = await delegated(f, childWindow: 8)
         f.engine.tick()
         var row = try #require(f.sessions.session(child2))
@@ -712,8 +763,11 @@ struct DelegationTests {
         row.archivedAt = Date()
         f.sessions.upsert(row)
         f.engine.tick()
-        #expect(f.store.delegation(d2.id)?.goneFrom == nil && f.store.delegation(d2.id)?.status == .failed)
-        #expect(f.store.delegation(d2.id)?.failure == "the delegate's session was put away")
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        row.archivedAt = nil
+        f.sessions.upsert(row)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom == nil && f.store.delegation(d2.id)?.status.isOpen == true)
 
         // On a machine that's away: it waits (the machine may come back).
         let (d3, child3) = await delegated(f, childWindow: 10)
