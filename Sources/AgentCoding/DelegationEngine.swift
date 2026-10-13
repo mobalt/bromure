@@ -1632,6 +1632,12 @@ final class DelegationEngine {
     /// peer is nobody's to watch: it lives its own life.
     /// Open delegations whose other session hasn't been found since when.
     private var missingSince: [UUID: Date] = [:]
+    /// Gone delegations whose child is still absent although where it lived
+    /// is reachable: since when (a machine just back lists its sessions on
+    /// its next poll, not at once).
+    private var vanishedSince: [UUID: Date] = [:]
+    /// How long a reachable child's absence lasts before it reads as deleted.
+    var vanishGrace: TimeInterval = 30
     /// How long a session may be out of view (its Mac restarting, asleep,
     /// reconnecting) before its delegations end.
     static let missingGrace: TimeInterval = 300
@@ -1651,19 +1657,25 @@ final class DelegationEngine {
         // Gone too long, and back: on with it where it was. Back deleted:
         // that's the end (failed, as a deleted session's always is).
         for d in store.delegations where d.goneFrom != nil {
-            guard let child = sessions.session(d.childSessionID) else { continue }
-            // Archived — or being put away this very tick for another of its
-            // delegations (on an attached Mac the archive is only queued, the
-            // mirror still shows it live): not back to work either.
-            let putAway = child.isArchived || retiring.contains(child.id)
-            if child.isDeleted || putAway {
-                let what = child.isDeleted ? "deleted" : "put away"
-                let why = d.isRequest ? "the peer's session was \(what)" : "the delegate's session was \(what)"
-                store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
-                // The card said it would carry on: say it won't.
-                Task { [weak self] in
-                    _ = try? await self?.post(d.id, from: .host, kind: .note, text: "failed — \(why)")
-                }
+            let deleted = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+            guard let child = sessions.session(d.childSessionID) else {
+                // Not listed although where it lived answers (this Mac, or
+                // its machine connected again): deleted there — a Sidecar's
+                // /state simply drops the id, it never lists it deleted.
+                guard Self.childHostReachable(d.childHost, sessions) else { vanishedSince[d.id] = nil; continue }
+                let since = vanishedSince[d.id] ?? now
+                vanishedSince[d.id] = since
+                if now.timeIntervalSince(since) > vanishGrace { endGone(d, deleted) }
+                continue
+            }
+            vanishedSince[d.id] = nil
+            if child.isDeleted {
+                endGone(d, deleted)
+            } else if child.isArchived || retiring.contains(child.id) {
+                // Archived — or being put away this very tick for another of
+                // its delegations (on an attached Mac the archive is only
+                // queued, the mirror still shows it live): not back to work.
+                endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
             } else {
                 revive(d)
             }
@@ -1686,6 +1698,9 @@ final class DelegationEngine {
                 continue
             }
             missingSince[d.id] = nil
+            if d.childHost == nil, let host = Self.childHost(of: child.id, sessions) {
+                store.mutate(d.id) { $0.childHost = host }
+            }
             // Put away (archived — by the user, or with another delegation
             // on it: a cancel in view, a retire when its Mac came back): a
             // peer nothing may reach any more (post refuses it), so a request
@@ -1713,6 +1728,37 @@ final class DelegationEngine {
                 _ = try? await self?.post(d.id, from: .host, kind: .note,
                                           text: "the delegate's agent ended without delivering — steer it (it picks the work back up) or cancel")
             }
+        }
+    }
+
+    nonisolated static let localChildHost = "local"
+
+    /// Whether the place a gone child lived lists sessions now: this Mac's
+    /// store always does; an attached machine only while connected. Unknown
+    /// (a record from before `childHost`): no — it keeps waiting.
+    static func childHostReachable(_ host: String?, _ sessions: DelegationSessions) -> Bool {
+        guard let host else { return false }
+        if host == localChildHost { return true }
+        return sessions.hosts.contains { $0.agentHostID?.uuidString == host }
+    }
+
+    /// Where a visible session lives: "local" only when this Mac's own store
+    /// holds it; else the link that lists it (an attached machine, a mirrored
+    /// host — whose sessions keep their own workspace ids, so a profile
+    /// lookup read them as local and ended them while the host was away).
+    /// nil when the link has no identity: unknown, it keeps waiting.
+    static func childHost(of sessionID: UUID, _ sessions: DelegationSessions) -> String? {
+        if sessions.local.session(sessionID) != nil { return localChildHost }
+        return sessions.hosts.first { $0.hostSessions.session(sessionID) != nil }?.agentHostID?.uuidString
+    }
+
+    /// A gone delegation whose session won't come back: failed for good, and
+    /// the other end hears it (the card said it would carry on).
+    private func endGone(_ d: Delegation, _ why: String) {
+        vanishedSince[d.id] = nil
+        store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
+        Task { [weak self] in
+            _ = try? await self?.post(d.id, from: .host, kind: .note, text: "failed — \(why)")
         }
     }
 

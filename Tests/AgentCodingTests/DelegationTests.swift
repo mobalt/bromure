@@ -676,6 +676,79 @@ struct DelegationTests {
         #expect(f.store.delegation(req.id)?.status == .done)
     }
 
+    /// Finding (CWE-670): a gone delegation ended only on a listed row with
+    /// `deletedAt` — but a deleted session simply vanishes (a Sidecar's
+    /// /state drops it, a windowless local one is removed), so it waited
+    /// for ever; and an archived one was revived.
+    @Test("a gone delegation ends when its session stays absent where it lived, or comes back archived")
+    func goneEndsWhenVanishedOrArchived() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        f.engine.vanishGrace = 0
+        func goAway(_ id: UUID) async {
+            f.sessions.remove(id)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+        }
+        // Deleted: its row is gone for good, and this Mac lists sessions.
+        let (d, childID) = await delegated(f)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.childHost == DelegationEngine.localChildHost)
+        await goAway(childID)
+        f.engine.tick()                                   // absent where it lived: noted
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()                                   // still absent past the grace
+        let ended = try #require(f.store.delegation(d.id))
+        #expect(ended.goneFrom == nil && ended.status == .failed)
+        #expect(ended.failure == "the delegate's session was deleted")
+
+        // Archived while gone: ended, not revived.
+        let (d2, child2) = await delegated(f, childWindow: 8)
+        f.engine.tick()
+        var row = try #require(f.sessions.session(child2))
+        await goAway(child2)
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        row.archivedAt = Date()
+        f.sessions.upsert(row)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom == nil && f.store.delegation(d2.id)?.status == .failed)
+        #expect(f.store.delegation(d2.id)?.failure == "the delegate's session was put away")
+
+        // On a machine that's away: it waits (the machine may come back).
+        let (d3, child3) = await delegated(f, childWindow: 10)
+        f.engine.tick()
+        f.store.mutate(d3.id) { $0.childHost = UUID().uuidString }
+        await goAway(child3)
+        f.engine.tick()
+        #expect(f.store.delegation(d3.id)?.goneFrom != nil)
+
+        // Review: a mirrored host's session keeps its own workspace id (not
+        // the link's) — recorded by the link that lists it, never "local",
+        // so it waits while that host is away and ends once it's back.
+        let host = FakeMachine()
+        var links: [AgentHostLink] = [host]
+        f.engine.agentHostLinks = { links }
+        var mirrored = AgentSession(profileID: UUID(), tool: .claude, title: "On the host", cwd: "~", windowIndex: 4)
+        mirrored.agentAlive = true
+        host.hostSessions.upsert(mirrored)
+        let d4 = try await f.engine.requestFromBoard(to: mirrored.id, title: "Look", text: "Look at it.")
+        f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.childHost == host.agentHostID?.uuidString)
+        links = []                                        // the host away: its sessions out of view
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick(); f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.goneFrom != nil)
+        host.hostSessions.remove(mirrored.id)             // deleted there meanwhile
+        links = [host]                                    // back
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.goneFrom == nil)
+        #expect(f.store.delegation(d4.id)?.failure == "the peer's session was deleted")
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()

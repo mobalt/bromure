@@ -156,6 +156,10 @@ struct Delegation: Identifiable, Codable, Equatable, Sendable {
     /// view: that session is put away when it comes back — else it showed
     /// up active again, its agent still at work on a cancelled task.
     var retireWhenBack: Bool?
+    /// Where the child session lives, as last seen: "local", or the attached
+    /// machine's id. Tells "gone because its machine is away" (wait) from
+    /// "gone from a machine that's back" (deleted: the end).
+    var childHost: String?
     /// The parent was told the delegate's agent ended without delivering
     /// (once per ending — the delegation stays open, a steer resumes it).
     var childEndedNotedAt: Date?
