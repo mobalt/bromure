@@ -360,6 +360,21 @@ final class TaskReviewWindowManager {
         host.reload(id)
     }
 
+    /// Ask for the look (`relocate`) and wait for it, counted in
+    /// `request.relocating` until it is over. Its own task: a re-open
+    /// cancels this load, and a fat client's wait for the host's stamp then
+    /// gave up at once — the count dropped while the host was still looking,
+    /// and the next load read "no code", then "Can't reach the machine".
+    static func look(for task: CodingTask, request: ReviewLandingRequest,
+                     relocate: @escaping (CodingTask) async -> Bool) async {
+        await MainActor.run { request.relocating += 1 }
+        let look = Task {
+            _ = await relocate(task)
+            await MainActor.run { request.relocating -= 1 }
+        }
+        await look.value
+    }
+
     private func mayTryRelocate(_ id: UUID) -> Bool {
         if let at = relocateTried[id], Date().timeIntervalSince(at) < 15 { return false }
         relocateTried[id] = Date()
@@ -413,9 +428,7 @@ final class TaskReviewWindowManager {
                         // one still waits doesn't end "looking" under it.
                         await MainActor.run { request.lookers += 1; request.openedLooking = false }
                         if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
-                            await MainActor.run { request.relocating += 1 }
-                            _ = await c.relocate(task)
-                            await MainActor.run { request.relocating -= 1 }
+                            await Self.look(for: task, request: request, relocate: c.relocate)
                         }
                         // Another look may still be under way (a second
                         // window's, the host's for a fat client — or an

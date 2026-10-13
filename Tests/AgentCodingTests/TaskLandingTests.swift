@@ -802,6 +802,42 @@ struct TaskLandingTests {
         #expect(!r.othersLooking(isLocating: false)) // the look is over: it loads
     }
 
+    /// Review: re-opening Review cancels the load inside the look; a fat
+    /// client's wait for the host's stamp returns at once when cancelled — the
+    /// count must hold until the look itself is over, not until its caller
+    /// gives up.
+    @Test("a cancelled load's look stays counted until the look ends")
+    @MainActor func cancelledLoadKeepsItsLook() async throws {
+        let r = ReviewLandingRequest()
+        let task = CodingTask(title: "t", profileID: UUID(), tool: .claude)
+        let hostDone = Flag()
+        // Like `awaitLocate`: waits for the host, gives up when cancelled.
+        let relocate: (CodingTask) async -> Bool = { _ in
+            while !hostDone.isSet {
+                if Task.isCancelled { return false }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return true
+        }
+        let load = Task { await TaskReviewWindowManager.look(for: task, request: r, relocate: relocate) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(r.relocating == 1)
+        load.cancel()                                // the window re-opened
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(r.relocating == 1)                   // the look goes on, counted
+        #expect(r.othersLooking(isLocating: false))  // a newer load waits for it
+        hostDone.set()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(r.relocating == 0)
+    }
+
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     /// Finding (CWE-670): a fat client gave up on the host's look after a
     /// fixed 20 s, while the host was still trying sessions one after
     /// another (up to 15 s each) — and never showed the worktree found.
