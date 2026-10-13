@@ -602,10 +602,24 @@ final class ScheduledAutomationStore {
     /// mirrored board/sidebar can show "next …" like the host does.
     func mirror(automations newAutomations: [ScheduledAutomation],
                 runs newRuns: [AutomationRunRecord],
-                nextFires newNextFires: [String: Date]? = nil) {
+                nextFires newNextFires: [String: Date]? = nil,
+                timeZone newTimeZone: TimeZone? = nil) {
         if automations != newAutomations { automations = newAutomations }
         if runs != newRuns { runs = newRuns }
         if let newNextFires, nextFires != newNextFires { nextFires = newNextFires }
+        if let newTimeZone, scheduleTimeZone != newTimeZone { scheduleTimeZone = newTimeZone }
+    }
+
+    /// The clock the schedules run on: this Mac's, or — mirrored — the
+    /// host's. "Every day at 3:00" means 3:00 there; a client elsewhere
+    /// reads it with that zone named, and its local equivalent.
+    var scheduleTimeZone: TimeZone = .current
+
+    /// A calendar on the schedules' clock.
+    var scheduleCalendar: Calendar {
+        var c = Calendar.current
+        c.timeZone = scheduleTimeZone
+        return c
     }
 
     /// Every planned next fire, keyed by automation id — the /state payload
@@ -2173,15 +2187,55 @@ enum AutomationDescriber {
         return a.trigger == .schedule ? .scheduled : .event
     }
 
-    static func time(_ a: ScheduledAutomation) -> String {
-        var c = DateComponents()
-        c.hour = a.hour; c.minute = a.minute
-        let date = Calendar.current.date(from: c) ?? Date()
-        return date.formatted(date: .omitted, time: .shortened)
+    /// The schedule's time of day — on the clock it runs on (`timeZone`, the
+    /// host's). Seen from another zone, that zone is named and the time here
+    /// follows: "3:00 AM EDT (4:00 PM JST here)". The sidebar showed the next
+    /// run in local time and the editor the host's wall time, unlabeled.
+    static func time(_ a: ScheduledAutomation, timeZone: TimeZone = .current,
+                     viewer: TimeZone = .current, now: Date = Date()) -> String {
+        var cal = Calendar.current
+        cal.timeZone = timeZone
+        let date = cal.date(bySettingHour: a.hour, minute: a.minute, second: 0, of: now) ?? now
+        let there = clock(date, in: timeZone)
+        guard differs(timeZone, viewer, at: date) else { return there }
+        return String(format: NSLocalizedString("%1$@ %2$@ (%3$@ %4$@ here)",
+                                                comment: "describer: host time, host zone, local time, local zone"),
+                      there, zoneName(timeZone, at: date), clock(date, in: viewer), zoneName(viewer, at: date))
+    }
+
+    /// A moment (a next run) in the viewer's time, its zone named when the
+    /// schedules run on another clock.
+    static func moment(_ date: Date, scheduleTimeZone: TimeZone, viewer: TimeZone = .current,
+                       withDate: Bool = true) -> String {
+        let f = DateFormatter()
+        f.timeZone = viewer
+        f.dateStyle = withDate ? .medium : .none
+        f.timeStyle = .short
+        f.doesRelativeDateFormatting = withDate
+        let s = f.string(from: date)
+        return differs(scheduleTimeZone, viewer, at: date) ? s + " " + zoneName(viewer, at: date) : s
+    }
+
+    static func differs(_ a: TimeZone, _ b: TimeZone, at date: Date) -> Bool {
+        a.secondsFromGMT(for: date) != b.secondsFromGMT(for: date)
+    }
+
+    static func zoneName(_ tz: TimeZone, at date: Date) -> String {
+        tz.abbreviation(for: date) ?? tz.identifier
+    }
+
+    private static func clock(_ date: Date, in tz: TimeZone) -> String {
+        let f = DateFormatter()
+        f.timeZone = tz
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
     }
 
     /// "Every weekday at 9:00 AM", "When a pull request is opened on acme/api", …
-    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil) -> String {
+    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil,
+                     timeZone: TimeZone = .current) -> String {
+        func time(_ a: ScheduledAutomation) -> String { Self.time(a, timeZone: timeZone) }
         let repo = a.githubRepo.isEmpty ? NSLocalizedString("a repository", comment: "describer") : a.githubRepo
         switch a.trigger {
         case .schedule:

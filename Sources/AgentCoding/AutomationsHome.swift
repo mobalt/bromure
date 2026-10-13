@@ -107,6 +107,7 @@ struct AutomationsHomeTab: View {
             workspace: model.profileRows.first { $0.id == a.profileID },
             upstreamName: upstream,
             nextFire: automationStore.nextFire(for: a.id),
+            scheduleTimeZone: automationStore.scheduleTimeZone,
             lastRun: runs.first { $0.outcome != .skipped || $0.itemKey == nil },
             pollState: automationStore.pollState(for: a.id),
             runningCount: running,
@@ -217,6 +218,8 @@ struct AutomationListRow: View {
     let workspace: SessionListModel.ProfileRow?
     let upstreamName: String?
     let nextFire: Date?
+    /// The clock the schedule runs on (the host's, mirrored).
+    var scheduleTimeZone: TimeZone = .current
     let lastRun: AutomationRunRecord?
     let pollState: ScheduledAutomationStore.PRPollState?
     let runningCount: Int
@@ -256,7 +259,8 @@ struct AutomationListRow: View {
                             .background(Color.secondary.opacity(0.15), in: Capsule())
                     }
                 }
-                Text(AutomationDescriber.when(automation, upstreamName: upstreamName))
+                Text(AutomationDescriber.when(automation, upstreamName: upstreamName,
+                                              timeZone: scheduleTimeZone))
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.8))
                     .lineLimit(1)

@@ -249,6 +249,7 @@ struct AutomationKanbanView: View {
                     workspaceName: model.profileRows.first { $0.id == automation.profileID }?
                         .name ?? "",
                     nextFire: store.nextFire(for: automation.id),
+                    scheduleTimeZone: store.scheduleTimeZone,
                     runningCount: cols.inProgress.filter { $0.automationID == automation.id }.count,
                     onSelect: { actions.selectAutomation(automation.id) },
                     onRunNow: { actions.runNow(automation.id) },
@@ -636,6 +637,7 @@ private struct ScheduledAutomationCard: View {
     let accentHex: String
     let workspaceName: String
     let nextFire: Date?
+    var scheduleTimeZone: TimeZone = .current
     let runningCount: Int
     let onSelect: () -> Void
     let onRunNow: () -> Void
@@ -680,7 +682,7 @@ private struct ScheduledAutomationCard: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                         Text(String(format: NSLocalizedString("next %@", comment: "kanban card"),
-                                    nextFire.formatted(date: .abbreviated, time: .shortened)))
+                                    AutomationDescriber.moment(nextFire, scheduleTimeZone: scheduleTimeZone)))
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }

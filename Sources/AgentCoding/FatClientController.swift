@@ -1308,7 +1308,8 @@ final class RemoteHostController {
         let iso = ISO8601DateFormatter()
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
-        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires,
+                               timeZone: (autos["timeZone"] as? String).flatMap(TimeZone.init(identifier:)))
         #if os(macOS)
         // Absent on a server without repository watches: leave the mirror empty.
         if autos["watches"] != nil || autos["findings"] != nil {

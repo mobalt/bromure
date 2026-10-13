@@ -4185,3 +4185,9 @@
 
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git schlägt in diesem Checkout ohne das eigene Filterprogramm des Repositorys fehl, das Bromure nicht ausführt. Sehen Sie ihn sich in einem Terminal an.";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ hier)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (Zeit des Hosts)";

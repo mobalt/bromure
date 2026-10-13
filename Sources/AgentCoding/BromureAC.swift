@@ -6408,6 +6408,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
+            // The clock the schedules run on: a client in another zone
+            // names it, and shows its own equivalent.
+            "timeZone": TimeZone.current.identifier,
             // Repository watches + findings ride along for the fat client.
             "watches": findingStore.watches.compactMap(Self.codableToDict),
             "findings": findingStore.findings.compactMap(Self.codableToDict),
