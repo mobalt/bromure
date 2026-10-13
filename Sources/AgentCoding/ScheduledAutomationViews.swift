@@ -332,7 +332,11 @@ struct AutomationSources {
         var body = extra
         body["profile"] = profileID.uuidString
         body["kind"] = kind
-        return try await call(body)
+        let reply = try await call(body)
+        // The asking view moved on while the host looked (a fat client's
+        // read can't be interrupted): never its answer.
+        try Task.checkCancellation()
+        return reply
     }
     func repos(_ pid: UUID) async throws -> [String] {
         try await items(pid, "repos")["items"] as? [String] ?? []
@@ -888,6 +892,10 @@ struct AutomationEditorView: View {
         repoChoices = nil; repoLoadError = nil
         teamChoices = nil; teamLoadError = nil
         guard let profile = selectedProfile else { return }
+        // Every write waits for the lookup and is skipped once this task is
+        // cancelled (another workspace picked): a late reply — a slow link,
+        // a bigger account — filled the new workspace's lists with the old
+        // one's, and could copy one of its repositories into the draft.
         let localToken = githubToken.flatMap { $0.isEmpty ? nil : $0 }
         if localToken == nil, sources == nil, hasGitHubToken {
             // Said to hold a token nothing here can use: say so, never spin.
@@ -897,11 +905,14 @@ struct AutomationEditorView: View {
         }
         if localToken != nil || (sources != nil && hasGitHubToken) {
             do {
+                var repos: [String]?
                 if let localToken {
-                    repoChoices = try await GitHubPRPoller.fetchRepos(token: localToken)
+                    repos = try await GitHubPRPoller.fetchRepos(token: localToken)
                 } else if let sources {
-                    repoChoices = try await sources.repos(profile.id)
+                    repos = try await sources.repos(profile.id)
                 }
+                guard !Task.isCancelled else { return }
+                repoChoices = repos
                 // Prefilled from a terminal tab: if the folder name matches
                 // one of the token's repos, preselect it.
                 if draft.githubRepo.isEmpty {
@@ -913,40 +924,68 @@ struct AutomationEditorView: View {
                         draft.githubRepo = match
                     }
                 }
-            } catch { repoLoadError = error.localizedDescription }
+            } catch {
+                guard !Task.isCancelled else { return }
+                repoLoadError = error.localizedDescription
+            }
         }
         if !profile.linearToken.isEmpty {
-            do { teamChoices = try await LinearPoller.fetchTeams(token: profile.linearToken) }
-            catch { teamLoadError = error.localizedDescription }
-            projectChoices = try? await LinearPoller.fetchProjects(token: profile.linearToken)
+            let teams: Result<[LinearPoller.LinearTeam], Error>
+            do { teams = .success(try await LinearPoller.fetchTeams(token: profile.linearToken)) }
+            catch { teams = .failure(error) }
+            let projects = try? await LinearPoller.fetchProjects(token: profile.linearToken)
+            guard !Task.isCancelled else { return }
+            applyTeams(teams, projects)
         } else if let sources, hasLinearToken {
-            do { teamChoices = try await sources.teams(profile.id) }
-            catch { teamLoadError = error.localizedDescription }
-            projectChoices = try? await sources.projects(profile.id)
+            let teams: Result<[LinearPoller.LinearTeam], Error>
+            do { teams = .success(try await sources.teams(profile.id)) }
+            catch { teams = .failure(error) }
+            let projects = try? await sources.projects(profile.id)
+            guard !Task.isCancelled else { return }
+            applyTeams(teams, projects)
         }
     }
 
+    private func applyTeams(_ teams: Result<[LinearPoller.LinearTeam], Error>,
+                            _ projects: [LinearPoller.LinearProject]?) {
+        switch teams {
+        case .success(let t): teamChoices = t
+        case .failure(let e): teamLoadError = e.localizedDescription
+        }
+        projectChoices = projects
+    }
+
     /// Branch list (always) + directory list (commit trigger) for the current
-    /// repo. Both degrade to free-text fields on any failure.
+    /// repo. Both degrade to free-text fields on any failure. Written only
+    /// while this repo / branch is still the one asked about (a cancelled
+    /// lookup's late reply was the previous repository's branches).
     private func loadRepoDetails() async {
         branchChoices = nil; dirChoices = nil
         guard draft.trigger.isGitHub,
               GitHubPRPoller.isValidRepoSlug(draft.githubRepo) else { return }
         let repo = draft.githubRepo, branch = draft.filters.commitBranch
+        let wantDirs = draft.trigger == .githubCommit
+        var branches: [String] = []
+        var dirs: [String]?
         if let token = githubToken, !token.isEmpty {
-            branchChoices = (try? await GitHubPRPoller.fetchBranches(repo: repo, token: token)) ?? []
-            if draft.trigger == .githubCommit {
+            branches = (try? await GitHubPRPoller.fetchBranches(repo: repo, token: token)) ?? []
+            if wantDirs {
                 // nil result (tree truncated) or a throw → empty, which the
                 // subfolder field reads as "fall back to free text".
-                dirChoices = ((try? await GitHubPRPoller.fetchDirectories(
+                dirs = ((try? await GitHubPRPoller.fetchDirectories(
                     repo: repo, token: token, branch: branch)) ?? nil) ?? []
             }
         } else if let sources, hasGitHubToken, let pid = selectedProfile?.id {
-            branchChoices = (try? await sources.branches(pid, repo: repo)) ?? []
-            if draft.trigger == .githubCommit {
-                dirChoices = ((try? await sources.directories(pid, repo: repo, branch: branch)) ?? nil) ?? []
+            branches = (try? await sources.branches(pid, repo: repo)) ?? []
+            if wantDirs {
+                dirs = ((try? await sources.directories(pid, repo: repo, branch: branch)) ?? nil) ?? []
             }
+        } else {
+            return
         }
+        guard !Task.isCancelled else { return }
+        branchChoices = branches
+        if wantDirs { dirChoices = dirs }
     }
 
     private var header: some View {

@@ -67,4 +67,25 @@ struct AutomationSourcesTests {
         // An older host: the primary only, as before.
         #expect(RemoteHostController.additionalTools(from: [:], primary: .claude).isEmpty)
     }
+
+    /// Finding (CWE-362): switching workspace cancelled the editor's lookup,
+    /// but the fat client's socket read can't be interrupted — the late reply
+    /// (the previous workspace's repositories, or its 401) was still returned
+    /// and applied to the workspace now on screen.
+    @Test("a lookup whose view moved on never returns the late reply")
+    func cancelledLookup() async throws {
+        let sources = AutomationSources { _ in
+            // The host answering after the view task was cancelled — the read
+            // itself doesn't stop (not a cancellable sleep).
+            Thread.sleep(forTimeInterval: 0.3)
+            return ["items": ["old/repo"]]
+        }
+        let lookup = Task { try await sources.repos(UUID()) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        lookup.cancel()
+        let result = await lookup.result
+        #expect(throws: CancellationError.self) { _ = try result.get() }
+        // Not cancelled: the reply as ever.
+        #expect(try await sources.repos(UUID()) == ["old/repo"])
+    }
 }
