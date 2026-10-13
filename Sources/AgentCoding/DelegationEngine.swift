@@ -1665,8 +1665,7 @@ final class DelegationEngine {
                 continue
             }
             missingSince[d.id] = nil
-            if d.childHost == nil {
-                let host = sessions.host(for: child.profileID)?.agentHostID?.uuidString ?? Self.localChildHost
+            if d.childHost == nil, let host = Self.childHost(of: child.id, sessions) {
                 store.mutate(d.id) { $0.childHost = host }
             }
             if d.isRequest { continue }
@@ -1698,8 +1697,17 @@ final class DelegationEngine {
     static func childHostReachable(_ host: String?, _ sessions: DelegationSessions) -> Bool {
         guard let host else { return false }
         if host == localChildHost { return true }
-        guard let id = UUID(uuidString: host) else { return false }
-        return sessions.host(for: id) != nil
+        return sessions.hosts.contains { $0.agentHostID?.uuidString == host }
+    }
+
+    /// Where a visible session lives: "local" only when this Mac's own store
+    /// holds it; else the link that lists it (an attached machine, a mirrored
+    /// host — whose sessions keep their own workspace ids, so a profile
+    /// lookup read them as local and ended them while the host was away).
+    /// nil when the link has no identity: unknown, it keeps waiting.
+    static func childHost(of sessionID: UUID, _ sessions: DelegationSessions) -> String? {
+        if sessions.local.session(sessionID) != nil { return localChildHost }
+        return sessions.hosts.first { $0.hostSessions.session(sessionID) != nil }?.agentHostID?.uuidString
     }
 
     /// A gone delegation whose session won't come back: failed for good, and

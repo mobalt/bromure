@@ -603,6 +603,31 @@ struct DelegationTests {
         await goAway(child3)
         f.engine.tick()
         #expect(f.store.delegation(d3.id)?.goneFrom != nil)
+
+        // Review: a mirrored host's session keeps its own workspace id (not
+        // the link's) — recorded by the link that lists it, never "local",
+        // so it waits while that host is away and ends once it's back.
+        let host = FakeMachine()
+        var links: [AgentHostLink] = [host]
+        f.engine.agentHostLinks = { links }
+        var mirrored = AgentSession(profileID: UUID(), tool: .claude, title: "On the host", cwd: "~", windowIndex: 4)
+        mirrored.agentAlive = true
+        host.hostSessions.upsert(mirrored)
+        let d4 = try await f.engine.requestFromBoard(to: mirrored.id, title: "Look", text: "Look at it.")
+        f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.childHost == host.agentHostID?.uuidString)
+        links = []                                        // the host away: its sessions out of view
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick(); f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.goneFrom != nil)
+        host.hostSessions.remove(mirrored.id)             // deleted there meanwhile
+        links = [host]                                    // back
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d4.id)?.goneFrom == nil)
+        #expect(f.store.delegation(d4.id)?.failure == "the peer's session was deleted")
     }
 
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
