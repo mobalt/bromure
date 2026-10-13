@@ -190,19 +190,29 @@ struct P2PDeviceChannelLivenessTests {
         #expect(await waitFor(5) { server.count == 2 && ch.connected })
     }
 
-    @Test("another Wi-Fi on the same interface is a new path; a rotated IPv6 or reordering isn't")
+    @Test("another Wi-Fi on the same interface is a new path; a standby link's address or reordering isn't")
     func pathSignature() {
         let home = P2PBroker.pathSignature(status: "satisfied", transports: ["en0"],
-                                           addresses: ["en0=192.168.1.20"], gateways: ["192.168.1.1:0"])
+                                           addresses: ["en0=192.168.1.20"])
         let cafe = P2PBroker.pathSignature(status: "satisfied", transports: ["en0"],
-                                           addresses: ["en0=10.0.4.7"], gateways: ["10.0.4.1:0"])
+                                           addresses: ["en0=10.0.4.7"])
         #expect(home != cafe)
-        // Same network, the router only listed in another order: no change.
-        let a = P2PBroker.pathSignature(status: "satisfied", transports: ["en0", "en1"],
-                                        addresses: ["en1=10.0.0.2", "en0=10.0.0.3"], gateways: ["g2", "g1"])
-        let b = P2PBroker.pathSignature(status: "satisfied", transports: ["en1", "en0", "en0"],
-                                        addresses: ["en0=10.0.0.3", "en1=10.0.0.2"], gateways: ["g1", "g2"])
-        #expect(a == b)
+        // Review: on Wi-Fi with cellular standing by, a cellular address
+        // refresh isn't a new network — only the preferred link's counts.
+        let before = P2PBroker.pathSignature(status: "satisfied", transports: ["en0", "pdp_ip0"],
+                                             addresses: ["en0=192.168.1.20", "pdp_ip0=10.64.1.2"])
+        let after = P2PBroker.pathSignature(status: "satisfied", transports: ["en0", "pdp_ip0"],
+                                            addresses: ["en0=192.168.1.20", "pdp_ip0=10.64.9.9"])
+        #expect(before == after)
+        // Cellular only: its address is the path's, so a new one counts.
+        #expect(P2PBroker.pathSignature(status: "satisfied", transports: ["pdp_ip0"], addresses: ["pdp_ip0=10.64.1.2"])
+                != P2PBroker.pathSignature(status: "satisfied", transports: ["pdp_ip0"], addresses: ["pdp_ip0=10.64.9.9"]))
+        // Wi-Fi gone, cellular left: a change (the interface list).
+        #expect(before != P2PBroker.pathSignature(status: "satisfied", transports: ["pdp_ip0"],
+                                                  addresses: ["pdp_ip0=10.64.1.2"]))
+        // Same network, an address listed twice: no change.
+        #expect(home == P2PBroker.pathSignature(status: "satisfied", transports: ["en0"],
+                                                addresses: ["en0=192.168.1.20", "en0=192.168.1.20"]))
         // Only IPv4 is read off the interfaces: loopback (lo0) has 127.0.0.1.
         let lo = P2PBroker.ipv4Addresses(of: ["lo0"])
         #expect(lo.contains("lo0=127.0.0.1"))

@@ -783,8 +783,7 @@ final class P2PBroker: @unchecked Sendable {
             .filter { $0.type == .wifi || $0.type == .cellular || $0.type == .wiredEthernet }
             .map(\.name)
         let sig = Self.pathSignature(status: "\(path.status)", transports: transports,
-                                     addresses: Self.ipv4Addresses(of: Set(transports)),
-                                     gateways: path.gateways.map { "\($0)" })
+                                     addresses: Self.ipv4Addresses(of: Set(transports)))
         lock.lock()
         let changed = sig != lastPathSignature
         let hadBaseline = !lastPathSignature.isEmpty
@@ -807,15 +806,18 @@ final class P2PBroker: @unchecked Sendable {
 
     /// What identifies the network a path is on: its status, the real
     /// transport interfaces (no VPN/tunnel: they flap), and — so another
-    /// Wi-Fi on the same en0 counts — their IPv4 addresses and the path's
-    /// gateways. IPv6 addresses are left out: privacy addresses rotate on
-    /// their own, which isn't a new network.
+    /// Wi-Fi on the same en0 counts — the IPv4 address of the one the path
+    /// prefers (`transports` in the path's order, preferred first). Not the
+    /// gateways (a split-tunnel VPN rewrites them), not a standby link's
+    /// address (a cellular refresh under live Wi-Fi), not IPv6 (privacy
+    /// addresses rotate on their own): none of those is a new network.
     nonisolated static func pathSignature(status: String, transports: [String],
-                                          addresses: [String], gateways: [String]) -> String {
-        [status,
-         Set(transports).sorted().joined(separator: ","),
-         Set(addresses).sorted().joined(separator: ","),
-         Set(gateways).sorted().joined(separator: ",")].joined(separator: "|")
+                                          addresses: [String]) -> String {
+        let primary = transports.first.map { $0 + "=" }
+        let own = primary.map { p in addresses.filter { $0.hasPrefix(p) } } ?? []
+        return [status,
+                Set(transports).sorted().joined(separator: ","),
+                Set(own).sorted().joined(separator: ",")].joined(separator: "|")
     }
 
     /// The IPv4 addresses on these interfaces ("en0=192.168.1.20").
