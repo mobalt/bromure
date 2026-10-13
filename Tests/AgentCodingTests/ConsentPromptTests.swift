@@ -109,4 +109,38 @@ struct ConsentPromptTests {
         _ = await ask("POST", "/", sql: "DROP TABLE orders")
         #expect(prompts == 4)
     }
+
+    /// Finding (CWE-285): a Guardrails deny made while the agent's prompt was
+    /// up was undone by that prompt — "Don't allow" shrank a session deny to
+    /// 5 minutes, "Allow" (Return) let the in-flight request through.
+    @Test("A Guardrails decision overtakes an open prompt: its waiters get it, the prompt's answer doesn't count")
+    func guardrailsOvertakesOpenPrompt() async throws {
+        install()
+        let p = ConsentPanelPresenter.shared
+        let broker = ConsentBroker()
+        for (answer, expectAllow) in [(3, false), (0, false)] {   // Don't allow; Allow for 1 hour
+            let profile = UUID()
+            async let first = broker.consent(profileID: profile, credentialID: "aws",
+                                             credentialDisplayName: "AWS", scopeHint: "")
+            try await Task.sleep(nanoseconds: 100_000_000)
+            async let waiter = broker.consent(profileID: profile, credentialID: "aws",
+                                              credentialDisplayName: "AWS", scopeHint: "")
+            try await Task.sleep(nanoseconds: 50_000_000)
+            await broker.deny(profileID: profile, credentialID: "aws", for: nil, credentialDisplayName: "AWS")
+            #expect(await waiter == false)          // answered by the deny, not the prompt
+            #expect(p.answer(profileID: profile, choice: answer))
+            #expect(await first == expectAllow)
+            let deny = await broker.snapshot().first { $0.profileID == profile }
+            #expect(deny?.kind == .deny && deny?.isSessionScoped == true)
+        }
+        // A grant made while the prompt is up stands over its "Don't allow".
+        let profile = UUID()
+        async let first = broker.consent(profileID: profile, credentialID: "gh",
+                                         credentialDisplayName: "GitHub", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await broker.grant(profileID: profile, credentialID: "gh", .allowSession, credentialDisplayName: "GitHub")
+        #expect(p.answer(profileID: profile, choice: 3))
+        #expect(await first == true)
+        #expect(await broker.snapshot().first { $0.profileID == profile }?.kind == .allow)
+    }
 }
