@@ -211,6 +211,10 @@ final class ACAutomationServer {
     /// Update a workspace (full-document, secret-preserving). Returns
     /// `{ok, …}` or `{ok:false, error}`.
     var onUpdateProfile: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
+    /// POST /profiles/{id}/firewall {rules}: a fat client's firewall editor
+    /// puts its rules in force as they're edited (saved and applied live).
+    /// nil: not found or the rules don't parse.
+    var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
     /// Reboot a running workspace in place (`soft` | `hard`). Async — a fresh
     /// VM has to boot before it returns.
     var onRebootVM: ((_ idOrName: String, _ mode: String) async -> [String: Any])?
@@ -1790,6 +1794,19 @@ final class ACAutomationServer {
         let noQuery = parts.first ?? path
         let query = parts.count > 1 ? parts[1] : ""
         let raw = String(noQuery.dropFirst("/profiles/".count))
+        if method == "POST", raw.hasSuffix("/firewall") {
+            let key = String(raw.dropLast("/firewall".count))
+            guard let rules = bodyJSON["rules"] as? String else {
+                sendResponse(fd: fd, status: 400, body: ["error": "rules required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            switch DispatchQueue.main.sync(execute: { self.onCommitFirewall?(id, rules) }) {
+            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .none: sendResponse(fd: fd, status: 400, body: ["ok": false, "error": "unknown workspace or invalid rules"])
+            }
+            return
+        }
         let id = raw.removingPercentEncoding ?? raw
         switch method {
         case "GET":

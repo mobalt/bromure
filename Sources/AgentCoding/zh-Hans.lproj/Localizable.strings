@@ -4209,3 +4209,4 @@
 /* automation editor */
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此窗口无法读取工作区的 GitHub 令牌——请以 所有者/仓库 的形式输入仓库。";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合并的分支只触发一次，针对其合并提交，而不是其中的每个提交。将提交与其第一个父提交比较，即可看到它带来的改动：git diff {{commit.key}}^1 {{commit.key}}。";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "更改会在你修改时立即应用到正在运行的工作区，无需重启或保存；点击“取消”会将规则恢复原样。取消勾选某条规则即可关闭它而不删除，或使用其时钟菜单限时开启。";

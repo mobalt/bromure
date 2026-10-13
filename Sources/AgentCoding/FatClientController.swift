@@ -1713,6 +1713,8 @@ final class RemoteHostController {
         var askBeforeUseLabels: [String]
     }
     private(set) var credentialsByID: [Profile.ID: WorkspaceCredentials] = [:]
+    /// The firewall editor's live commits, sent in the order made.
+    private let firewallQueue = DispatchQueue(label: "io.bromure.fatclient.firewall")
     func credentials(for id: Profile.ID) -> WorkspaceCredentials? { credentialsByID[id] }
     /// Mirrored profiles in source-list order (the automation editor's
     /// workspace picker + default owner rely on a stable order).
@@ -2060,6 +2062,17 @@ final class RemoteHostController {
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
         return c
+    }
+
+    /// Put a workspace's firewall rules in force on the host now (saved and
+    /// applied live) — what its editor does as the rules are edited. An
+    /// older host has no route: the rules then apply on Save, as before.
+    func commitFirewall(_ id: Profile.ID, rules: String) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))/firewall"
+        firewallQueue.async {
+            _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["rules": rules])
+        }
     }
 
     /// Secret-preserving whole-document save (the counterpart of
@@ -3163,6 +3176,9 @@ final class RemoteHostWindow: NSWindow {
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// Each settings window's firewall edits, in force on the host as made:
+    /// kept by a save, put back by any other close.
+    private var settingsFirewall: [Profile.ID: (live: FirewallLiveEdit, observer: NSObjectProtocol)] = [:]
     /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
     /// local window opens, backed by a `RemoteTraceStore` that fetches the
     /// remote's records + decrypted bodies over the tunnel. One per host window.
@@ -3914,6 +3930,9 @@ final class RemoteHostWindow: NSWindow {
             }
             if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
+            let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
+                                        commit: { [c] text in c.commitFirewall(id, rules: text); return true },
+                                        observeChanges: false)
             let win = NSWindow(
                 contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3944,6 +3963,7 @@ final class RemoteHostWindow: NSWindow {
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
                 onCancel: { [weak self] in self?.closeSettingsWindow(id) },
+                onFirewallEdited: { live.edited($0) },
                 onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
                 claudeAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.registeredAt },
                 claudeReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.reauthRequiredAt },
@@ -3966,7 +3986,19 @@ final class RemoteHostWindow: NSWindow {
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
             self.settingsWindows[id] = win
+            // Closed any way but a save: the firewall edits go back.
+            let observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: win, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.endSettingsFirewall(id) }
+            }
+            self.settingsFirewall[id] = (live, observer)
         }
+    }
+
+    private func endSettingsFirewall(_ id: Profile.ID) {
+        guard let f = settingsFirewall.removeValue(forKey: id) else { return }
+        f.live.revert()
+        NotificationCenter.default.removeObserver(f.observer)
     }
 
     /// Confirm on this Mac, then ask the remote to start the flow. The remote
@@ -4000,6 +4032,7 @@ final class RemoteHostWindow: NSWindow {
         Task { @MainActor [weak self] in
             do {
                 let resp = try await c.saveProfileDoc(id, doc)
+                self?.settingsFirewall[id]?.live.keep()
                 self?.closeSettingsWindow(id)
                 if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
                     let a = NSAlert()
@@ -4042,6 +4075,7 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func closeSettingsWindow(_ id: Profile.ID) {
+        endSettingsFirewall(id)
         settingsWindows[id]?.close()
         settingsWindows[id] = nil
         settingsOriginals[id] = nil
