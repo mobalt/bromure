@@ -647,6 +647,68 @@ struct DelegationTests {
         #expect(!r.messages.contains { $0.text == DelegationEngine.backText })
     }
 
+    /// Finding (CWE-670): a delivery gone with its session (failed, `goneFrom`
+    /// delivered) came back put away as "the peer's session was put away" —
+    /// `close` then refused it, so its verdict was never recorded; and a
+    /// deliver sent as the session came back (another delegation retiring
+    /// it) was refused, its summary lost.
+    @Test("a delivery outlives its session going away and being put away; one sent on the way back lands")
+    func deliveryOutlivesPutAway() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        func goAway(_ id: UUID) async {
+            f.sessions.remove(id)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+        }
+        // Delivered, gone, back archived: delivered again, and closable.
+        let asker = peer(in: f, workspace: f.profileID, nick: "asker", window: 12, title: "Asker")
+        var row = peer(in: f, workspace: f.profileID, nick: "answerer", window: 13, title: "Answerer")
+        let req = try await f.engine.request(from: asker.id, to: "@answerer", text: "Look at this?")
+        try await f.engine.post(req.id, from: .child, kind: .deliver, text: "Looked: all good.")
+        f.engine.tick()
+        await goAway(row.id)
+        #expect(f.store.delegation(req.id)?.goneFrom == .delivered)
+        row.archivedAt = Date()
+        f.sessions.upsert(row)
+        f.engine.tick()
+        let kept = try #require(f.store.delegation(req.id))
+        #expect(kept.status == .delivered && kept.goneFrom == nil && kept.failure == nil)
+        #expect(!kept.messages.contains { $0.text == DelegationEngine.backText })
+        f.engine.tick()
+        #expect(f.store.delegation(req.id)?.status == .delivered)
+        try await f.engine.close(from: asker.id, delegationKey: req.id.uuidString, verdict: "accepted", note: nil)
+        #expect(f.store.delegation(req.id)?.status == .done && f.store.delegation(req.id)?.verdict == "accepted")
+
+        // Working, gone, its session retired on its return (a delegate on it
+        // cancelled meanwhile): its deliver on the way back lands.
+        let (d1, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 14, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req2 = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        let child = try #require(f.sessions.session(childID))
+        await goAway(childID)
+        #expect(f.store.delegation(req2.id)?.goneFrom == .working)
+        try await f.engine.cancel(from: f.parentID, delegationKey: d1.id.uuidString, reason: "not needed")
+        f.sessions.upsert(child)                          // back, its retire queued for the next tick
+        // Anything but a deliver is still refused: it isn't back to work.
+        await #expect(throws: DelegationRefusal.self) {
+            try await f.engine.post(req2.id, from: .child, kind: .report, text: "Still on it.")
+        }
+        #expect(f.store.delegation(req2.id)?.status == .failed)
+        try await f.engine.post(req2.id, from: .child, kind: .deliver, text: "Done: here it is.")
+        let landed = try #require(f.store.delegation(req2.id))
+        #expect(landed.status == .delivered && landed.goneFrom == nil)
+        #expect(landed.messages.last?.text == "Done: here it is.")
+        f.engine.tick()                                   // put away now
+        #expect(f.sessions.session(childID)?.isArchived == true)
+        #expect(f.store.delegation(req2.id)?.status == .delivered)
+        try await f.engine.close(from: other.id, delegationKey: req2.id.uuidString, verdict: "rejected", note: nil)
+        #expect(f.store.delegation(req2.id)?.verdict == "rejected")
+    }
+
     /// Finding (CWE-94): a request's close note (and a cancel's reason) is
     /// typed into the peer's prompt, but skipped the injection scan every
     /// other parent message goes through — what a steer would withhold got

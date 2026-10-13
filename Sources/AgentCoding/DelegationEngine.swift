@@ -1007,7 +1007,12 @@ final class DelegationEngine {
             revive(d)
             if let fresh = store.delegation(delegationID) { d = fresh }
         }
-        guard d.status.isOpen || kind == .note else {
+        // Still failed for its absence (its session put away as it came
+        // back): its delivery lands all the same — delivered stays open on
+        // an archived session, and the parent closes it.
+        let deliversBack = from == .child && kind == .deliver && d.goneFrom != nil
+            && sessions.session(d.childSessionID)?.isDeleted != true
+        guard d.status.isOpen || kind == .note || deliversBack else {
             throw DelegationRefusal("Delegation “\(d.title)” is \(d.status.rawValue).")
         }
         let to: DelegationMessage.Party
@@ -1060,7 +1065,7 @@ final class DelegationEngine {
             switch kind {
             case .ask: d.status = .waitingForParent
             case .answer, .steer: if d.status == .waitingForParent || d.status == .starting { d.status = .working }
-            case .deliver: d.status = .delivered
+            case .deliver: d.status = .delivered; d.goneFrom = nil; d.failure = nil
             case .cancel: d.status = .cancelled
             case .report: if d.status == .starting { d.status = .working }
             case .brief, .note: break
@@ -1679,7 +1684,10 @@ final class DelegationEngine {
                 // Archived — or being put away this very tick for another of
                 // its delegations (on an attached Mac the archive is only
                 // queued, the mirror still shows it live): not back to work.
-                endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                // A delivery stands, though: the parent still closes it.
+                if d.goneFrom == .delivered { keepDelivery(d) } else {
+                    endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                }
             } else {
                 revive(d)
             }
@@ -1787,9 +1795,11 @@ final class DelegationEngine {
     /// its status before, and the other end hears it.
     func revive(_ d: Delegation) {
         guard let was = store.delegation(d.id)?.goneFrom else { return }
-        // Put away meanwhile (archived, or queued to be): it isn't back.
-        if let child = sessions.session(d.childSessionID), child.isArchived { return }
-        if store.delegations.contains(where: { $0.childSessionID == d.childSessionID && $0.retireWhenBack == true }) {
+        // Put away meanwhile (archived, or queued to be): it isn't back —
+        // but a delivery stands (the parent still closes it).
+        if sessions.session(d.childSessionID)?.isArchived == true
+            || store.delegations.contains(where: { $0.childSessionID == d.childSessionID && $0.retireWhenBack == true }) {
+            if was == .delivered { keepDelivery(d) }
             return
         }
         // A board task deleted or finished during the outage: no "the work
@@ -1804,6 +1814,17 @@ final class DelegationEngine {
     }
 
     nonisolated static let backText = "the session is back — the work carries on"
+
+    /// A delivered delegation failed for its session's absence, the session
+    /// put away since: delivered again, for the parent to close with its
+    /// verdict (an archived child's delivery is never failed). The work
+    /// doesn't carry on, so no "back" note.
+    private func keepDelivery(_ d: Delegation) {
+        vanishedSince[d.id] = nil
+        missingSince[d.id] = nil
+        store.mutate(d.id) { $0.status = .delivered; $0.failure = nil; $0.goneFrom = nil }
+        BACDebug.log("delegation", "“\(d.title)”: its session was put away — its delivery stands")
+    }
 
     private func fail(_ d: Delegation, _ why: String) {
         store.mutate(d.id) { $0.status = .failed; $0.failure = why }
