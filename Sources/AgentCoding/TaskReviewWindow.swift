@@ -359,7 +359,7 @@ final class TaskReviewWindowManager {
         // A card that may yet be found is looked for from the first paint:
         // the host's stamp (`locatingSince`) reaches a fat client a round
         // trip later, and until then the window offered one-click Mark Done.
-        if task.awaitsRelocation { request.looking = true }
+        if task.awaitsRelocation { request.openedLooking = true }
         host.open(id, title: task.title) {
             ReviewSource(
                 title: { t()?.title ?? "" },
@@ -388,7 +388,9 @@ final class TaskReviewWindowManager {
                     // counts (the banner also reloads when it gains one later,
                     // e.g. the host's search outlasting a fat client's wait).
                     if task.awaitsRelocation {
-                        await MainActor.run { request.looking = true }
+                        // One count per fetch: a refresh (⌘R) while the first
+                        // one still waits doesn't end "looking" under it.
+                        await MainActor.run { request.lookers += 1; request.openedLooking = false }
                         if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
                             _ = await c.relocate(task)
                         }
@@ -399,7 +401,7 @@ final class TaskReviewWindowManager {
                         while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 500_000_000)
                         }
-                        await MainActor.run { request.looking = false }
+                        await MainActor.run { request.lookers -= 1 }
                         if let now = t(), !(now.worktreeDir ?? "").isEmpty {
                             await MainActor.run { self?.reload(id) }
                             return nil
@@ -442,8 +444,11 @@ final class ReviewLandingRequest {
     var reloads = 0
     /// This window's look for a delivered card's worktree is under way —
     /// before the host's `locatingSince` reaches it (a fat client's round
-    /// trip): not "no code" yet, and Mark Done asks first.
-    var looking = false
+    /// trip): not "no code" yet, and Mark Done asks first. From the first
+    /// paint (`openedLooking`) until every fetch's look has settled.
+    var looking: Bool { openedLooking || lookers > 0 }
+    var openedLooking = false
+    var lookers = 0
 }
 
 /// Under the review header: where the branch stands, and the ways out —
