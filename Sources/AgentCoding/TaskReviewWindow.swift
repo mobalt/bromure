@@ -217,7 +217,7 @@ struct TaskReviewSummary: Equatable, Sendable {
             + "[ -n \"$d\" ] && echo \"TC $(\(TaskLitter.status("\"$d\"")) | wc -l | tr -d ' ')\"; "
             // The remote a push would go to — the landing's own pick, so a
             // name that's really an option is never shown, nor used.
-            + "rm=$(\(CodingTaskEngine.pickRemoteShell(repo: "\"$r\""))); echo \"RM $rm\"; "
+            + "rm=$(\(BranchMergeCommands.pickRemoteShell(repo: "\"$r\""))); echo \"RM $rm\"; "
             + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url -- \"$rm\" 2>/dev/null)\"; true"
         return cmd
     }
@@ -245,7 +245,7 @@ struct TaskReviewSummary: Equatable, Sendable {
             case "UC": s.uncommitted = Int(rest) ?? 0
             case "TD": s.targetDir = rest
             case "TC": s.targetDirty = Int(rest)
-            case "RM": s.remote = CodingTaskEngine.safeRemote(rest.isEmpty ? nil : rest)
+            case "RM": s.remote = BranchMergeCommands.safeRemote(rest.isEmpty ? nil : rest)
             case "RU": s.remoteURL = rest.isEmpty ? nil : rest
             default: break
             }

@@ -3546,9 +3546,11 @@ struct ProfileEditorView: View {
     /// `gpgconf` and `stat` stay off the main thread. Remote editors pass
     /// no lister, so they never scan this Mac.
     private func loadHostAgentSocketChoices() async {
+        #if os(macOS)
         guard onListHostAgentKeys != nil, hostAgentSockets.isEmpty else { return }
         let found = await HostAgentClient.candidateHostSocketsDetached()
         if !Task.isCancelled { discoveredHostSockets = found }
+        #endif
     }
 
     /// (Re)load the sheet's key list from `socket`, opening it if needed.

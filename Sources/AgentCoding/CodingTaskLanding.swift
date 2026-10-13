@@ -182,30 +182,10 @@ extension CodingTaskEngine {
             + "push -q --no-verify --no-signed --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
     }
 
-    /// A remote name safe to hand git and an agent: one plain token, never
-    /// an option. Quoting stops the shell, not git — a remote named
-    /// `--exec=./pwn.sh` (whatever `.git/config` lists first: a copied
-    /// worktree, a zip with its .git, the agent itself) ran that program
-    /// on Merge & Push.
-    nonisolated static func isSafeRemoteName(_ s: String) -> Bool {
-        s.range(of: #"^[A-Za-z0-9][A-Za-z0-9._/-]*$"#, options: .regularExpression) != nil
-            && !s.contains("..") && !s.hasSuffix("/")
-    }
-
-    /// `remote` when it is safe, else nil.
-    nonisolated static func safeRemote(_ remote: String?) -> String? {
-        remote.flatMap { isSafeRemoteName($0) ? $0 : nil }
-    }
-
-    /// The shell that prints the remote a landing pushes to: "origin" when
-    /// the repo has one, else its first remote with a safe name — nothing
-    /// when none (an unsafe name is never picked). `repo`: shell-quoted.
-    /// The Swift twin is `pickRemote`.
-    nonisolated static func pickRemoteShell(repo: String) -> String {
-        "git -C \(repo) remote 2>/dev/null | awk "
-            + #"'/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/ && !/\.\./ && !/\/$/ { if ($0 == "origin") o = 1; else if (f == "") f = $0 } "#
-            + #"END { if (o) print "origin"; else if (f != "") print f }'"#
-    }
+    /// A remote name safe to hand git and an agent (`BranchMergeCommands`).
+    nonisolated static func isSafeRemoteName(_ s: String) -> Bool { BranchMergeCommands.isSafeRemoteName(s) }
+    nonisolated static func safeRemote(_ remote: String?) -> String? { BranchMergeCommands.safeRemote(remote) }
+    nonisolated static func pickRemoteShell(repo: String) -> String { BranchMergeCommands.pickRemoteShell(repo: repo) }
 
     /// A branch name safe to hand git — Bromure's commands and an agent's
     /// brief alike: what `git check-ref-format --branch` accepts, and never

@@ -431,7 +431,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// A parent that isn't a plain branch name (it's read from the agent's
     /// machine) is no target.
     var landingTarget: String? {
-        landing?.target ?? parentBranch.flatMap { CodingTaskEngine.isSafeBranchName($0) ? $0 : nil }
+        landing?.target ?? parentBranch.flatMap { BranchMergeCommands.isSafeBranchName($0) ? $0 : nil }
     }
 
     /// How the card got to Done — recorded, or derived for cards an older
@@ -1525,6 +1525,14 @@ struct PaneTarget: Equatable, Sendable, Codable {
         if let w = worktree, !w.isEmpty { t.expectWorktree = w }
         return t
     }
+}
+
+/// What a provider's `typeRemotely` came back with.
+enum RemoteTypeResult {
+    /// No such route (local, or an older server): type it from here.
+    case unsupported
+    /// The guard's output there; nil when that machine couldn't be asked.
+    case output(String?)
 }
 
 /// Why a guarded send typed nothing.

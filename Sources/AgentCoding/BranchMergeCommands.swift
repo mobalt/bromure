@@ -14,6 +14,31 @@ import Foundation
 enum BranchMergeCommands {
     static func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    /// A remote name safe to hand git and an agent: one plain token, never
+    /// an option. Quoting stops the shell, not git — a remote named
+    /// `--exec=./pwn.sh` (whatever `.git/config` lists first: a copied
+    /// worktree, a zip with its .git, the agent itself) ran that program
+    /// on Merge & Push.
+    static func isSafeRemoteName(_ s: String) -> Bool {
+        s.range(of: #"^[A-Za-z0-9][A-Za-z0-9._/-]*$"#, options: .regularExpression) != nil
+            && !s.contains("..") && !s.hasSuffix("/")
+    }
+
+    /// `remote` when it is safe, else nil.
+    static func safeRemote(_ remote: String?) -> String? {
+        remote.flatMap { isSafeRemoteName($0) ? $0 : nil }
+    }
+
+    /// The shell that prints the remote a landing pushes to: "origin" when
+    /// the repo has one, else its first remote with a safe name — nothing
+    /// when none (an unsafe name is never picked). `repo`: shell-quoted.
+    /// The Swift twin is `CodingTaskEngine.pickRemote`.
+    static func pickRemoteShell(repo: String) -> String {
+        "git -C \(repo) remote 2>/dev/null | awk "
+            + #"'/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/ && !/\.\./ && !/\/$/ { if ($0 == "origin") o = 1; else if (f == "") f = $0 } "#
+            + #"END { if (o) print "origin"; else if (f != "") print f }'"#
+    }
+
     /// A plain branch name: what `git check-ref-format --branch` accepts,
     /// and nothing git would read as an option (no leading "-").
     static func isSafeBranchName(_ s: String) -> Bool {

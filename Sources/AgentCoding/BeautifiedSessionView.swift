@@ -70,14 +70,6 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     var guestPathNames: [String: String] { get }
 }
 
-/// What a provider's `typeRemotely` came back with.
-enum RemoteTypeResult {
-    /// No such route (local, or an older server): type it from here.
-    case unsupported
-    /// The guard's output there; nil when that machine couldn't be asked.
-    case output(String?)
-}
-
 extension BeautifiedTranscriptProvider {
     func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult { .unsupported }
     var guestPathNames: [String: String] { [:] }
