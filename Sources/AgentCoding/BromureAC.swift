@@ -11033,7 +11033,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // turned on was only read at launch — the key kept signing, and a
         // Guardrails deny (badge and all) was never asked, until a cold boot.
         if old.importedSSHKeys != new.importedSSHKeys, let engine = mitmEngine {
-            engine.sshAgent.setImportedKeyApprovals(Self.liveImportedKeyApprovals(from: old, to: new), for: new.id)
+            engine.sshAgent.setImportedKeyApprovals(
+                Self.liveImportedKeyApprovals(running: engine.sshAgent.importedKeyApprovals(for: new.id), to: new),
+                for: new.id)
             engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(new), for: new.id)
         }
 
@@ -15592,13 +15594,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// A running session's gates after a live edit: the saved profile's —
-    /// plus a gated key taken off the list, which stays loaded in the agent
-    /// until the restart: still gated, never let through ungated.
-    nonisolated static func liveImportedKeyApprovals(from old: Profile, to new: Profile)
-        -> [Data: SSHAgentServer.ImportedApproval] {
+    /// plus every gate `running` holds for a key no longer on the list. A
+    /// key taken off stays loaded in the agent until the restart: it stays
+    /// gated, through any number of later edits (carried from the running
+    /// map, not from the profile before this one), never let through ungated.
+    nonisolated static func liveImportedKeyApprovals(running: [Data: SSHAgentServer.ImportedApproval],
+                                                     to new: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
         var approvals = importedKeyApprovals(new)
-        let kept = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
-        for (blob, a) in importedKeyApprovals(old) where !kept.contains(blob) { approvals[blob] = a }
+        let listed = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+        for (blob, a) in running where !listed.contains(blob) { approvals[blob] = a }
         return approvals
     }
 

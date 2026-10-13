@@ -159,19 +159,32 @@ struct HostAgentKeysTests {
             + Self.string(Data("challenge".utf8)) + Data([0, 0, 0, 0])
         #expect(Self.roundTrip(fd, sign)?.first == 14)   // ungated at launch: the deny isn't asked
         // The live refresh's rebuild: gated now, and the deny holds.
-        server.setImportedKeyApprovals(ACAppDelegate.liveImportedKeyApprovals(from: old, to: new), for: profile)
+        func save(_ p: Profile) {
+            server.setImportedKeyApprovals(
+                ACAppDelegate.liveImportedKeyApprovals(running: server.importedKeyApprovals(for: profile), to: p),
+                for: profile)
+        }
+        save(new)
         #expect(Self.roundTrip(fd, sign)?.first == 5)
 
-        // A gated key taken off the list stays loaded until the restart:
-        // it stays gated, never let through ungated.
+        // A gated key taken off the list stays loaded until the restart: it
+        // stays gated — through this save and every later one (review: a
+        // second edit rebuilt from two profiles that both lacked it).
         var removed = new
         removed.importedSSHKeys = []
-        #expect(ACAppDelegate.liveImportedKeyApprovals(from: new, to: removed)[Self.blob(fx.picked)] != nil)
+        save(removed)
+        #expect(server.importedKeyApprovals(for: profile)[Self.blob(fx.picked)] != nil)
+        var another = removed
+        another.importedSSHKeys = [ImportedSSHKey(label: "other", filename: "", publicKeyText: fx.other,
+                                                  hostAgentSocket: fx.socket)]
+        save(another)
+        save(another)
+        #expect(server.importedKeyApprovals(for: profile)[Self.blob(fx.picked)] != nil)
         #expect(ACAppDelegate.hostAgentKeys(removed).isEmpty)
-        // Turned off on purpose: ungated.
+        // Turned off on purpose (still listed): ungated.
         var off = new
         off.importedSSHKeys[0].requireApproval = false
-        #expect(ACAppDelegate.liveImportedKeyApprovals(from: new, to: off).isEmpty)
+        #expect(ACAppDelegate.liveImportedKeyApprovals(running: ACAppDelegate.importedKeyApprovals(new), to: off).isEmpty)
     }
 
     @Test("Another workspace gets none of the picked keys")
