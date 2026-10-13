@@ -109,14 +109,14 @@ struct RepoWatchReviewScopeTests {
         var w = WatchedRepo(repo: "acme/api", profileID: UUID(), commitBranch: "main",
                             instructions: "Ignore vendor/.")
         let range = RepoWatchPrompts.scheduledReview(w, plan: .range(base: shaA, head: shaB), tool: .claude)
-        #expect(range.contains("git log --oneline \(shaA)..\(shaB)"))
+        #expect(range.contains("git log --oneline --first-parent \(shaA)..\(shaB)"))
         #expect(range.contains("git merge-base --is-ancestor \(shaA) \(shaB)"))
         #expect(range.contains("git reset --hard \(shaB)"))
         #expect(range.contains("findings_report") && range.contains("findings_done"))
         #expect(range.hasSuffix("Ignore vendor/."))
 
         let recent = RepoWatchPrompts.scheduledReview(w, plan: .recent(count: 20, head: nil), tool: .claude)
-        #expect(recent.contains("git log --oneline -20 origin/main"))
+        #expect(recent.contains("git log --oneline --first-parent -20 origin/main"))
         #expect(recent.contains("git fetch origin"))
 
         w.commitBranch = ""

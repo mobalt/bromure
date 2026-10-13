@@ -1312,6 +1312,12 @@ struct AutomationEditorView: View {
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+        Text(NSLocalizedString(
+            "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}.",
+            comment: "commit trigger help: what fires for a merged branch"))
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         pollStatusLine
     }
 

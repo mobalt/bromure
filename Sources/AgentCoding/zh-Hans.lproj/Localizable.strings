@@ -4208,3 +4208,4 @@
 
 /* automation editor */
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此窗口无法读取工作区的 GitHub 令牌——请以 所有者/仓库 的形式输入仓库。";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合并的分支只触发一次，针对其合并提交，而不是其中的每个提交。将提交与其第一个父提交比较，即可看到它带来的改动：git diff {{commit.key}}^1 {{commit.key}}。";

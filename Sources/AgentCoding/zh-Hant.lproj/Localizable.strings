@@ -4211,3 +4211,4 @@
 
 /* automation editor */
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此視窗無法讀取工作區的 GitHub 權杖——請以 擁有者/儲存庫 的形式輸入儲存庫。";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合併的分支只觸發一次，針對其合併提交，而不是其中的每個提交。將提交與其第一個父提交比較，即可看到它帶來的變更：git diff {{commit.key}}^1 {{commit.key}}。";

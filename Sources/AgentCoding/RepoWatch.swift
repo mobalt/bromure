@@ -827,10 +827,10 @@ enum RepoWatchPrompts {
         Look for \(focusText(w.focus)).
 
         How to work:
-        1. `git fetch origin` if needed, then `git log --oneline \(base)..\(tip)` to list the commits and `git diff --stat \(base)..\(tip)` to size the change.
-        2. If \(base) is unknown or is not an ancestor of \(tip) (`git merge-base --is-ancestor \(base) \(tip)` fails — the history was rewritten), review the last \(WatchedRepo.recentCommitWindow) commits instead (`git log -\(WatchedRepo.recentCommitWindow) \(tip)`), and say so in your summary.
-        3. Review the change — commit by commit (`git show <sha>`) when there are several, as one diff when it is small. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
-        4. If the range is very large (hundreds of commits), start with the commits that touch risky areas (request handling, authentication, input parsing, file / process / network / database access, cryptography, configuration) and say in your summary what you skipped.
+        1. `git fetch origin` if needed, then `git log --oneline --first-parent \(base)..\(tip)` to list what landed — each line is a commit made on \(branchName(w)) or a branch merged into it — and `git diff --stat \(base)..\(tip)` to size the change.
+        2. If \(base) is unknown or is not an ancestor of \(tip) (`git merge-base --is-ancestor \(base) \(tip)` fails — the history was rewritten), review the last \(WatchedRepo.recentCommitWindow) of them instead (`git log --oneline --first-parent -\(WatchedRepo.recentCommitWindow) \(tip)`), and say so in your summary.
+        3. Review the net change, `git diff \(base)..\(tip)`: what the branch holds now, not each step that led there. A merged branch's own commits are context (their messages say why), never reviewed one by one: a later one may already fix an earlier one. When the diff is too big to read at once, go through the first-parent list, each entry's diff against its first parent (`git diff <sha>^1 <sha>`, a merge's whole branch). Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+        4. If the range is very large (hundreds of entries), start with the ones that touch risky areas (request handling, authentication, input parsing, file / process / network / database access, cryptography, configuration) and say in your summary what you skipped.
 
         \(reportingRules(repo: w.repo, tool: tool))
         """ + ownerInstructions(w)
@@ -845,8 +845,8 @@ enum RepoWatchPrompts {
         Look for \(focusText(w.focus)).
 
         How to work:
-        1. `git log --oneline -\(count) \(tip)` to list the commits (fewer when the history is shorter), `git diff --stat` over the same range to size the change.
-        2. Review the change — commit by commit (`git show <sha>`) when there are several. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+        1. `git log --oneline --first-parent -\(count) \(tip)` to list them — each line is a commit made on \(branchName(w)) or a branch merged into it (fewer when the history is shorter) — and `git diff --stat` over the same range to size the change.
+        2. Review each entry's diff against its first parent (`git diff <sha>^1 <sha>`): a merge is its whole branch, reviewed as one change — the branch's own commits are context, never reviewed one by one, since a later one may already fix an earlier one. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
 
         \(reportingRules(repo: w.repo, tool: tool))
         """ + ownerInstructions(w)
@@ -863,7 +863,7 @@ enum RepoWatchPrompts {
         """
         Review a new commit on \(w.repo) for \(focusText(w.focus)). \(checkoutNote(w))
 
-        Inspect the change with `git fetch origin` then `git show {{commit.key}}` (the commit is described below). Focus on what the change introduces or makes reachable, reading surrounding code as needed to confirm impact.
+        Inspect the change with `git fetch origin`, then `git diff {{commit.key}}^1 {{commit.key}}`: what the commit (described below) brought to the branch. When it is a merge, that is the whole merged branch — review it as one change; `git log --oneline {{commit.key}}^1..{{commit.key}}` lists the branch's own commits as context only, never to review one by one, since a later one may already fix an earlier one. Focus on what the change introduces or makes reachable, reading surrounding code as needed to confirm impact.
 
         \(reportingRules(repo: w.repo, tool: w.tool))
 

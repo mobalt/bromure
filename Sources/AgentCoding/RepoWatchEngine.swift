@@ -29,7 +29,28 @@ final class RepoWatchEngine {
         t.tolerance = 3
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        refreshEventAutomations()
         tick()
+    }
+
+    /// Bring each watch's event automations in line with this build: their
+    /// prompt is stored, and one written by an older build may review what
+    /// no longer fires (each commit of a merged branch). A rewrite
+    /// re-baselines their polling, which with the backlog ignored fires
+    /// nothing old. The scheduled review writes its prompt as it fires.
+    func refreshEventAutomations() {
+        guard let delegate else { return }
+        let autoStore = delegate.scheduledAutomationStore
+        for w in store.watches {
+            for scan in [WatchedRepo.Scan.commits, .pullRequests] {
+                guard let id = w.automationID(for: scan), let current = autoStore.automation(id) else { continue }
+                let desired = Self.automation(for: scan, of: w, id: id, createdAt: current.createdAt)
+                if current != desired {
+                    BACDebug.log("watch", "\(w.repo): \(scan.rawValue) automation refreshed")
+                    delegate.saveAutomation(desired)
+                }
+            }
+        }
     }
 
     /// Follow the fix tasks.

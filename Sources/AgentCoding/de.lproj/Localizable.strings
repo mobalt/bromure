@@ -4208,3 +4208,4 @@
 
 /* automation editor */
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Dieses Fenster kann das GitHub-Token des Workspace nicht lesen — geben Sie das Repository als Besitzer/Repository ein.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Ein gemergter Branch löst einmal aus, für seinen Merge-Commit – nicht für jeden seiner Commits. Vergleiche einen Commit mit seinem ersten Elternteil, um zu sehen, was er gebracht hat: git diff {{commit.key}}^1 {{commit.key}}.";
