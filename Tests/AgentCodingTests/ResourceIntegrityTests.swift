@@ -2,8 +2,8 @@ import Foundation
 import Testing
 
 /// Finding: a batch merge left Git conflict markers in all eight Agent
-/// Coding Localizable.strings — Foundation reads a corrupt strings file as
-/// missing, so every non-English user got the whole UI in English, and
+/// Coding Localizable.strings — Foundation kept the entries above the
+/// marker and dropped the rest, so those strings showed untranslated, and
 /// nothing failed: a marker in Swift breaks the build, in a resource it
 /// ships. These check what ships, not one file.
 @Suite("Shipped resources: no merge leftovers")
