@@ -324,6 +324,13 @@ struct RepoGitProgramsTests {
         // The review and the file pane say so — not "no changes".
         let review = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: wt, base: .uncommitted)))
         #expect(review.statusFailed)
+        // Finding (CWE-754): with an edit and an untracked file too, the
+        // failed diff still listed the untracked file alone — a normal-
+        // looking review of a change set that isn't the checkout.
+        _ = sh("echo edit >> \(wt)/plain.txt; echo new > \(wt)/untracked.txt")
+        let partial = TaskReviewData.parse(sh(iso + TaskReviewData.sessionCommand(dir: wt, base: .uncommitted)))
+        #expect(partial.diffFailed && partial.files.isEmpty)
+        _ = sh("rm \(wt)/untracked.txt; cd \(wt) && git checkout -q plain.txt")
         #expect(FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: RepoGitPrograms.statusFailedLine + "\0")]))
         #expect(!FileExplorerModel.statusFailed(in: [(toplevel: wt, porcelain: " M a.txt\0")]))
         // A real edit, status readable again: dirty, the agent commits it.

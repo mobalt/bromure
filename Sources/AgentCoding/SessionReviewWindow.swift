@@ -543,7 +543,8 @@ struct ReviewView: View {
         // (the spinner stayed up for a task with no code at all).
         if let data, !(loading && visibleFiles.isEmpty && !data.files.isEmpty) {
             let files = visibleFiles
-            if files.isEmpty {
+            // A diff that failed shows that, not what little it collected.
+            if files.isEmpty || data.diffFailed {
                 emptyState(data)
             } else {
                 ScrollViewReader { proxy in
@@ -662,7 +663,7 @@ struct ReviewView: View {
     @ViewBuilder private func emptyState(_ data: TaskReviewData) -> some View {
         let turnHidden = !showAll && focus.files != nil && !data.files.isEmpty
         VStack(spacing: 12) {
-            if data.statusFailed && data.files.isEmpty {
+            if data.diffFailed || (data.statusFailed && data.files.isEmpty) {
                 ContentUnavailableView(
                     NSLocalizedString("Git couldn't read the changes", comment: "review: git status/diff failed"),
                     systemImage: "exclamationmark.triangle",

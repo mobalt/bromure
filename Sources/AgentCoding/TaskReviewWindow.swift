@@ -39,6 +39,10 @@ struct TaskReviewData: Equatable, Sendable {
     /// The checkout's `git status` failed (`RepoGitPrograms.failedStatus`) —
     /// and with it the whole-tree diff: an empty diff isn't "No changes".
     var statusFailed: Bool { statusLines.contains(RepoGitPrograms.statusFailedLine) }
+    /// The diff itself failed: what's in `files` (untracked files at most)
+    /// isn't the change set.
+    var diffFailed = false
+    static let diffFailedLine = "!! (git diff failed)"
     var files: [TaskDiffFile] = []
 
     /// What a session's review compares against.
@@ -93,11 +97,15 @@ struct TaskReviewData: Equatable, Sendable {
                 + "[ -n \"$b\" ] || b=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         }
         let df = RepoGitPrograms.diffFlags
+        // A diff that fails (a filter git can't run safely) says so, and the
+        // untracked files aren't listed after it: shown alone, they read as
+        // the whole change set.
+        let failed = "echo '\(TaskReviewData.diffFailedLine)'"
         let diff = withWorktree
-            ? "{ git diff \(df) \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
+            ? "{ if git diff \(df) \"$b\" -- 2>/dev/null; then git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
                 + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
-                + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done; }"
-            : "git diff \(df) \"$b\" HEAD -- 2>/dev/null"
+                + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done; else \(failed); fi; }"
+            : "{ git diff \(df) \"$b\" HEAD -- 2>/dev/null || \(failed); }"
         // What the repository's config names never runs (RepoGitPrograms).
         return "\(enter); \(RepoGitPrograms.off("."))\(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
@@ -138,7 +146,7 @@ struct TaskReviewData: Equatable, Sendable {
             case "status":
                 if !line.isEmpty { out.statusLines.append(String(line)) }
             case "diff":
-                diffLines.append(String(line))
+                if line == Self.diffFailedLine { out.diffFailed = true } else { diffLines.append(String(line)) }
             default: break
             }
         }
