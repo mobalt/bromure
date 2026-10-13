@@ -557,6 +557,40 @@ struct DelegationTests {
         return s
     }
 
+    /// Finding (CWE-670): a steer the delegate never got (its Mac away) was
+    /// still owed after the parent cancelled — the next notice pass resumed
+    /// the session with it before retire-when-back archived it, relaunching
+    /// the cancelled delegate on the old steer.
+    @Test("a cancelled delegate is owed nothing: an unread steer isn't typed or resumed with")
+    func cancelledDelegateOwedNothing() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        let (d, childID) = await delegated(f)
+        f.engine.tick()
+        // Not typed: the probe hasn't seen the agent (as when its Mac is away).
+        f.sessions.mutate(childID) { $0.agentAlive = nil }
+        try await f.engine.steer(from: f.parentID, delegationKey: d.id.uuidString, text: "Also fix the tests.")
+        #expect(f.store.unnoticed(for: childID, now: Date(), interrupts: DelegationNotice.interrupts)
+            .contains { $0.0.id == d.id })
+        let child = try #require(f.sessions.session(childID))
+        f.sessions.remove(childID)
+        try await f.engine.cancel(from: f.parentID, delegationKey: d.id.uuidString, reason: "not needed")
+        #expect(f.store.delegation(d.id)?.retireWhenBack == true)
+        // Nothing left owed to it, nothing unread.
+        #expect(!f.store.unnoticed(for: childID, now: Date(), interrupts: DelegationNotice.interrupts)
+            .contains { $0.0.id == d.id })
+        #expect(f.store.unread(for: childID, in: d.id).isEmpty)
+        // Back with no agent running: put away, not resumed with the steer.
+        var back = child
+        back.windowIndex = nil
+        back.endedAt = Date()
+        f.sessions.upsert(back)
+        f.engine.tick()
+        #expect(f.sessions.session(childID)?.isArchived == true)
+        // (Nothing owed is what kept the notice pass from resuming it.)
+        #expect(f.store.unnoticed(for: childID, now: Date(), interrupts: DelegationNotice.interrupts).isEmpty)
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()
