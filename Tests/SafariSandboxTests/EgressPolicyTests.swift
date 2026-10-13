@@ -74,20 +74,26 @@ struct EgressPolicyTests {
         }
         #expect(allow.verdict(ip: nil, hostnames: ["192.0.2.10"], proto: .tcp, port: 6443) == .allow)
         let deny = try EgressPolicy.parse("deny any 10.0.0.0/8\ndefault allow")
-        for h in ["167772163", "10.1", "0x0a.1.2.3", "::ffff:10.0.0.1", "::ffff:a00:1", "010.0.0.1"] {
+        for h in ["167772163", "10.1", "0x0a.1.2.3", "::ffff:10.0.0.1", "::ffff:a00:1", "010.0.0.1",
+                  "[::ffff:10.0.0.1]", "[::ffff:a00:1]", "[::10.0.0.1]"] {
             #expect(deny.verdict(ip: nil, hostnames: [h], proto: .tcp, port: 443) == .deny, "\(h)")
         }
         #expect(deny.verdict(ip: nil, hostnames: ["10.0.0.1"], proto: .tcp, port: 443) == .deny)
         #expect(deny.verdict(ip: nil, hostnames: ["example.com"], proto: .tcp, port: 443) == .allow)
         #expect(deny.verdict(ip: nil, hostnames: ["1password.com"], proto: .tcp, port: 443) == .allow)
         #expect(deny.verdict(ip: nil, hostnames: ["::1"], proto: .tcp, port: 443) == .allow)
+        #expect(deny.verdict(ip: nil, hostnames: ["[::1]"], proto: .tcp, port: 443) == .allow)
         // At the switch the address is the resolved one: hostnames are names.
         #expect(deny.verdict(ip: ip("8.8.8.8"), hostnames: ["010.1.2.3"], proto: .tcp, port: 443) == .allow)
-        // Parsing: canonical only.
+        // A flow's target: canonical only.
         #expect(EgressPolicy.parseIPv4("010.1.2.3") == nil && EgressPolicy.parseIPv4("1.2.3.4") != nil)
         #expect(EgressPolicy.parseIPv4("0.0.0.0") == 0 && EgressPolicy.parseIPv4("+1.2.3.4") == nil)
-        #expect(throws: EgressPolicy.ParseError.self) { _ = try EgressPolicy.parse("allow tcp 010.0.0.0/8") }
-        #expect(throws: EgressPolicy.ParseError.self) { _ = try EgressPolicy.parse("allow tcp 192.0.2.010") }
+        // A rule's address reads as it always did — never an error: a
+        // document that fails to parse enforces nothing (allow-all).
+        let lenient = try EgressPolicy.parse("allow tcp 010.0.0.0/8\nallow tcp 192.0.2.010\ndefault deny")
+        #expect(lenient.verdict(ip: ip("10.9.9.9"), hostnames: [], proto: .tcp, port: 443) == .allow)
+        #expect(lenient.verdict(ip: ip("192.0.2.10"), hostnames: [], proto: .tcp, port: 443) == .allow)
+        #expect(lenient.verdict(ip: nil, hostnames: ["192.0.2.010"], proto: .tcp, port: 443) == .deny)
     }
 
     @Test("CIDR with ports parses, matches both, and round-trips")

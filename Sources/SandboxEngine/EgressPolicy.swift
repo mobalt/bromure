@@ -435,10 +435,8 @@ extension EgressPolicy {
             target = .any
         } else if hostPart.contains("/") {
             target = try parseCIDR(hostPart, line: line)
-        } else if let ip = parseIPv4(hostPart) {
+        } else if let ip = parseRuleIPv4(hostPart) {
             target = .cidr(net: ip, mask: 0xFFFF_FFFF)          // bare IP = /32
-        } else if isNonCanonicalIPv4Literal(hostPart) {
-            throw ParseError(line: line, message: "write the address '\(hostPart)' as a.b.c.d (no leading zeros)")
         } else if lp.hasPrefix("*.") {
             target = .host(domain: String(lp.dropFirst(2)), includeApex: false)
         } else {
@@ -484,7 +482,7 @@ extension EgressPolicy {
 
     private static func parseCIDR(_ s: String, line: Int) throws -> Target {
         let parts = s.split(separator: "/")
-        guard parts.count == 2, let ip = parseIPv4(String(parts[0])),
+        guard parts.count == 2, let ip = parseRuleIPv4(String(parts[0])),
               let bits = UInt8(parts[1]), bits <= 32 else {
             throw ParseError(line: line, message: "bad CIDR '\(s)'")
         }
@@ -508,11 +506,32 @@ extension EgressPolicy {
         return v
     }
 
+    /// An address in a rule, as it always read: decimal octets, a leading zero
+    /// allowed ("010.0.0.0/8" is 10.0.0.0/8). Never an error — a document
+    /// that fails to parse enforces nothing at all. (A flow's target is
+    /// matched canonical-only: `parseIPv4`.)
+    static func parseRuleIPv4(_ s: String) -> UInt32? {
+        let octets = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var v: UInt32 = 0
+        for o in octets {
+            guard let n = UInt16(o), n <= 255 else { return nil }
+            v = (v << 8) | UInt32(n)
+        }
+        return v
+    }
+
     /// A target the system reads as an IPv4 address without asking DNS, but
     /// not spelled as canonical a.b.c.d: what getaddrinfo or inet_aton take
     /// as a number (hex, octal, a single integer, a short form), or an IPv6
     /// literal carrying an IPv4 address (::ffff:a.b.c.d, ::a.b.c.d).
-    public static func isNonCanonicalIPv4Literal(_ host: String) -> Bool {
+    /// An IPv6 authority comes bracketed (`CONNECT [::ffff:10.0.0.1]:443`)
+    /// and is dialed unbracketed: the brackets are looked through.
+    public static func isNonCanonicalIPv4Literal(_ target: String) -> Bool {
+        var host = target
+        if host.hasPrefix("["), host.hasSuffix("]"), host.count > 2 {
+            host = String(host.dropFirst().dropLast())
+        }
         guard parseIPv4(host) == nil, !host.isEmpty else { return false }
         var a = in_addr()
         if inet_aton(host, &a) != 0 { return true }
