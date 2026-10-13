@@ -557,6 +557,34 @@ struct DelegationTests {
         return s
     }
 
+    /// Finding (CWE-670): putting away a gone delegate's session on its
+    /// return revived the request another session had on that same child —
+    /// "the work carries on" to its parent, against a peer just archived.
+    @Test("the session put away on its return revives none of its other delegations")
+    func retiredChildRevivesNothing() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        let (d1, childID) = await delegated(f)
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        f.engine.tick()
+        let child = try #require(f.sessions.session(childID))
+        f.sessions.remove(childID)
+        f.engine.tick()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()
+        #expect(f.store.delegation(d1.id)?.goneFrom != nil && f.store.delegation(req.id)?.goneFrom != nil)
+        try await f.engine.cancel(from: f.parentID, delegationKey: d1.id.uuidString, reason: "not needed")
+        f.sessions.upsert(child)
+        f.engine.tick()
+        #expect(f.sessions.session(childID)?.isArchived == true)
+        let r = try #require(f.store.delegation(req.id))
+        #expect(r.goneFrom == nil && r.status == .failed)
+        #expect(r.failure == "the peer's session was put away")
+        #expect(!r.messages.contains { $0.text == DelegationEngine.backText })
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()
