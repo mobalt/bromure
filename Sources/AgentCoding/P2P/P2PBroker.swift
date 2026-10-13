@@ -169,6 +169,10 @@ final class P2PBroker: @unchecked Sendable {
     /// so a re-fire during a transition isn't mistaken for a new change.
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String = ""
+    /// When peer paths were last dropped for a network change: a channel
+    /// coming back right after (the recycle that change caused) isn't a
+    /// second one. Guarded by `lock`.
+    private var lastPathReset = Date.distantPast
     /// Fastest-first relay host ranking, cached per network path so the RTT probe
     /// runs once per path rather than per connection. Cleared by `resetPeerPaths`
     /// on a path change, like the peer shims. Guarded by `lock`.
@@ -266,6 +270,7 @@ final class P2PBroker: @unchecked Sendable {
         ch.onError = { code, connId in
             FatClientLog.log("p2p: signaling error \(code) conn=\(connId ?? "-")")
         }
+        ch.onRecovered = { [weak self] downFor in self?.channelRecovered(after: downFor) }
         ch.onKeysChanged = {
             // A peer device logged in/out — re-pull authorized SSH keys now
             // rather than waiting for the periodic poll. The server observes
@@ -736,6 +741,7 @@ final class P2PBroker: @unchecked Sendable {
         liveShims.removeAll()
         relayHostRank = nil          // re-probe relays on the new path
         pathGeneration &+= 1         // invalidate any relay probe still in flight
+        lastPathReset = Date()
         lock.unlock()
         for (_, live) in shims { live.shim.stop() }
         if !shims.isEmpty {
@@ -776,14 +782,75 @@ final class P2PBroker: @unchecked Sendable {
         let transports = path.availableInterfaces
             .filter { $0.type == .wifi || $0.type == .cellular || $0.type == .wiredEthernet }
             .map(\.name)
-        let sig = "\(path.status)|" + Set(transports).sorted().joined(separator: ",")
+        let sig = Self.pathSignature(status: "\(path.status)", transports: transports,
+                                     addresses: Self.ipv4Addresses(of: Set(transports)))
         lock.lock()
         let changed = sig != lastPathSignature
         let hadBaseline = !lastPathSignature.isEmpty
         lastPathSignature = sig
+        let ch = channel
         lock.unlock()
-        guard changed, hadBaseline, path.status == .satisfied else { return }
+        guard path.status == .satisfied else { return }
+        // Any usable update — a captive portal letting us through often
+        // changes nothing in the signature — retries a signaling channel
+        // that's down now, not after its backoff.
+        ch?.reconnectNow()
+        guard changed, hadBaseline else { return }
         FatClientLog.log("p2p: network path changed (\(sig)) — re-establishing")
+        resetPeerPaths()
+        // The signaling socket is bound to the old route too: a fresh one,
+        // or the next establish sends its offer into a dead socket.
+        ch?.recycle(force: true)
+        NotificationCenter.default.post(name: .bromureP2PPathChanged, object: nil)
+    }
+
+    /// What identifies the network a path is on: its status, the real
+    /// transport interfaces (no VPN/tunnel: they flap), and — so another
+    /// Wi-Fi on the same en0 counts — the IPv4 address of the one the path
+    /// prefers (`transports` in the path's order, preferred first). Not the
+    /// gateways (a split-tunnel VPN rewrites them), not a standby link's
+    /// address (a cellular refresh under live Wi-Fi), not IPv6 (privacy
+    /// addresses rotate on their own): none of those is a new network.
+    nonisolated static func pathSignature(status: String, transports: [String],
+                                          addresses: [String]) -> String {
+        let primary = transports.first.map { $0 + "=" }
+        let own = primary.map { p in addresses.filter { $0.hasPrefix(p) } } ?? []
+        return [status,
+                Set(transports).sorted().joined(separator: ","),
+                Set(own).sorted().joined(separator: ",")].joined(separator: "|")
+    }
+
+    /// The IPv4 addresses on these interfaces ("en0=192.168.1.20").
+    nonisolated static func ipv4Addresses(of names: Set<String>) -> [String] {
+        var out: [String] = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return out }
+        defer { freeifaddrs(head) }
+        var cur: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = cur {
+            defer { cur = p.pointee.ifa_next }
+            guard let sa = p.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: p.pointee.ifa_name)
+            guard names.contains(name) else { continue }
+            var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count),
+                              nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            out.append("\(name)=\(String(cString: buf))")
+        }
+        return out
+    }
+
+    /// The signaling channel is back after an outage the path never showed
+    /// (a captive portal opening up, a Wi-Fi that stopped carrying traffic):
+    /// the peer paths died with it — re-establish them now rather than when
+    /// a poll next fails. Not right after a path change, which already did.
+    private func channelRecovered(after downFor: TimeInterval) {
+        lock.lock()
+        let recent = Date().timeIntervalSince(lastPathReset) < 15
+        let peers = liveShims.count
+        lock.unlock()
+        guard !recent else { return }
+        FatClientLog.log("p2p: signaling back after \(Int(downFor)) s — re-establishing \(peers) peer path(s)")
         resetPeerPaths()
         NotificationCenter.default.post(name: .bromureP2PPathChanged, object: nil)
     }

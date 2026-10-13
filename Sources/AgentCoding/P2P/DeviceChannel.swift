@@ -24,6 +24,10 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     var onRevoked: (() -> Void)?
     /// A peer's SSH key was published/withdrawn — re-pull authorized keys now.
     var onKeysChanged: (() -> Void)?
+    /// Connected again after a drop that lasted at least `outageThreshold`
+    /// (the argument): the internet came back — a captive portal let us
+    /// through, a dead Wi-Fi recovered — without the path changing.
+    var onRecovered: ((_ downFor: TimeInterval) -> Void)?
 
     private let endpoint: ControlPlaneEndpoint
     private let token: String
@@ -46,6 +50,12 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     /// peer that's merely offline mustn't churn ours on every attempt.
     var recycleMinAge: TimeInterval = 30
     private var openedAt: Date?
+    /// A drop shorter than this (a recycle, a blip) isn't an outage.
+    var outageThreshold: TimeInterval = 5
+    /// When the socket last dropped while wanted; nil while connected.
+    private var downSince: Date?
+    /// Bumped by `reconnectNow`: a backoff timer from before it stands down.
+    private var reconnectGen: UInt64 = 0
 
     init(endpoint: ControlPlaneEndpoint, token: String) {
         self.endpoint = endpoint
@@ -84,16 +94,37 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     /// Drop the current socket and open a fresh one now: the caller has
     /// reason to think it's dead though it reads connected (signaling that
     /// went unanswered).
-    func recycle() {
+    /// `force`: the network path changed under it, so however fresh, the
+    /// socket is bound to a route that's gone.
+    func recycle(force: Bool = false) {
         lock.lock()
         let t = task
         let want = desiredOpen
         let young = openedAt.map { Date().timeIntervalSince($0) < recycleMinAge } ?? false
         lock.unlock()
-        guard want, let t, !young else { return }
+        guard want, let t, force || !young else { return }
         FatClientLog.log("p2p: device channel recycled")
         t.cancel(with: .goingAway, reason: nil)
         handleDrop(task: t, immediate: true)
+    }
+
+    /// Down — waiting out a reconnect backoff (up to 30 s), or an attempt
+    /// begun on the network just left (its 30 s timeout): try now instead.
+    /// No-op while connected. Runs on `queue`, as the backoff timer does, so
+    /// the two never both open a socket.
+    func reconnectNow() {
+        queue.async { [self] in
+            lock.lock()
+            guard desiredOpen, !isConnected else { lock.unlock(); return }
+            let stale = task
+            task = nil                 // its drop, when it comes, is no longer ours
+            reconnectGen &+= 1
+            if downSince == nil { downSince = Date() }
+            lock.unlock()
+            stale?.cancel(with: .goingAway, reason: nil)
+            FatClientLog.log("p2p: network changed — device channel reconnecting now")
+            openSocket()
+        }
     }
 
     // MARK: Sending
@@ -190,6 +221,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
             task = nil
             heartbeat?.cancel(); heartbeat = nil   // no pings during backoff
         }
+        if current, want, downSince == nil { downSince = Date() }
         lock.unlock()
         guard current else { return }
         setConnected(false)
@@ -214,10 +246,14 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         // lockstep and hammer the link/relay the instant it returns.
         let base = min(30.0, 0.5 * pow(2.0, Double(min(attempt, 6))))
         let delay = base * Double.random(in: 0.75...1.25)
+        let gen = lock.withLock { reconnectGen }
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            self.lock.lock(); let want = self.desiredOpen; self.lock.unlock()
-            if want { self.openSocket() }
+            // Not if reconnectNow got there first (its socket is the task).
+            self.lock.lock()
+            let go = self.desiredOpen && self.reconnectGen == gen && self.task == nil
+            self.lock.unlock()
+            if go { self.openSocket() }
         }
     }
 
@@ -252,9 +288,21 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         lock.lock()
         let changed = isConnected != v
         isConnected = v
-        if v { reconnectAttempt = 0 }
+        var recoveredAfter: TimeInterval?
+        if v {
+            reconnectAttempt = 0
+            if let since = downSince {
+                let down = Date().timeIntervalSince(since)
+                if down >= outageThreshold { recoveredAfter = down }
+            }
+            downSince = nil
+        }
         lock.unlock()
         if changed { dispatch { self.onStateChange?(v) } }
+        if let d = recoveredAfter {
+            FatClientLog.log("p2p: device channel back after \(Int(d)) s down")
+            dispatch { self.onRecovered?(d) }
+        }
     }
 
     private func dispatch(_ block: @escaping () -> Void) {
