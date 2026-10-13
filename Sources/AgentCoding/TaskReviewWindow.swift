@@ -413,13 +413,18 @@ final class TaskReviewWindowManager {
                         // one still waits doesn't end "looking" under it.
                         await MainActor.run { request.lookers += 1; request.openedLooking = false }
                         if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
+                            await MainActor.run { request.relocating += 1 }
                             _ = await c.relocate(task)
+                            await MainActor.run { request.relocating -= 1 }
                         }
                         // Another look may still be under way (a second
-                        // window's, the host's for a fat client): its outcome
-                        // is this load's — not "can't reach the machine".
+                        // window's, the host's for a fat client — or an
+                        // earlier fetch of this window still asking, before
+                        // the host's stamp shows here): its outcome is this
+                        // load's — not "can't reach the machine".
                         let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
-                        while t()?.isLocating == true, Date() < deadline, !Task.isCancelled {
+                        while await MainActor.run(body: { request.othersLooking(isLocating: t()?.isLocating == true) }),
+                              Date() < deadline, !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 500_000_000)
                         }
                         await MainActor.run { request.lookers -= 1 }
@@ -470,6 +475,16 @@ final class ReviewLandingRequest {
     var looking: Bool { openedLooking || lookers > 0 }
     var openedLooking = false
     var lookers = 0
+    /// Fetches still inside their own `relocate` call. On a fat client the
+    /// host's `locatingSince` shows only after that call's round trip, so a
+    /// refresh then saw nothing locating, read no worktree as unreachable,
+    /// and painted "Can't reach the machine" under "Looking for the
+    /// worktree…".
+    var relocating = 0
+
+    /// Whether a fetch past its own look still waits for someone else's: a
+    /// fetch asking right now, or the card's locating stamp.
+    func othersLooking(isLocating: Bool) -> Bool { relocating > 0 || isLocating }
 }
 
 /// Under the review header: where the branch stands, and the ways out —

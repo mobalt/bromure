@@ -787,6 +787,21 @@ struct TaskLandingTests {
         #expect(!r.looking)
     }
 
+    /// Finding (CWE-670): on a fat client, ⌘R while the first fetch was
+    /// still asking the host to look ran a second fetch that saw nothing
+    /// locating yet (the stamp comes a round trip later), skipped the look,
+    /// and settled "Can't reach the machine" under "Looking for the worktree…".
+    @Test("a refresh waits for a fetch still asking for the look, then for the stamp")
+    @MainActor func refreshWaitsForAnotherFetchsLook() {
+        let r = ReviewLandingRequest()
+        r.lookers += 1; r.relocating += 1            // the first fetch asks the host
+        r.lookers += 1                               // ⌘R: a second fetch, past its own look
+        #expect(r.othersLooking(isLocating: false))  // the stamp isn't here yet: it waits
+        r.relocating -= 1                            // the host answered…
+        #expect(r.othersLooking(isLocating: true))   // …and is looking: still waits
+        #expect(!r.othersLooking(isLocating: false)) // the look is over: it loads
+    }
+
     /// Finding (CWE-670): a fat client gave up on the host's look after a
     /// fixed 20 s, while the host was still trying sessions one after
     /// another (up to 15 s each) — and never showed the worktree found.
