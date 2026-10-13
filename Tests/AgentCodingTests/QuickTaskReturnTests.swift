@@ -83,4 +83,43 @@ struct QuickTaskReturnTests {
         #expect(added.map(\.2) == [true, false])
         p.orderOut(nil)
     }
+
+    /// Review: with the title's @ list still open, ↩ in Details filed the
+    /// task with "@" left in its title instead of picking.
+    @Test("↩ in Details with the @ list open picks the assignee first")
+    func returnInDetailsPicksSuggestion() {
+        _ = NSApplication.shared
+        var added: [(String, TaskAssignment?)] = []
+        let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
+                                 folder: "~", workspaceName: "W", initialAssignment: nil,
+                                 onAdd: { t, _, a, _ in added.append((t, a)) }, onClose: {})
+        let p = Panel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                      styleMask: [.borderless, .fullSizeContentView], backing: .buffered, defer: false)
+        p.contentView = NSHostingView(rootView: view.padding(.top, 16)
+            .frame(width: 800, height: 700, alignment: .top))
+        p.makeKeyAndOrderFront(nil)
+        spin(0.5)
+        for c in "one" { key(p, String(c), code: 0) }
+        key(p, "\t", code: 48)
+        spin(0.3)
+        func fields(_ v: NSView) -> [NSTextField] {
+            (v as? NSTextField).map { [$0] } ?? v.subviews.flatMap(fields)
+        }
+        let all = fields(p.contentView!).filter(\.isEditable)
+        #expect(all.count == 2)
+        guard all.count == 2 else { return }
+        // Back to the title for an @ (the list opens), then a click into
+        // Details. (Focusing the title selects it: type it whole.)
+        p.makeFirstResponder(all[0])
+        spin(0.2)
+        for c in "one @" { key(p, String(c), code: 0) }
+        p.makeFirstResponder(all[1])
+        spin(0.2)
+        key(p, "\r", code: 36)
+        #expect(added.isEmpty)
+        key(p, "\r", code: 36)
+        #expect(added.map(\.0) == ["one"])
+        #expect(added.first?.1 == .newAgent)
+        p.orderOut(nil)
+    }
 }

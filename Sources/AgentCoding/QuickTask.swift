@@ -507,7 +507,12 @@ struct QuickTaskView: View {
                         guard press.modifiers.isDisjoint(with: [.option, .shift]),
                               !Self.composing(in: NSApp.currentEvent?.window ?? NSApp.keyWindow)
                         else { return .ignored }
-                        submit(keepOpen: press.modifiers.contains(.command))
+                        // The title's @/# list still open: ↩ picks, as it says.
+                        if let s = suggestions.first {
+                            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
+                        } else {
+                            submit(keepOpen: press.modifiers.contains(.command))
+                        }
                         return .handled
                     }
                     .onKeyPress(.tab) { tab(fromDetails: true) }
