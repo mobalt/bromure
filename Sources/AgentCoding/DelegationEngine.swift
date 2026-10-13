@@ -1114,6 +1114,23 @@ final class DelegationEngine {
         BACDebug.log("delegation", "\(action) on “\(d.title)” at “\(link.hostName)”")
     }
 
+    /// The parent's own words riding on a cancel or a close — typed into a
+    /// peer's prompt like any message: scanned as `post` scans one, and a
+    /// hit withheld the same way (recorded blocked, audited, refused), before
+    /// anything is stored or sent. A close's note skipped it, so text a
+    /// steer would have withheld reached the peer as a host notice.
+    private func screen(_ text: String, on d: Delegation, kind: DelegationMessage.Kind,
+                        from party: DelegationMessage.Party) async throws {
+        guard party != .host, !text.isEmpty, let snippet = await scan(text) else { return }
+        var m = DelegationMessage(kind: kind, from: party, to: .child, text: text)
+        m.blocked = snippet
+        m.readAt = m.at
+        store.mutate(d.id) { $0.messages.append(m) }
+        audit(d.profileID, auditData(title: d.title, kind: kind, from: party, to: .child, text: text, blocked: snippet))
+        BACDebug.log("delegation", "withheld a \(kind.rawValue) from \(party.rawValue) on “\(d.title)”")
+        throw DelegationRefusal("Your message was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Rephrase it as plain facts about the work.")
+    }
+
     /// Stop the child: the record says why; a delegate's session is put
     /// away (a peer's is its own business).
     func cancel(from parentID: UUID, delegationKey: String, reason: String,
@@ -1128,6 +1145,7 @@ final class DelegationEngine {
         // cancelled — else its revival undid a cancel the parent was told of.
         guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await screen(trimmedReason, on: d, kind: .cancel, from: party)
         let why = trimmedReason.isEmpty ? "no longer needed" : trimmedReason
         var m = DelegationMessage(kind: .cancel, from: party, to: .child, text: why)
         m.readAt = m.at
@@ -1161,6 +1179,7 @@ final class DelegationEngine {
         guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let v = verdict.lowercased() == "rejected" ? "rejected" : "accepted"
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        try await screen(trimmedNote, on: d, kind: .note, from: party)
         let text = (d.isRequest ? "Request closed (\(v))." : "Delivery \(v).") + (trimmedNote.isEmpty ? "" : " " + trimmedNote)
         var m = DelegationMessage(kind: .note, from: party, to: .child, text: text)
         m.readAt = m.at
