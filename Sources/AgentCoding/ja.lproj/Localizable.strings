@@ -4185,3 +4185,12 @@
 
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "このチェックアウトでは、Bromure が実行しないリポジトリ独自のフィルタープログラムがないと Git が失敗します。ターミナルで確認してください。";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "各実行はここから新しいブランチで始まります。トリガーが監視するリポジトリの、ワークスペース内のクローンを選んでください。";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "各実行はここから新しいブランチで始まります。ワークスペース内の %@ のクローンを選んでください。";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "このウィンドウではワークスペースの GitHub トークンを読み取れません。リポジトリを owner/repo の形式で入力してください。";

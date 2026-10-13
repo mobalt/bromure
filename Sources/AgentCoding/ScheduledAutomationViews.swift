@@ -362,6 +362,10 @@ struct AutomationEditorView: View {
     /// Where the token-backed lists come from when `profiles` has no token
     /// (a fat client). nil: fetched here with the profile's token.
     let sources: AutomationSources?
+    /// The workspace's folders, for "Choose…" by the folder field (the
+    /// new-session browser's source): nil hides the button.
+    let listFolders: ((UUID, String) async -> [String]?)?
+    @State private var folderPicker = false
     let onSave: (ScheduledAutomation) -> Void
     let onRunNow: (ScheduledAutomation) -> Void
     let onDelete: (UUID) -> Void
@@ -467,6 +471,7 @@ struct AutomationEditorView: View {
          profiles: [Profile],
          credentials: ((UUID) -> (github: Bool, linear: Bool)?)? = nil,
          sources: AutomationSources? = nil,
+         listFolders: ((UUID, String) async -> [String]?)? = nil,
          editing id: UUID?,
          prefill: AutomationPrefill? = nil,
          initialTrigger: ScheduledAutomation.TriggerKind? = nil,
@@ -480,6 +485,7 @@ struct AutomationEditorView: View {
         self.profiles = profiles
         self.credentials = credentials
         self.sources = sources
+        self.listFolders = listFolders
         self.onSave = onSave
         self.onRunNow = onRunNow
         self.onDelete = onDelete
@@ -752,7 +758,19 @@ struct AutomationEditorView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { footerBar }
         // Reload the repo/team dropdowns whenever the workspace (and so the
         // tokens) changes. Doubles as a live token check.
-        .task(id: draft.profileID) { await loadTriggerSources() }
+        // Keyed on the tokens too: a fat client learns which the workspace
+        // holds from the host's state, after this view is up — keyed on the
+        // workspace alone, the first look (no token yet) never fetched again
+        // and "loading repositories…" spun for good.
+        .task(id: sourcesKey) { await loadTriggerSources() }
+        .sheet(isPresented: $folderPicker) {
+            GuestFolderPickerView(
+                profileID: draft.profileID,
+                machineName: selectedProfile?.name ?? "",
+                start: draft.repoPath.trimmingCharacters(in: .whitespaces),
+                listFolders: listFolders ?? { _, _ in nil },
+                onPick: { draft.repoPath = $0 })
+        }
         // Branches + directories depend on the chosen repo AND branch.
         .task(id: repoBranchKey) { await loadRepoDetails() }
         // Tell the host when the draft diverges from (or returns to) what's
@@ -852,12 +870,21 @@ struct AutomationEditorView: View {
 
     /// Refetch branches/dirs when the repo or the commit branch changes.
     private var repoBranchKey: String { draft.githubRepo + "\u{1}" + draft.filters.commitBranch }
+    private var sourcesKey: String {
+        "\(draft.profileID.uuidString)|\(hasGitHubToken)|\(hasLinearToken)|\(githubToken?.isEmpty == false)"
+    }
 
     private func loadTriggerSources() async {
         repoChoices = nil; repoLoadError = nil
         teamChoices = nil; teamLoadError = nil
         guard let profile = selectedProfile else { return }
         let localToken = githubToken.flatMap { $0.isEmpty ? nil : $0 }
+        if localToken == nil, sources == nil, hasGitHubToken {
+            // Said to hold a token nothing here can use: say so, never spin.
+            repoLoadError = NSLocalizedString(
+                "This window can't read the workspace's GitHub token — type the repository as owner/repo.",
+                comment: "automation editor")
+        }
         if localToken != nil || (sources != nil && hasGitHubToken) {
             do {
                 if let localToken {
@@ -1486,7 +1513,25 @@ struct AutomationEditorView: View {
                 captioned(NSLocalizedString(
                     "Start the agent in — a folder inside the workspace (\"~\" is home)",
                     comment: "automation editor")) {
-                    TextField("", text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                    HStack(spacing: 6) {
+                        TextField("", text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                        if listFolders != nil {
+                            Button(NSLocalizedString("Choose…", comment: "automation editor: pick the folder")) {
+                                folderPicker = true
+                            }
+                        }
+                    }
+                }
+                if draft.trigger.isGitHub {
+                    // Which checkout the run works in: this folder — the
+                    // repository it watches is only what fires it.
+                    hint(draft.githubRepo.isEmpty
+                         ? NSLocalizedString(
+                            "Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches.",
+                            comment: "automation editor")
+                         : String(format: NSLocalizedString(
+                            "Each run starts here, on a fresh branch: pick the workspace's clone of %@.",
+                            comment: "automation editor: %@ is owner/repo"), draft.githubRepo))
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(NSLocalizedString("Prompt", comment: ""))

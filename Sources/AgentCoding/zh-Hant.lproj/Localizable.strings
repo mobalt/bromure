@@ -4188,3 +4188,12 @@
 
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "在此檢出中，沒有儲存庫自帶的過濾程式（Bromure 不會執行它）Git 就會失敗。請在終端機中查看。";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "每次執行都從這裡開始，在新分支上：請選擇工作區中該觸發條件所監看儲存庫的複製。";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "每次執行都從這裡開始，在新分支上：請選擇工作區中 %@ 的複製。";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此視窗無法讀取工作區的 GitHub 權杖——請以 擁有者/儲存庫 的形式輸入儲存庫。";

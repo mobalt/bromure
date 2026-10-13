@@ -660,6 +660,7 @@ private struct AutomationEditorSheet: View {
                     controller.credentials(for: id).map { ($0.github, $0.linear) }
                 },
                 sources: controller.automationSources,
+                listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) },
                 editing: editing,
                 onSave: { auto in
                     controller.upsertAutomation(auto)

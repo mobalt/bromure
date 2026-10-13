@@ -4185,3 +4185,12 @@
 
 /* review: git status/diff failed */
 "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git schlägt in diesem Checkout ohne das eigene Filterprogramm des Repositorys fehl, das Bromure nicht ausführt. Sehen Sie ihn sich in einem Terminal an.";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Jeder Lauf beginnt hier, auf einem neuen Branch: Wählen Sie den Klon des Repositorys, das der Auslöser beobachtet, im Workspace.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Jeder Lauf beginnt hier, auf einem neuen Branch: Wählen Sie den Klon von %@ im Workspace.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Dieses Fenster kann das GitHub-Token des Workspace nicht lesen — geben Sie das Repository als Besitzer/Repository ein.";
