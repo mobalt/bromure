@@ -78,17 +78,31 @@ struct AutomationTimeZoneTests {
             .appendingPathComponent("tz-\(UUID().uuidString).json"))
         #expect(store.scheduleTimeZone == TimeZone.current)
         let ahead = daily(9), due = daily(10)
-        var watch = daily(11)
+        var watch = daily(11), every = daily(12)
         watch.trigger = .githubPullRequest
-        store.upsert(ahead); store.upsert(due); store.upsert(watch)
+        every.frequency = .interval
+        every.intervalMinutes = 60
+        store.upsert(ahead); store.upsert(due); store.upsert(watch); store.upsert(every)
         let later = now.addingTimeInterval(3600), earlier = now.addingTimeInterval(-60)
-        store.setNextFire(later, for: ahead.id)
-        store.setNextFire(earlier, for: due.id)
-        store.setNextFire(later, for: watch.id)
+        func plant() {
+            store.setNextFire(later, for: ahead.id)
+            store.setNextFire(earlier, for: due.id)
+            store.setNextFire(later, for: watch.id)
+            store.setNextFire(later, for: every.id)
+        }
+        func replanned() {
+            #expect(store.nextFire(for: ahead.id) == nil)     // replanned on the new clock
+            #expect(store.nextFire(for: due.id) == earlier)   // still due: runs (or is skipped as missed)
+            #expect(store.nextFire(for: watch.id) == later)   // not a clock schedule
+            #expect(store.nextFire(for: every.id) == later)   // an interval keeps its phase
+        }
+        plant()
         store.systemTimeZoneChanged(now: now)
-        #expect(store.nextFire(for: ahead.id) == nil)     // replanned on the new clock
-        #expect(store.nextFire(for: due.id) == earlier)   // still due: runs (or is skipped as missed)
-        #expect(store.nextFire(for: watch.id) == later)   // not a clock schedule
+        replanned()
+        // Changed while the app was quit: the engine replans as it starts.
+        plant()
+        store.replanWallClockFires(now: now)
+        replanned()
         #expect(store.scheduleTimeZone == TimeZone.current)
 
         // A mirror keeps the host's zone, and its planned fires.

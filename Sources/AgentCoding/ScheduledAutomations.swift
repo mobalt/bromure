@@ -626,14 +626,24 @@ final class ScheduledAutomationStore {
     private var systemZoneChanges = 0
 
     /// This Mac changed time zone: drop the system zone Foundation cached,
-    /// and the fires planted on the old clock that are still ahead — the
-    /// engine plants them again on the new one ("9:00" is 9:00 here now).
-    /// One already due stays, to run or be skipped as missed.
+    /// and replan what was planted on the old clock.
     func systemTimeZoneChanged(now: Date = Date()) {
         NSTimeZone.resetSystemTimeZone()
         systemZoneChanges += 1
+        replanWallClockFires(now: now)
+    }
+
+    /// Drop the planned fires of wall-clock schedules (daily, weekdays,
+    /// weekly) still ahead — planted on whatever clock was current then (a
+    /// zone change while running, or while the app was quit) — so the engine
+    /// plants them again on this one: "9:00" is 9:00 here now. Unchanged
+    /// zone: the same instant comes back. A fire already due stays, to run
+    /// or be skipped as missed; an interval keeps its phase (it's no clock
+    /// hour). A mirror's are the host's business.
+    func replanWallClockFires(now: Date = Date()) {
         guard mirroredTimeZone == nil else { return }
-        let ahead = automations.filter { $0.trigger == .schedule }.map(\.id.uuidString)
+        let ahead = automations.filter { $0.trigger == .schedule && $0.frequency != .interval }
+            .map(\.id.uuidString)
             .filter { (nextFires[$0] ?? .distantPast) > now }
         guard !ahead.isEmpty else { return }
         for k in ahead { nextFires[k] = nil }
@@ -1338,6 +1348,8 @@ final class ScheduledAutomationEngine {
             }
         }
         BACDebug.log("automation", "engine started — \(store.automations.count) automation(s)")
+        // The zone may have changed while the app was quit.
+        store.replanWallClockFires()
         tick()   // catch up fires missed while the app was quit
     }
 
