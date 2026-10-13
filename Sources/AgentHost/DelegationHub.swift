@@ -21,8 +21,8 @@ final class DelegationHub: @unchecked Sendable {
     /// first, so an old dead one would never be reached, and its waiting
     /// thread and link would stay forever.
     private var offers: [(take: (Int32) -> Bool, alive: (() -> Bool)?)] = []
-    /// Streams answered locally, oldest first.
-    private var fallbacks: [Int32] = []
+    /// Streams answered locally, and which one a park is for.
+    private var fallbacks = DelegationFallbacks()
     /// A Bromure AC has parked a channel here since this Sidecar started:
     /// a stream answered locally then is a relay gap (a link reconnecting),
     /// not "no Bromure AC at all".
@@ -52,7 +52,7 @@ final class DelegationHub: @unchecked Sendable {
         let first = !everParked
         everParked = true
         offers.append((offer, alive))
-        let kick = fallbacks.isEmpty ? nil : fallbacks.removeFirst()
+        let kick = fallbacks.kick()
         lock.unlock()
         if first { AgentHostLog.log("delegation: a Bromure AC relay is parked") }
         else if wasEmpty, kick != nil { AgentHostLog.log("delegation: a Bromure AC relay is back") }
@@ -64,15 +64,19 @@ final class DelegationHub: @unchecked Sendable {
     /// Offers waiting (tests).
     var parkedCount: Int { lock.lock(); defer { lock.unlock() }; return offers.count }
 
-    /// Whether a relay parks within `grace` (polled; a park also shuts the
-    /// waiting fallback stream down, which is the same answer).
-    func waitForRelay(within grace: TimeInterval) -> Bool {
+    /// Whether a relay parks for stream `fd` within `grace` — kicked by a
+    /// park, first in line among the streams holding a call. Another
+    /// stream's offer isn't this one's: it waits on, keeping its place.
+    func waitForRelay(_ fd: Int32, within grace: TimeInterval) -> Bool {
+        lock.lock(); fallbacks.hold(fd); lock.unlock()
+        defer { lock.lock(); fallbacks.release(fd); lock.unlock() }
         let deadline = Date().addingTimeInterval(grace)
+        func picked() -> Bool { lock.lock(); defer { lock.unlock() }; return fallbacks.kicked(fd) }
         while Date() < deadline {
-            if parkedCount > 0 { return true }
+            if picked() { return true }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        return parkedCount > 0
+        return picked()
     }
 
     var hadRelay: Bool { lock.lock(); defer { lock.unlock() }; return everParked }
@@ -115,11 +119,11 @@ final class DelegationHub: @unchecked Sendable {
                 setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
                 guard let self else { close(c); return }
                 if self.relay(c) { continue }   // the SSH channel owns it now
-                self.lock.lock(); self.fallbacks.append(c); self.lock.unlock()
+                self.lock.lock(); self.fallbacks.add(c); self.lock.unlock()
                 Thread.detachNewThread { [weak self] in
                     Self.serveLocally(c)
                     self?.lock.lock()
-                    self?.fallbacks.removeAll { $0 == c }
+                    self?.fallbacks.remove(c)
                     self?.lock.unlock()
                     close(c)
                 }
@@ -156,7 +160,7 @@ final class DelegationHub: @unchecked Sendable {
                 // shim sends it again over the relay (nothing here did it).
                 if msg["method"] as? String == "tools/call", msg["id"] != nil {
                     AgentHostLog.log("delegation: a call with no Bromure AC relay — holding it up to \(Int(relayGrace)) s")
-                    if shared.waitForRelay(within: relayGrace) {
+                    if shared.waitForRelay(fd, within: relayGrace) {
                         AgentHostLog.log("delegation: relay back — the call goes to it")
                         return
                     }
