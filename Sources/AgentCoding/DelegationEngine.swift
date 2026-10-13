@@ -1622,17 +1622,24 @@ final class DelegationEngine {
     private func watchChildren() {
         let now = Date()
         // Over while its session was out of view, and back: put away now.
+        var retiring = Set<UUID>()
         for d in store.delegations where d.retireWhenBack == true {
             guard sessions.session(d.childSessionID) != nil else { continue }
             store.mutate(d.id) { $0.retireWhenBack = nil }
+            retiring.insert(d.childSessionID)
             if let fresh = store.delegation(d.id) { retireChild(fresh) }
         }
         // Gone too long, and back: on with it where it was. Back deleted:
         // that's the end (failed, as a deleted session's always is).
         for d in store.delegations where d.goneFrom != nil {
             guard let child = sessions.session(d.childSessionID) else { continue }
-            if child.isDeleted {
-                let why = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+            // Archived — or being put away this very tick for another of its
+            // delegations (on an attached Mac the archive is only queued, the
+            // mirror still shows it live): not back to work either.
+            let putAway = child.isArchived || retiring.contains(child.id)
+            if child.isDeleted || putAway {
+                let what = child.isDeleted ? "deleted" : "put away"
+                let why = d.isRequest ? "the peer's session was \(what)" : "the delegate's session was \(what)"
                 store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
                 // The card said it would carry on: say it won't.
                 Task { [weak self] in
@@ -1711,6 +1718,11 @@ final class DelegationEngine {
     /// its status before, and the other end hears it.
     func revive(_ d: Delegation) {
         guard let was = store.delegation(d.id)?.goneFrom else { return }
+        // Put away meanwhile (archived, or queued to be): it isn't back.
+        if let child = sessions.session(d.childSessionID), child.isArchived { return }
+        if store.delegations.contains(where: { $0.childSessionID == d.childSessionID && $0.retireWhenBack == true }) {
+            return
+        }
         store.mutate(d.id) { $0.status = was; $0.failure = nil; $0.goneFrom = nil }
         missingSince[d.id] = nil
         BACDebug.log("delegation", "“\(d.title)”: its session is back — \(was.rawValue) again")
