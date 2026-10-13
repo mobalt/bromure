@@ -90,6 +90,15 @@ struct AutomationTimeZoneTests {
         early.weekday = 2
         let back = AutomationDescriber.time(early, timeZone: tokyo, viewer: eastern, now: now)
         #expect(back.contains(symbols[0] + " "))
+        // More than a day apart: Saturday 11:00 PM in Pago Pago (UTC−11) is
+        // Monday 12:00 AM in Kiritimati (UTC+14).
+        var far = daily(23)
+        far.frequency = .weekly
+        far.weekday = 7
+        let pago = TimeZone(identifier: "Pacific/Pago_Pago")!, kiri = TimeZone(identifier: "Pacific/Kiritimati")!
+        #expect(AutomationDescriber.time(far, timeZone: pago, viewer: kiri, now: now).contains(symbols[1] + " "))
+        far.frequency = .weekdays                            // Mon–Fri 11:00 PM there: Wed–Sun here
+        #expect(AutomationDescriber.time(far, timeZone: pago, viewer: kiri, now: now).contains(short[3] + "–" + short[0] + " "))
         // Same day both sides (3:00 AM EDT = 4:00 PM JST): just the clocks.
         var same = daily(3)
         same.frequency = .weekly

@@ -2212,8 +2212,10 @@ enum AutomationDescriber {
         local.timeZone = viewer
         let hostDay = cal.component(.weekday, from: date), localDay = local.component(.weekday, from: date)
         if hostDay != localDay {
-            // How far the run moves on the calendar here: a day either way.
-            let shift = (localDay - hostDay + 7) % 7 == 1 ? 1 : -1
+            // How far the run moves on the calendar here: a day either way —
+            // two between zones more than a day apart (UTC+14 and UTC−11).
+            let raw = (localDay - hostDay + 7) % 7
+            let shift = raw <= 3 ? raw : raw - 7
             func day(_ w: Int) -> Int { (w - 1 + shift + 7) % 7 }   // 0-based symbol index
             switch a.frequency {
             case .weekly:
