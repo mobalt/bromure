@@ -1998,9 +1998,18 @@ final class ACAutomationServer {
     /// pump) and return the chosen 0-based index — or nil (no live attach / the
     /// user dismissed / timed out), which every broker maps to deny.
     static func presentConsentViaPump(profileID: String, prompt: String,
-                                      choices: [String], timeoutSeconds: TimeInterval) -> Int? {
+                                      choices: [String], timeoutSeconds: TimeInterval,
+                                      token: UUID = UUID()) -> Int? {
         attachLock.lock(); let gate = consentGates[profileID]; attachLock.unlock()
-        return gate?.ask(prompt: prompt, choices: choices, timeout: timeoutSeconds)
+        return gate?.ask(id: token, prompt: prompt, choices: choices, timeout: timeoutSeconds)
+    }
+
+    /// Take back the terminal prompt asked with `token` (a Guardrails
+    /// decision overtook it): its asker gets nil now, and the terminal stops
+    /// showing it.
+    static func withdrawConsentViaPump(token: UUID) {
+        attachLock.lock(); let gates = Array(consentGates.values); attachLock.unlock()
+        for g in gates { g.withdraw(token) }
     }
 
     private static func registerGate(_ gate: PumpConsentGate, for profileID: String) {
@@ -2010,45 +2019,73 @@ final class ACAutomationServer {
         attachLock.lock()
         if consentGates[profileID] === gate { consentGates[profileID] = nil }
         attachLock.unlock()
-        // Detached while a prompt was outstanding → wake the blocked broker now
-        // (deny) instead of letting it wait out the full timeout. The gate is
-        // discarded after this, so the signal can't affect a future prompt.
-        gate.deliver(nil)
+        // Detached while prompts were outstanding → wake the blocked brokers
+        // now (deny) instead of letting them wait out the full timeout.
+        gate.failAll()
     }
 
-    /// Hand-off between a broker (any thread) and the pump that owns the user's
-    /// terminal: the broker sets a prompt and blocks on `ask`; the pump claims it
-    /// via `takePending`, renders it, and `deliver`s the chosen index.
+    /// Hand-off between brokers (any thread) and the pump that owns the user's
+    /// terminal: each `ask` queues its prompt under its own id and blocks; the
+    /// pump claims the oldest via `takePending`, renders it, and `deliver`s
+    /// the chosen index to that id alone. One shared prompt/answer/semaphore
+    /// let a second ask (another credential, or a fresh prompt after an
+    /// overtaken one) overwrite the first, and a keystroke for one prompt
+    /// complete another.
     final class PumpConsentGate {
+        private final class Ask {
+            let id: UUID
+            let prompt: String
+            let choices: [String]
+            let timeout: TimeInterval
+            let done = DispatchSemaphore(value: 0)
+            var answer: Int?
+            var taken = false
+            var finished = false
+            init(id: UUID, prompt: String, choices: [String], timeout: TimeInterval) {
+                self.id = id; self.prompt = prompt; self.choices = choices; self.timeout = timeout
+            }
+        }
         private let lock = NSLock()
-        private var prompt: String?
-        private var choices: [String] = []
-        private var promptTimeout: TimeInterval = 120
-        private var answerIdx: Int?
-        private let answered = DispatchSemaphore(value: 0)
+        private var asks: [Ask] = []   // oldest first
 
-        func ask(prompt: String, choices: [String], timeout: TimeInterval) -> Int? {
-            lock.lock()
-            self.prompt = prompt; self.choices = choices
-            self.promptTimeout = timeout; self.answerIdx = nil
-            lock.unlock()
+        func ask(id: UUID = UUID(), prompt: String, choices: [String], timeout: TimeInterval) -> Int? {
+            let a = Ask(id: id, prompt: prompt, choices: choices, timeout: timeout)
+            lock.lock(); asks.append(a); lock.unlock()
             // Wait a little past the in-terminal read so the pump delivers first.
-            let r = answered.wait(timeout: .now() + timeout + 10)
+            _ = a.done.wait(timeout: .now() + timeout + 10)
             lock.lock(); defer { lock.unlock() }
-            self.prompt = nil; self.choices = []
-            return r == .timedOut ? nil : answerIdx
+            asks.removeAll { $0 === a }
+            return a.finished ? a.answer : nil
         }
-        /// Pump side: claim a pending prompt to render (once).
-        func takePending() -> (String, [String], TimeInterval)? {
+        /// Pump side: claim the oldest prompt not yet shown (once).
+        func takePending() -> (id: UUID, prompt: String, choices: [String], timeout: TimeInterval)? {
             lock.lock(); defer { lock.unlock() }
-            guard let p = prompt else { return nil }
-            prompt = nil
-            return (p, choices, promptTimeout)
+            guard let a = asks.first(where: { !$0.taken && !$0.finished }) else { return nil }
+            a.taken = true
+            return (a.id, a.prompt, a.choices, a.timeout)
         }
-        /// Pump side: hand the chosen index (or nil) back to the waiting broker.
-        func deliver(_ idx: Int?) {
-            lock.lock(); answerIdx = idx; lock.unlock()
-            answered.signal()
+        /// Pump side: the chosen index (or nil) for prompt `id` — only that
+        /// one; a prompt already withdrawn ignores it.
+        func deliver(_ idx: Int?, to id: UUID) { finish(id, idx) }
+        /// The asker no longer wants an answer: it gets nil now.
+        func withdraw(_ id: UUID) { finish(id, nil) }
+        /// Still waiting for its answer (the terminal keeps showing it).
+        func isOpen(_ id: UUID) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return asks.contains { $0.id == id && !$0.finished }
+        }
+        /// The attach ended: every waiting asker gets nil.
+        func failAll() {
+            lock.lock(); let open = asks.filter { !$0.finished }; lock.unlock()
+            for a in open { finish(a.id, nil) }
+        }
+        private func finish(_ id: UUID, _ idx: Int?) {
+            lock.lock()
+            guard let a = asks.first(where: { $0.id == id && !$0.finished }) else { lock.unlock(); return }
+            a.finished = true
+            a.answer = idx
+            lock.unlock()
+            a.done.signal()
         }
     }
 
@@ -2061,7 +2098,8 @@ final class ACAutomationServer {
     /// repaint afterward. Returns the 0-based index, or nil (Enter/timeout/EOF →
     /// deny).
     private static func presentConsent(clientFD a: Int32, prompt: String,
-                                       choices: [String], timeout: TimeInterval) -> Int? {
+                                       choices: [String], timeout: TimeInterval,
+                                       stillAsked: () -> Bool = { true }) -> Int? {
         var s = "\u{1b}[2J\u{1b}[H"                                 // clear, home
         s += "\u{1b}[1;33m🔒 Bromure — approval required\u{1b}[0m\r\n\r\n"
         s += prompt.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n"
@@ -2076,9 +2114,11 @@ final class ACAutomationServer {
         readLoop: while true {
             let remMs = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
             if remMs == 0 { break }
+            if !stillAsked() { break }                              // withdrawn: not asked any more
             var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0)]
-            let n = poll(&fds, 1, remMs)
-            if n <= 0 { break }                                     // timeout / error → deny
+            let n = poll(&fds, 1, min(remMs, 250))
+            if n == 0 { continue }                                  // look at the deadline / withdrawal again
+            if n < 0 { break }                                      // error → deny
             let r = Darwin.read(a, &buf, buf.count)
             if r <= 0 { break }                                     // client closed → deny
             inbuf.append(contentsOf: buf[0..<r])
@@ -2205,8 +2245,9 @@ final class ACAutomationServer {
             // Host-side consent: if a gate fired for this session, render its
             // prompt on the user's side (a) and read the answer here — the guest
             // (b) never sees it, so a compromised guest can't forge consent.
-            if let g = gate, let (prompt, choices, t) = g.takePending() {
-                g.deliver(presentConsent(clientFD: a, prompt: prompt, choices: choices, timeout: t))
+            if let g = gate, let p = g.takePending() {
+                g.deliver(presentConsent(clientFD: a, prompt: p.prompt, choices: p.choices, timeout: p.timeout,
+                                         stillAsked: { g.isOpen(p.id) }), to: p.id)
                 afterConsent?()   // repaint the guest's tmux over where the prompt was
             }
             var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0),
