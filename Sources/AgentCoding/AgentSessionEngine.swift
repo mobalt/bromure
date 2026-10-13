@@ -577,7 +577,7 @@ final class AgentSessionEngine {
     func archive(_ id: UUID) {
         guard let s = store.session(id) else { return }
         BACDebug.log("sessions", "archive “\(s.title)”")
-        if s.windowIndex != nil, delegate?.pane(for: s.profileID) != nil { close(id) }
+        if Self.tabProvenHere(s), delegate?.pane(for: s.profileID) != nil { close(id) }
         store.mutate(id) { $0.launchingSince = nil }
         store.setArchived(id, true)
     }
@@ -605,7 +605,17 @@ final class AgentSessionEngine {
             return
         }
         store.setDeleted(id)
-        killTabIfShown(store.session(id) ?? s)
+        if Self.tabProvenHere(s) { killTabIfShown(store.session(id) ?? s) }
+    }
+
+    /// Whether a session's tab may be ended by its stored index right now:
+    /// only when the liveness probe has seen this agent there (the same bar
+    /// a notice is typed at). An index from before a reboot or a machine's
+    /// return — a delegate retired the moment its Mac reconnects — may name
+    /// somebody else's tab; that one is left to `reapArchived`, which ends a
+    /// tab only once the probe proves it's this session's (boot, window id).
+    nonisolated static func tabProvenHere(_ s: AgentSession) -> Bool {
+        s.windowIndex != nil && s.agentAlive == true
     }
 
     /// Kill a deleted session's tab when its workspace is up — once per
