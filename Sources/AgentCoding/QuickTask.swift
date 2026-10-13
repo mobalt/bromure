@@ -412,6 +412,12 @@ struct QuickTaskView: View {
         return .handled
     }
 
+    /// An input method is composing in the window's field: its ↩ commits
+    /// that, and mustn't add the task too.
+    static func composing(in window: NSWindow?) -> Bool {
+        (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
+    }
+
     // MARK: View
 
     var body: some View {
@@ -495,6 +501,20 @@ struct QuickTaskView: View {
                     .font(.system(size: 13))
                     .lineLimit(1...5)
                     .focused($focus, equals: .details)
+                    // ↩ adds from here too (it used to do nothing, leaving
+                    // ⇥⇥ the only way on); ⌥↩ / ⇧↩ make a new line.
+                    .onKeyPress(keys: [.return]) { press in
+                        guard press.modifiers.isDisjoint(with: [.option, .shift]),
+                              !Self.composing(in: NSApp.currentEvent?.window ?? NSApp.keyWindow)
+                        else { return .ignored }
+                        // The title's @/# list still open: ↩ picks, as it says.
+                        if let s = suggestions.first {
+                            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
+                        } else {
+                            submit(keepOpen: press.modifiers.contains(.command))
+                        }
+                        return .handled
+                    }
                     .onKeyPress(.tab) { tab(fromDetails: true) }
                     .padding(.leading, 34)
                     .transition(.opacity.combined(with: .move(edge: .top)))
