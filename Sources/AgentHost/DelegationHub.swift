@@ -255,10 +255,28 @@ enum DelegationShim {
             return (sock, generation)
         }
 
+        // One writer at a time (stdin's lines, the reader's resends), and a
+        // stream is never closed — nor its fd number reused by the next one —
+        // between the "still the current stream?" check and the write.
+        let writeLock = NSLock()
+
         func drop(_ fd: Int32) {
+            writeLock.lock()
             lock.lock()
             if sock == fd { close(fd); sock = -1 }
             lock.unlock()
+            writeLock.unlock()
+        }
+
+        /// Write `data` on stream `gen` (recording it as in flight there) —
+        /// false when that stream is gone or the write failed.
+        func send(_ data: Data, _ fd: Int32, _ gen: Int) -> Bool {
+            writeLock.lock(); defer { writeLock.unlock() }
+            lock.lock()
+            let live = sock == fd && generation == gen
+            if live { pending.sent(data, on: gen) }
+            lock.unlock()
+            return live && writeLine(data, fd)
         }
 
         func writeLine(_ data: Data, _ fd: Int32) -> Bool {
@@ -285,8 +303,7 @@ enum DelegationShim {
                 let data = Data(line.utf8)
                 while true {
                     let (fd, gen) = current()
-                    lock.lock(); pending.sent(data, on: gen); lock.unlock()
-                    if writeLine(data, fd) { break }
+                    if send(data, fd, gen) { break }
                     drop(fd)
                 }
             }
@@ -302,10 +319,15 @@ enum DelegationShim {
                 lock.lock()
                 let overdue = pending.overdue(now: Date()).filter { !localGenerations.contains($0.gen) }
                 let fd = sock, gen = generation
+                // On a stream already gone (it died while held calls were being
+                // sent again): nobody reads it any more — answer them here.
+                let orphans = overdue.filter { $0.gen != gen || fd < 0 }
+                for o in orphans { _ = pending.take(key: o.key) }
                 lock.unlock()
-                guard let late = overdue.first(where: { $0.gen == gen }) else { continue }
+                for o in orphans { emit(DelegationShimCalls.lostReply(o)) }
+                guard fd >= 0, let late = overdue.first(where: { $0.gen == gen }) else { continue }
                 AgentHostLog.log("delegation: no reply to \(late.label) within \(Int(late.limit)) s — dropping the relay stream")
-                if fd >= 0 { shutdown(fd, SHUT_RDWR) }   // the reader sees EOF: lost calls get errors
+                shutdown(fd, SHUT_RDWR)   // the reader sees EOF: its lost calls get errors
             }
         }
 
@@ -341,11 +363,10 @@ enum DelegationShim {
                 // Never done: again, over whatever the hub hands out now.
                 if !held.isEmpty {
                     AgentHostLog.log("delegation: \(held.count) held call(s) go to the relay")
-                    while true {
+                    var rest = held
+                    while let h = rest.first {
                         let (nfd, ngen) = current()
-                        lock.lock(); for h in held { pending.sent(h.line, on: ngen) }; lock.unlock()
-                        if held.allSatisfy({ writeLine($0.line, nfd) }) { break }
-                        drop(nfd)
+                        if send(h.line, nfd, ngen) { rest.removeFirst() } else { drop(nfd) }
                     }
                 }
             } else {

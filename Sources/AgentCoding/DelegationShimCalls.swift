@@ -63,6 +63,12 @@ struct DelegationShimCalls {
         return mine
     }
 
+    /// One call, removed (nil: already settled).
+    mutating func take(key: String) -> Call? {
+        guard let i = calls.firstIndex(where: { $0.key == key }) else { return nil }
+        return calls.remove(at: i)
+    }
+
     func overdue(now: Date) -> [Call] {
         calls.filter { now.timeIntervalSince($0.sentAt) > $0.limit }
     }
