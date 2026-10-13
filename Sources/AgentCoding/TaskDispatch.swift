@@ -653,6 +653,14 @@ final class TaskDispatcher {
     /// machine away) — the cancel or close is on the record when it's back.
     nonisolated static func syncs(_ d: Delegation) -> Bool { d.status.isOpen || d.goneFrom != nil }
 
+    /// Whether `sync` closes a done card's delegation now: not while the
+    /// landing's grace is on — the assignee's report (its summary on the
+    /// card) can still come, even from a session that was away; a close
+    /// first refused it. The report, or the grace running out, ends it.
+    nonisolated static func closesNow(_ task: CodingTask, inLandingGrace: Bool) -> Bool {
+        task.stage == .done && !inLandingGrace
+    }
+
     /// Close the requests of tasks that are over, and cancel the ones whose
     /// card is gone — the assignee hears either way.
     func sync() {
@@ -669,7 +677,8 @@ final class TaskDispatcher {
                                                 reason: "The task was removed from the board.", by: .user) }
                 continue
             }
-            guard task.stage == .done else { continue }
+            guard Self.closesNow(task, inLandingGrace: delegate.codingTaskEngine.inLandingGrace(task.id))
+            else { continue }
             let note: String
             let accepted: Bool
             switch task.effectiveCompletion {

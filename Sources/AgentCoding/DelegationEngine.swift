@@ -1007,7 +1007,12 @@ final class DelegationEngine {
             revive(d)
             if let fresh = store.delegation(delegationID) { d = fresh }
         }
-        guard d.status.isOpen || kind == .note else {
+        // Still failed for its absence (its session put away as it came
+        // back): its delivery lands all the same — delivered stays open on
+        // an archived session, and the parent closes it.
+        let deliversBack = from == .child && kind == .deliver && d.goneFrom != nil
+            && sessions.session(d.childSessionID)?.isDeleted != true
+        guard d.status.isOpen || kind == .note || deliversBack else {
             throw DelegationRefusal("Delegation “\(d.title)” is \(d.status.rawValue).")
         }
         let to: DelegationMessage.Party
@@ -1060,7 +1065,7 @@ final class DelegationEngine {
             switch kind {
             case .ask: d.status = .waitingForParent
             case .answer, .steer: if d.status == .waitingForParent || d.status == .starting { d.status = .working }
-            case .deliver: d.status = .delivered
+            case .deliver: d.status = .delivered; d.goneFrom = nil; d.failure = nil
             case .cancel: d.status = .cancelled
             case .report: if d.status == .starting { d.status = .working }
             case .brief, .note: break
