@@ -385,6 +385,28 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return sawLocating || polls >= 40 ? false : nil
     }
 
+    /// The fat client's wait on the host's look: polls the mirrored card
+    /// every `interval` until `locateOutcome` settles, `window` passes, or
+    /// the waiting task is cancelled (false) — a closed Review window's
+    /// sleep throws at once, and without that check the loop spun the main
+    /// actor flat out for the rest of the look. `kick`: a poll now and then.
+    @MainActor
+    static func awaitLocate(interval: UInt64 = 500_000_000, window: TimeInterval = locateWindow,
+                            task: () -> CodingTask?, kick: () -> Void) async -> Bool {
+        var sawLocating = false
+        let deadline = Date().addingTimeInterval(window)
+        var i = 0
+        while Date() < deadline, !Task.isCancelled {
+            i += 1
+            try? await Task.sleep(nanoseconds: interval)
+            let t = task()
+            if t?.isLocating == true { sawLocating = true }
+            if let done = locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
+            if i % 6 == 0 { kick() }
+        }
+        return false
+    }
+
     static var locatingText: String {
         NSLocalizedString("Looking for the worktree…", comment: "task card: Review is still looking for a delivered branch's checkout")
     }
