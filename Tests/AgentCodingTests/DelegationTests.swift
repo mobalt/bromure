@@ -557,6 +557,54 @@ struct DelegationTests {
         return s
     }
 
+    /// Finding (CWE-670): a gone delegation ended only on a listed row with
+    /// `deletedAt` — but a deleted session simply vanishes (a Sidecar's
+    /// /state drops it, a windowless local one is removed), so it waited
+    /// for ever; and an archived one was revived.
+    @Test("a gone delegation ends when its session stays absent where it lived, or comes back archived")
+    func goneEndsWhenVanishedOrArchived() async throws {
+        let f = fixture()
+        f.engine.absenceGrace = 0
+        f.engine.vanishGrace = 0
+        func goAway(_ id: UUID) async {
+            f.sessions.remove(id)
+            f.engine.tick()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            f.engine.tick()
+        }
+        // Deleted: its row is gone for good, and this Mac lists sessions.
+        let (d, childID) = await delegated(f)
+        f.engine.tick()
+        #expect(f.store.delegation(d.id)?.childHost == DelegationEngine.localChildHost)
+        await goAway(childID)
+        f.engine.tick()                                   // absent where it lived: noted
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        f.engine.tick()                                   // still absent past the grace
+        let ended = try #require(f.store.delegation(d.id))
+        #expect(ended.goneFrom == nil && ended.status == .failed)
+        #expect(ended.failure == "the delegate's session was deleted")
+
+        // Archived while gone: ended, not revived.
+        let (d2, child2) = await delegated(f, childWindow: 8)
+        f.engine.tick()
+        var row = try #require(f.sessions.session(child2))
+        await goAway(child2)
+        #expect(f.store.delegation(d2.id)?.goneFrom != nil)
+        row.archivedAt = Date()
+        f.sessions.upsert(row)
+        f.engine.tick()
+        #expect(f.store.delegation(d2.id)?.goneFrom == nil && f.store.delegation(d2.id)?.status == .failed)
+        #expect(f.store.delegation(d2.id)?.failure == "the delegate's session was archived")
+
+        // On a machine that's away: it waits (the machine may come back).
+        let (d3, child3) = await delegated(f, childWindow: 10)
+        f.engine.tick()
+        f.store.mutate(d3.id) { $0.childHost = UUID().uuidString }
+        await goAway(child3)
+        f.engine.tick()
+        #expect(f.store.delegation(d3.id)?.goneFrom != nil)
+    }
+
     @Test("the board hands a task to a session: asks come back to it, it answers, the delivery reaches it")
     func boardRequest() async throws {
         let f = fixture()
