@@ -298,11 +298,16 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
 
     /// The rank that puts a card dropped on `target` just above it — or at
     /// the bottom, `target` nil — among the column `ordered` (by rank),
-    /// leaving out the card being moved.
-    static func rank(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask]) -> Double {
+    /// leaving out the card being moved. A collapsed midpoint (many drops into
+    /// one gap) fails `fits`, and the drag respaces that gap.
+    static func rank(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                     now: Date = Date()) -> Double {
         let others = ordered.filter { $0.id != moving }
         guard let target, let i = others.firstIndex(where: { $0.id == target }) else {
-            return (others.last?.backlogRank ?? Date().timeIntervalSince1970) + 1
+            // The bottom: just past the last card and past now — not a whole
+            // second past the last card, which put the next new card (ranked
+            // by when it's created) above the one just sent to the bottom.
+            return max(others.last?.backlogRank ?? 0, now.timeIntervalSince1970) + 0.001
         }
         let after = others[i].backlogRank
         guard i > 0 else { return after - 1 }
