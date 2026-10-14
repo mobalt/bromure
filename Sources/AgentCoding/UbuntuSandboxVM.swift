@@ -722,6 +722,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // onStopped would drop the node from its cluster mid-reboot).
         failed.delegate = nil
         vm = nil
+        // What its stop callback released — now ignored, so released here,
+        // before prepare() builds the next ones: the switch port (an fd and
+        // a read loop otherwise held until the app quits), the bridged
+        // filter, the MAC claim and the serial console.
+        releaseSerialConsole()
+        releaseMACToPool()
         await Self.discardPausedInstance(failed)
     }
 
