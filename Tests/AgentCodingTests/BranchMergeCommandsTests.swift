@@ -110,6 +110,11 @@ struct BranchMergeCommandsTests {
                + "printf '#!/bin/sh\\ncat\\n' > \(drv); chmod +x \(pwn) \(drv); "
                + "git init -q -b main repo; cd repo; echo '*.bin filter=lfs' > .gitattributes; echo x > c.bin; "
                + "git add .; git commit -qm a; "
+               // The target's index settled before any filter exists: a
+               // racily-clean c.bin would be re-cleaned by the merge, and
+               // the blank process over the user's driver is required —
+               // fatal by design, the merge handed to the agent.
+               + "touch -t 202001010000 c.bin .gitattributes; git update-index -q --refresh; "
                + "git worktree add -q -b wt/f \(wt); cd \(wt); echo f > f.txt; git add f.txt; git commit -qm f; touch c.bin; "
                + "cd \(root); for k in clean smudge process; do git config filter.lfs.$k \(pwn); done; "
                + "git config filter.lfs.required true; "
