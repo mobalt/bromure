@@ -715,9 +715,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the workspace's disk, and the fresh boot fails on it.
     @MainActor
     public func discardFailedRestore() async {
-        guard let vm else { return }
-        vm.delegate = nil   // its stop isn't the workspace's
-        await Self.discardPausedInstance(vm)
+        guard let failed = vm else { return }
+        // Detached before anything awaits: a stop it already reported is
+        // queued for the main actor and runs at the first await — it must
+        // find an instance that isn't this sandbox's (a cluster node's
+        // onStopped would drop the node from its cluster mid-reboot).
+        failed.delegate = nil
+        vm = nil
+        await Self.discardPausedInstance(failed)
     }
 
     // MARK: Configuration fingerprint (saved-state drift)
