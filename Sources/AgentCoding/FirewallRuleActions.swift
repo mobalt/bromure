@@ -558,3 +558,44 @@ extension ACAppDelegate {
         commitFirewallRules(text, profileID: profileID)
     }
 }
+
+/// One open workspace settings window and its live firewall edit. However
+/// the window closes — Save, Cancel, the close button, its host going away —
+/// the session ends: unsaved edits go back (a save's `keep` came first) and
+/// `onGone` drops the owner's reference, so the next open builds a new
+/// editor from the rules now in force with a new live edit. A window kept
+/// after the close button showed the reverted edits as in force, its live
+/// edit finished and deaf to further edits (CWE-670).
+@MainActor final class SettingsWindowSession {
+    let window: NSWindow
+    let live: FirewallLiveEdit?
+    private var observer: NSObjectProtocol?
+    private var onGone: ((SettingsWindowSession) -> Void)?
+
+    init(window: NSWindow, live: FirewallLiveEdit?, onGone: @escaping (SettingsWindowSession) -> Void) {
+        self.window = window
+        self.live = live
+        self.onGone = onGone
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    /// Closes the window, ending the session.
+    func close() {
+        end()
+        window.close()
+    }
+
+    var hasEnded: Bool { onGone == nil }
+
+    private func end() {
+        guard let gone = onGone else { return }
+        onGone = nil
+        observer.map(NotificationCenter.default.removeObserver)
+        observer = nil
+        live?.revert()
+        gone(self)
+    }
+}

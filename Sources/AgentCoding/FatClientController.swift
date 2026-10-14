@@ -3207,15 +3207,14 @@ final class RemoteHostWindow: NSWindow {
     private var expandedSidebarWidth: CGFloat = 240
     private static let sidebarRailWidth: CGFloat = 44
     /// Per-workspace settings editors (the pill's gearshape) — same
-    /// `ProfileEditorView` as local, saving over the tunnel.
-    private var settingsWindows: [Profile.ID: NSWindow] = [:]
+    /// `ProfileEditorView` as local, saving over the tunnel — and each one's
+    /// firewall edits, in force on the host as made: kept by a save, put
+    /// back by any other close, which also forgets the window.
+    private var settingsSessions: [Profile.ID: SettingsWindowSession] = [:]
     /// The full profile the settings editor opened with, so a save can diff it
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
-    /// Each settings window's firewall edits, in force on the host as made:
-    /// kept by a save, put back by any other close.
-    private var settingsFirewall: [Profile.ID: (live: FirewallLiveEdit, observer: NSObjectProtocol)] = [:]
     /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
     /// local window opens, backed by a `RemoteTraceStore` that fetches the
     /// remote's records + decrypted bodies over the tunnel. One per host window.
@@ -3389,8 +3388,8 @@ final class RemoteHostWindow: NSWindow {
         clearDockerDashboard()
         clearKubeDashboard()
         clearRegistryDashboard()
-        for (_, w) in settingsWindows { w.close() }
-        settingsWindows.removeAll()
+        for s in Array(settingsSessions.values) { s.close() }
+        settingsSessions.removeAll()
         traceInspectorWindow?.close()   // willClose → reapTraceInspector stops polling
         traceInspectorWindow = nil
         remoteTraceStore?.stop()
@@ -3938,7 +3937,7 @@ final class RemoteHostWindow: NSWindow {
     /// (SSH-key import, subscription registration) stay hidden — their
     /// callbacks are nil, exactly like a freshly-created local profile.
     private func openWorkspaceSettings(_ id: Profile.ID) {
-        if let win = settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+        if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -3965,7 +3964,7 @@ final class RemoteHostWindow: NSWindow {
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
             }
-            if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+            if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
             let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
                                         commit: { [c] text in c.commitFirewall(id, rules: text); return true },
@@ -4022,20 +4021,14 @@ final class RemoteHostWindow: NSWindow {
                 modelsPane: .workspace(global: remoteGlobalModels))
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
-            self.settingsWindows[id] = win
-            // Closed any way but a save: the firewall edits go back.
-            let observer = NotificationCenter.default.addObserver(
-                forName: NSWindow.willCloseNotification, object: win, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.endSettingsFirewall(id) }
+            // Closed any way but a save: the firewall edits go back, and the
+            // window is forgotten — reopening reads the rules in force.
+            self.settingsSessions[id] = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+                guard let self, self.settingsSessions[id] === gone else { return }
+                self.settingsSessions[id] = nil
+                self.settingsOriginals[id] = nil
             }
-            self.settingsFirewall[id] = (live, observer)
         }
-    }
-
-    private func endSettingsFirewall(_ id: Profile.ID) {
-        guard let f = settingsFirewall.removeValue(forKey: id) else { return }
-        f.live.revert()
-        NotificationCenter.default.removeObserver(f.observer)
     }
 
     /// Confirm on this Mac, then ask the remote to start the flow. The remote
@@ -4070,7 +4063,7 @@ final class RemoteHostWindow: NSWindow {
         // stream: nothing more goes live, the ones sent land first, then the
         // document — the editor as it was at the click, every field alike —
         // and a close meanwhile only reverts if the save fails.
-        let live = settingsFirewall[id]?.live
+        let live = settingsSessions[id]?.live
         // One save at a time: a second document could land before the first.
         guard live?.isSaving != true else { return }
         live?.beginSave()
@@ -4122,9 +4115,8 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func closeSettingsWindow(_ id: Profile.ID) {
-        endSettingsFirewall(id)
-        settingsWindows[id]?.close()
-        settingsWindows[id] = nil
+        settingsSessions[id]?.close()
+        settingsSessions[id] = nil
         settingsOriginals[id] = nil
     }
 
@@ -6281,7 +6273,7 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true]
         case "shot-settings":
             // E2E hook: render that editor window to a PNG (`path`).
-            guard let id = resolveID(), let win = settingsWindows[id] else {
+            guard let id = resolveID(), let win = settingsSessions[id]?.window else {
                 return ["error": "settings window not open"]
             }
             let path = (p["path"] as? String) ?? "/tmp/bromure-remote-settings.png"
@@ -7064,7 +7056,7 @@ final class RemoteHostWindow: NSWindow {
             controller.listModel.selectedID = nil
         }
         for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
-        for id in Array(settingsWindows.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+        for id in Array(settingsSessions.keys) where controller.isGone(id) { closeSettingsWindow(id) }
     }
 
     /// The ids among `ids` whose workspace is gone from the mirror.

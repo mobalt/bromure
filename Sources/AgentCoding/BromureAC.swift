@@ -1370,13 +1370,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Internal so the AppleScript bridge can read window IDs.
     var mainWindow: NSWindow?
-    var editorWindow: NSWindow?
+    var editorWindow: NSWindow? { editorSession?.window }
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
-    /// The open editor's firewall edits, in force as they're made: kept by a
-    /// save, put back by any other close.
-    private var editorFirewallLive: FirewallLiveEdit?
-    private var editorCloseObserver: NSObjectProtocol?
+    /// The open editor and its firewall edits, in force as they're made:
+    /// kept by a save, put back by any other close — which also forgets
+    /// the window, so reopening builds it again from the rules in force.
+    private var editorSession: SettingsWindowSession?
 
     /// One *attached* window per profile. Each window holds N tabs, all
     /// rendering the same VM. Note this is only the windows currently on
@@ -9906,8 +9906,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // old one down and rebuild. The previous guard re-surfaced whatever
         // editor was open regardless of `editing`, so once any profile's
         // Settings had been opened, every later "Settings" click re-showed
-        // that same window — and since the editor isn't nil'd on a red-button
-        // close, it stuck to the first profile edited this session.
+        // that same window. Only an OPEN editor is reused: a closed one is
+        // forgotten (its session), so reopening reads the rules in force.
         if let existing = editorWindow {
             if editorEditingProfile?.id == editing?.id {
                 existing.makeKeyAndOrderFront(nil)
@@ -9941,7 +9941,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.commitFirewallRules(text, profileID: p.id) ?? false
             }
         }
-        editorFirewallLive = live
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
             isNew: editing == nil,
@@ -10083,22 +10082,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         .withSubscriptionHealth({ [weak self] provider in self?.localSubscriptionHealth(provider, profileID: editing?.id) }))
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
-        editorWindow = win
         // Closed any way but a save (Cancel, the close button, another
-        // workspace's editor taking its place): the firewall edits go back.
-        editorCloseObserver.map(NotificationCenter.default.removeObserver)
-        editorCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: win, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.endEditorFirewallLive() }
+        // workspace's editor taking its place): the firewall edits go back,
+        // and the window is forgotten.
+        editorSession = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+            guard let self, self.editorSession === gone else { return }
+            self.editorSession = nil
+            self.editorEditingProfile = nil
         }
-    }
-
-    /// The editor closed: its unsaved firewall edits are put back.
-    private func endEditorFirewallLive() {
-        editorFirewallLive?.revert()
-        editorFirewallLive = nil
-        editorCloseObserver.map(NotificationCenter.default.removeObserver)
-        editorCloseObserver = nil
     }
 
     /// Snapshot of where this profile's data lives + how to nuke it.
@@ -10148,9 +10139,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func closeEditorWindow() {
-        endEditorFirewallLive()
-        editorWindow?.close()
-        editorWindow = nil
+        editorSession?.close()
+        editorSession = nil
         editorEditingProfile = nil
     }
 
@@ -10361,7 +10351,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       : "Couldn't save the workspace.")
             return
         }
-        editorFirewallLive?.keep()
+        editorSession?.live?.keep()
         closeEditorWindow()
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).
