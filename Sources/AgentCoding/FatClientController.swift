@@ -2959,18 +2959,34 @@ struct RemoteToolbarBar: View {
 @MainActor
 final class RemoteToolbarDelegate: NSObject, NSToolbarDelegate {
     static let itemID = NSToolbarItem.Identifier("io.bromure.ac.remote.controls")
+    /// The "Sending…" cue, left of the controls: in the toolbar only while
+    /// something is on its way, so the controls keep the trailing edge and
+    /// no empty bubble shows beside them.
+    static let sendingID = NSToolbarItem.Identifier("io.bromure.ac.remote.sending")
     private let rootView: AnyView
-    init(rootView: AnyView) { self.rootView = rootView }
+    private let sendingView: AnyView?
+    init(rootView: AnyView, sendingView: AnyView? = nil) {
+        self.rootView = rootView
+        self.sendingView = sendingView
+    }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.flexibleSpace, Self.itemID]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.itemID]
+        [.flexibleSpace, Self.sendingID, Self.itemID]
     }
     func toolbar(_ t: NSToolbar,
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == Self.sendingID, let sendingView {
+            let item = NSToolbarItem(itemIdentifier: id)
+            let host = NSHostingView(rootView: sendingView)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            host.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            item.view = host
+            return item
+        }
         guard id == Self.itemID else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         let host = NSHostingView(rootView: rootView)
@@ -3275,6 +3291,37 @@ final class RemoteHostWindow: NSWindow {
     /// A slow link is said in the title bar ("Slow connection · request RTT
     /// …") — an overlay pill sat on the session header. Re-armed on every
     /// change of the controller's link state.
+    /// "Sending…" left of the toolbar's controls while something the user
+    /// sent is still on its way past a beat. A trailing title-bar accessory
+    /// held its width even when empty and pushed the controls off the edge.
+    private func observeSending() {
+        withObservationTracking {
+            updateSendingItem()
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeSending() }
+        }
+    }
+
+    private func updateSendingItem() {
+        guard let tb = toolbar else { return }
+        let oldest = controller.outgoing.values.min()
+        let show = OutgoingIndicator.shows(oldest: oldest)
+        let at = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.sendingID }
+        if show, at == nil {
+            let controls = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.itemID }
+            tb.insertItem(withItemIdentifier: RemoteToolbarDelegate.sendingID, at: controls ?? tb.items.count)
+        } else if !show, let at {
+            tb.removeItem(at: at)
+        }
+        // Not yet a beat old: look again when it is (the send may end first).
+        if let oldest, !show {
+            let wait = OutgoingIndicator.delay - Date().timeIntervalSince(oldest)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(wait, 0.01)) { [weak self] in
+                self?.updateSendingItem()
+            }
+        }
+    }
+
     private func observeLinkSubtitle() {
         withObservationTracking {
             let slow = controller.linkSlow && controller.linkPresentation != .reconnecting
@@ -3297,16 +3344,9 @@ final class RemoteHostWindow: NSWindow {
         title = "Remote — \(controller.host.name)"
         isReleasedWhenClosed = false
         observeLinkSubtitle()
-        // "Sending…" in the title bar while something the user sent is
-        // still on its way.
-        let sending = NSTitlebarAccessoryViewController()
-        sending.layoutAttribute = .trailing
-        let sendingView = NSHostingView(rootView: OutgoingIndicator(controller: controller))
-        sendingView.frame = NSRect(x: 0, y: 0, width: 120, height: 28)
-        sending.view = sendingView
-        addTitlebarAccessoryViewController(sending)
         buildLayout()
         buildToolbar()
+        observeSending()
         showGrid()
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
@@ -3891,7 +3931,9 @@ final class RemoteHostWindow: NSWindow {
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
-        let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
+        let delegate = RemoteToolbarDelegate(
+            rootView: AnyView(bar),
+            sendingView: AnyView(OutgoingIndicator(controller: controller)))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
         tb.delegate = delegate
