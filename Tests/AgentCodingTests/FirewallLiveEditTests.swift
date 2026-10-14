@@ -111,22 +111,22 @@ import SandboxEngine
     @Test("once Save is pressed nothing more goes live; a close meanwhile waits for the save's outcome")
     func saveInFlight() {
         // Saved: the edit still settling is dropped (the document carries
-        // it), a later edit isn't sent, and the close doesn't revert.
+        // it), a later edit waits for the save, and the close doesn't revert.
         let host = Host(opening)
         let live = session(host, settle: 10)
         live.edited("default allow")                    // still settling
-        live.beginSave()
+        live.beginSave(rules: "default allow")
         live.edited("default deny")
         live.revert()                                   // the close button, mid-save
         #expect(host.commits.isEmpty)
-        live.keep()
-        #expect(host.commits.isEmpty)
+        live.keep()                                     // saved: the later edit follows it
+        #expect(host.rules == "default deny")
 
         // Failed: the close that came meanwhile reverts now.
         let h2 = Host(opening)
         let l2 = session(h2)
         l2.edited("default allow")
-        l2.beginSave()
+        l2.beginSave(rules: "default allow")
         l2.revert()
         #expect(h2.rules == "default allow")            // not yet: the save may still land
         l2.saveFailed()
@@ -135,10 +135,32 @@ import SandboxEngine
         // Failed with the window still open: edits go live again.
         let h3 = Host(opening)
         let l3 = session(h3)
-        l3.beginSave()
+        l3.beginSave(rules: opening)
         l3.saveFailed()
         l3.edited("default allow")
         #expect(h3.rules == "default allow")
+    }
+
+    @Test("an edit made while the save is on its way isn't lost")
+    func editDuringSave() {
+        // Saved: the later edit goes in force after the save.
+        let host = Host(opening)
+        let live = session(host)
+        live.beginSave(rules: opening)
+        host.rules = opening                             // the save's document lands
+        live.edited("default allow")                     // typed during the save
+        #expect(host.commits.isEmpty)
+        live.keep()
+        #expect(host.rules == "default allow")
+
+        // Failed, window open: the table's rules go in force.
+        let h2 = Host(opening)
+        let l2 = session(h2)
+        l2.beginSave(rules: opening)
+        l2.edited("default allow")
+        l2.saveFailed()
+        #expect(h2.rules == "default allow")
+        #expect(!l2.isSaving)
     }
 
     @Test("typing settles before it's put in force: only the last text lands")

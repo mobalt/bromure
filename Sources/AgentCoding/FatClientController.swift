@@ -4042,7 +4042,9 @@ final class RemoteHostWindow: NSWindow {
         // document (its rules are the latest) — and a close meanwhile only
         // reverts if the save fails.
         let live = settingsFirewall[id]?.live
-        live?.beginSave()
+        // One save at a time: a second document could land before the first.
+        guard live?.isSaving != true else { return }
+        live?.beginSave(rules: edited.egressRules)
         Task { @MainActor [weak self] in
             do {
                 await c.firewallCommitsSent()

@@ -315,6 +315,11 @@ extension Notification.Name {
     /// close meanwhile reverts only if the save fails.
     private var saving = false
     private var revertIfSaveFails = false
+    /// The rules the save writes, and the table's latest text — edits made
+    /// while it was on its way are committed after it.
+    private var savedRules: String?
+    private var latest: String?
+    var isSaving: Bool { saving }
     private var observer: NSObjectProtocol?
     /// Typing settles first: a host half typed isn't put in force.
     private let settle: TimeInterval
@@ -340,7 +345,9 @@ extension Notification.Name {
     /// The table changed: in force once the typing settles, when it parses
     /// (a half-typed rule waits for the next keystroke).
     func edited(_ text: String) {
-        guard !finished, !saving else { return }
+        guard !finished else { return }
+        latest = text
+        guard !saving else { return }
         pending?.cancel()
         pending = nil
         guard settle > 0 else { apply(text); return }
@@ -374,23 +381,33 @@ extension Notification.Name {
 
     /// Save pressed: the saved document carries the latest rules, so the
     /// edit still settling is dropped and nothing more is sent after it.
-    func beginSave() {
+    func beginSave(rules: String) {
         pending?.cancel()
         pending = nil
         saving = true
+        savedRules = rules
     }
 
     /// The save failed (the editor stays open): edits go live again, and a
     /// close that came meanwhile reverts now.
     func saveFailed() {
         saving = false
-        if revertIfSaveFails { revertIfSaveFails = false; revert() }
+        savedRules = nil
+        if revertIfSaveFails { revertIfSaveFails = false; revert(); return }
+        // Still open: what the table shows is what's in force.
+        if let latest { apply(latest) }
     }
 
-    /// Saved: the edits stay (the save writes the latest ones).
+    /// Saved: the edits stay. One made while the save was on its way goes
+    /// in force after it (the save wrote the table as it was at Save).
     func keep() {
         pending?.cancel()
         saving = false
+        if let latest, let saved = savedRules, latest != saved,
+           (try? EgressPolicy.parse(latest)) != nil {
+            ownCommits.insert(latest)
+            if commit(latest) { applied = latest }
+        }
         finished = true
     }
 
