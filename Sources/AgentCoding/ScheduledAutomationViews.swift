@@ -1714,7 +1714,7 @@ struct AutomationEditorView: View {
     private var runsSection: some View {
         editorCard(NSLocalizedString("Recent runs", comment: "automation editor"),
                    "clock.arrow.circlepath") {
-            let recent = Array(store.runs(for: draft.id).prefix(8))
+            let recent = Array(store.runs(for: draft.id).filter { !$0.isBacklogSeed }.prefix(8))
             VStack(alignment: .leading, spacing: 7) {
                 if recent.isEmpty {
                     hint(NSLocalizedString("No runs yet.", comment: ""))

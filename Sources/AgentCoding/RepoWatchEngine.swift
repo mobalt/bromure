@@ -227,7 +227,7 @@ final class RepoWatchEngine {
     func runs(for w: WatchedRepo) -> [AutomationRunRecord] {
         guard let autoStore = delegate?.scheduledAutomationStore else { return [] }
         let ids = Set(w.automationIDs.values)
-        return autoStore.runs.filter { ids.contains($0.automationID) }
+        return autoStore.runs.filter { ids.contains($0.automationID) && !$0.isBacklogSeed }
     }
 
     // MARK: Reporting (from the MCP)

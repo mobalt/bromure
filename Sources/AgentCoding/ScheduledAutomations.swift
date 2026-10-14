@@ -16,6 +16,15 @@ import os
 /// already owns the bare `Automation*` prefix (AutomationServer, the
 /// `automation.*` defaults keys).
 struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
+    /// Whether `other` polls the same events as this one: same trigger, repo
+    /// or team, assignment and filters. An edit that keeps them keeps the
+    /// poll state (high-water mark, commit tip).
+    func pollsSameSource(as other: ScheduledAutomation) -> Bool {
+        trigger == other.trigger && githubRepo == other.githubRepo
+            && linearTeam == other.linearTeam && assignmentFilter == other.assignmentFilter
+            && filters == other.filters
+    }
+
     /// What starts a run. Schedules fire on the host clock; the GitHub
     /// triggers poll the repo from the host with the workspace's github.com
     /// token (never a webhook — no inbound network surface).
@@ -356,6 +365,15 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var automationID: UUID
     var firedAt: Date
     var outcome: Outcome
+
+    /// Ends the detail of an event that was already open when the trigger
+    /// started watching ("ignore backlog").
+    static let backlogMarker = "(pre-existing)"
+    /// That baseline record: kept as the event's dedup key, never a run —
+    /// the run lists leave it out.
+    var isBacklogSeed: Bool {
+        outcome == .skipped && itemKey != nil && detail.hasSuffix(Self.backlogMarker)
+    }
     /// Human-readable summary ("PR #12: fix leak", a skip reason, …).
     var detail: String
     /// The worktree branch slug a launched run was created under. Persisted
@@ -529,16 +547,24 @@ final class ScheduledAutomationStore {
     /// Insert or replace. Any recorded next fire is dropped — the engine
     /// reschedules from the (possibly changed) recurrence on its next tick.
     func upsert(_ automation: ScheduledAutomation) {
+        let previous = automations.first { $0.id == automation.id }
         if let i = automations.firstIndex(where: { $0.id == automation.id }) {
             automations[i] = automation
         } else {
             automations.append(automation)
         }
         nextFires[automation.id.uuidString] = nil
-        // Re-baseline PR polling too: an edit may have pointed the trigger
-        // at a different repo, and a stale high-water mark from the old one
-        // could replay or swallow events.
-        pollStates[automation.id.uuidString] = nil
+        // Re-baseline event polling when an edit pointed the trigger
+        // elsewhere (another repo, branch, filter): a stale high-water mark
+        // or tip from the old source could replay or swallow events. An
+        // edit that leaves the source alone (a watch's focus, agent,
+        // prompt) keeps it — a re-baseline swallowed what landed since the
+        // last poll and listed every commit back as a skipped backlog item.
+        // Switched back on, it starts afresh: what landed while it was off
+        // isn't reviewed after the fact.
+        if previous.map({ !$0.pollsSameSource(as: automation) || (!$0.enabled && automation.enabled) }) ?? true {
+            pollStates[automation.id.uuidString] = nil
+        }
         save()
     }
 
@@ -1684,10 +1710,13 @@ final class ScheduledAutomationEngine {
         // with everything currently open — recorded as .skipped so it's
         // visible and never fires — then fire nothing this round.
         if firstPoll && a.ignoreBacklog {
-            for item in items {
+            // The commit trigger's baseline is its tip, set below: the
+            // commits already there need no record (they listed as a run of
+            // skipped commits — noise beside the reviews).
+            for item in items where a.trigger != .githubCommit {
                 store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .skipped,
-                    detail: "\(label) \(item.displayKey): \(item.title) (pre-existing)",
+                    detail: "\(label) \(item.displayKey): \(item.title) \(AutomationRunRecord.backlogMarker)",
                     itemKey: GitHubPRPoller.eventKey(item, kind: a.trigger)))
             }
             BACDebug.log("automation", "“\(a.name)”: baseline of \(scope) — seeded \(items.count) backlog item(s), firing none")

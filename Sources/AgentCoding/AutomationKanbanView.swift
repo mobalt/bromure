@@ -22,7 +22,7 @@ enum AutomationBoard {
     static func classify(runs: [AutomationRunRecord],
                          isLive: (AutomationRunRecord) -> Bool) -> Columns {
         var out = Columns()
-        for run in runs {
+        for run in runs where !run.isBacklogSeed {
             switch run.outcome {
             case .launched where run.completedAt == nil && isLive(run):
                 out.inProgress.append(run)
