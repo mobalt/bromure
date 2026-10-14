@@ -989,7 +989,8 @@ final class RemoteHostController {
             if let gh = w["hasGitHubToken"] as? Bool {
                 newCredentials[id] = WorkspaceCredentials(
                     github: gh, linear: w["hasLinearToken"] as? Bool ?? false,
-                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [])
+                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [],
+                    readyTools: Self.readyTools(from: w))
             }
         }
         // Restyle live terminal surfaces when a workspace's appearance changed
@@ -1711,6 +1712,9 @@ final class RemoteHostController {
         var github: Bool
         var linear: Bool
         var askBeforeUseLabels: [String]
+        /// The agents the host can run there — its Models settings and
+        /// sign-ins included. nil: an older host; the profile's own list.
+        var readyTools: [Profile.ToolSpec]? = nil
     }
     private(set) var credentialsByID: [Profile.ID: WorkspaceCredentials] = [:]
     /// The firewall editor's live commits, sent in the order made.
@@ -2420,6 +2424,31 @@ final class RemoteHostController {
             return Profile.ToolSpec(tool: tool,
                                     authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
         }
+    }
+
+    /// The agents the host says a workspace can run — nil from an older
+    /// host, which doesn't send them.
+    nonisolated static func readyTools(from w: [String: Any]) -> [Profile.ToolSpec]? {
+        (w["readyTools"] as? [[String: Any]])?.compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
+    /// The agents a mirrored workspace's pickers offer: what the host says
+    /// it can run. An older host doesn't say, and the mirror can't see its
+    /// Models settings or sign-ins: every agent, as the watch editor offers
+    /// them — the host decides (its own list alone was the bug).
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        Self.offeredTools(p, hostSays: credentials(for: p.id)?.readyTools)
+    }
+
+    nonisolated static func offeredTools(_ p: Profile, hostSays: [Profile.ToolSpec]?) -> [Profile.ToolSpec] {
+        if let hostSays { return hostSays }
+        let own = p.allToolSpecs
+        return own + Profile.Tool.allCases.filter { t in !own.contains { $0.tool == t } }
+            .map { Profile.ToolSpec(tool: $0, authMode: .token) }
     }
 
     var automationSources: AutomationSources {
@@ -4296,6 +4325,7 @@ final class RemoteHostWindow: NSWindow {
             credentials: { [controller] id in
                 controller.credentials(for: id).map { ($0.github, $0.linear) }
             },
+            toolSpecs: { [controller] p in controller.readyToolSpecs(for: p) },
             sources: controller.automationSources,
             listFolders: { [controller] pid, path in await controller.listSessionFolders(profileID: pid, path: path) },
             editing: id,
@@ -4811,6 +4841,7 @@ final class RemoteHostWindow: NSWindow {
                 store: c.taskStore,
                 model: c.listModel,
                 profilesProvider: { c.profiles },
+                toolSpecs: { c.readyToolSpecs(for: $0) },
                 actions: CodingKanbanView.Actions(
                     start: { c.taskCommand($0, "start") },
                     plan: { [weak self] id in

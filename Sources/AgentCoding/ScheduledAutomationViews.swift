@@ -371,6 +371,9 @@ struct AutomationEditorView: View {
     /// client mirrors workspaces without their credentials). nil, or nil
     /// for a workspace: read the profile.
     let credentials: ((UUID) -> (github: Bool, linear: Bool)?)?
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    let toolSpecs: ((Profile) -> [Profile.ToolSpec])?
     /// Where the token-backed lists come from when `profiles` has no token
     /// (a fat client). nil: fetched here with the profile's token.
     let sources: AutomationSources?
@@ -482,6 +485,7 @@ struct AutomationEditorView: View {
     init(store: ScheduledAutomationStore,
          profiles: [Profile],
          credentials: ((UUID) -> (github: Bool, linear: Bool)?)? = nil,
+         toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil,
          sources: AutomationSources? = nil,
          listFolders: ((UUID, String) async -> [String]?)? = nil,
          editing id: UUID?,
@@ -496,6 +500,7 @@ struct AutomationEditorView: View {
         self.store = store
         self.profiles = profiles
         self.credentials = credentials
+        self.toolSpecs = toolSpecs
         self.sources = sources
         self.listFolders = listFolders
         self.onSave = onSave
@@ -548,9 +553,11 @@ struct AutomationEditorView: View {
         profiles.first { $0.id == draft.profileID }
     }
 
-    /// Agents this workspace has configured — the only ones offerable.
+    /// Agents this workspace can run — set up in it, or through the Models
+    /// settings or a shared sign-in, as a new session counts them.
     private var toolChoices: [Profile.ToolSpec] {
-        selectedProfile?.allToolSpecs ?? []
+        guard let p = selectedProfile else { return [] }
+        return toolSpecs?(p) ?? p.allToolSpecs
     }
 
     private var selectedSpec: Profile.ToolSpec? {

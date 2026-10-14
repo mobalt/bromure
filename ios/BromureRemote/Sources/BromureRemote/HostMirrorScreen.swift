@@ -491,6 +491,7 @@ struct CodingBoardScreen: View {
             store: controller.taskStore,
             model: controller.listModel,
             profilesProvider: { controller.profiles },
+            toolSpecs: { controller.readyToolSpecs(for: $0) },
             actions: CodingKanbanView.Actions(
                 start: { controller.taskCommand($0, "start") },
                 plan: { controller.taskCommand($0, "plan") },
@@ -659,6 +660,7 @@ private struct AutomationEditorSheet: View {
                 credentials: { [controller] id in
                     controller.credentials(for: id).map { ($0.github, $0.linear) }
                 },
+                toolSpecs: { [controller] p in controller.readyToolSpecs(for: p) },
                 sources: controller.automationSources,
                 listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) },
                 editing: editing,

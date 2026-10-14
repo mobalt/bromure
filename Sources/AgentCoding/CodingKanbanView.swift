@@ -432,6 +432,9 @@ struct CodingKanbanView: View {
     @Bindable var model: SessionListModel
     /// Fresh profile snapshot for the editor sheet's pickers.
     let profilesProvider: () -> [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     let actions: Actions
     /// The sessions behind the cards: a running card reads its agent's
     /// state exactly as the sidebar row does. nil: the tab roster alone.
@@ -540,6 +543,7 @@ struct CodingKanbanView: View {
             TaskEditorSheet(
                 task: task,
                 profiles: profilesProvider(),
+                toolSpecs: toolSpecs,
                 siblings: task.parentTaskID.map { parent in
                     store.tasks.filter { $0.parentTaskID == parent && $0.id != task.id }
                         .sorted { $0.createdAt < $1.createdAt }
@@ -2766,6 +2770,9 @@ private struct DoneTaskCard: View {
 struct TaskEditorSheet: View {
     @State var task: CodingTask
     let profiles: [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     /// Fellow phases of the same plan (any stage), in plan order — the
     /// pool a phase's dependencies are picked from. Empty for plain tasks.
     let siblings: [CodingTask]
@@ -2794,7 +2801,8 @@ struct TaskEditorSheet: View {
     }
 
     private var toolChoices: [Profile.ToolSpec] {
-        selectedProfile?.allToolSpecs ?? []
+        guard let p = selectedProfile else { return [] }
+        return toolSpecs?(p) ?? p.allToolSpecs
     }
 
     /// A title, or a description to take one from — not every task
