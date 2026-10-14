@@ -73,20 +73,12 @@ final class RepoWatchEngine {
         // not wind the mark back.
         if let current = store.watch(w.id) { w.reviewedThrough = current.reviewedThrough }
         let autoStore = delegate.scheduledAutomationStore
+        let plan = Self.automations(for: w) { autoStore.automation($0) }
         for scan in WatchedRepo.Scan.allCases {
-            let wanted = scan == .fullScan || w.scans.contains(scan)
-            let existingID = w.automationID(for: scan)
-            guard wanted else {
-                if let id = existingID {
-                    autoStore.remove(id)
-                    w.automationIDs[scan.rawValue] = nil
-                }
+            guard let desired = plan[scan] else {
+                w.automationIDs[scan.rawValue] = nil
                 continue
             }
-            let desired = Self.automation(for: scan, of: w,
-                                          id: existingID ?? UUID(),
-                                          createdAt: existingID
-                                            .flatMap { autoStore.automation($0)?.createdAt })
             // Only write when something changed: an upsert re-baselines the
             // event trigger's polling.
             if autoStore.automation(desired.id) != desired {
@@ -101,6 +93,25 @@ final class RepoWatchEngine {
         }
         BACDebug.log("watch", "saved watch on \(w.repo) — scans: \(w.scans.map(\.rawValue))")
         return w
+    }
+
+    /// Each scan kind's automation once `w` is saved. The full scan always
+    /// has one (disabled when its schedule is off) so "Scan now" works; a
+    /// scan switched off keeps its automation, disabled — removing it took
+    /// every past run with it (the record that the code WAS reviewed), and
+    /// switching the scan back on picks it up again. A scan never on has
+    /// none. Pure.
+    nonisolated static func automations(for w: WatchedRepo,
+                                        existing: (UUID) -> ScheduledAutomation?)
+        -> [WatchedRepo.Scan: ScheduledAutomation] {
+        var out: [WatchedRepo.Scan: ScheduledAutomation] = [:]
+        for scan in WatchedRepo.Scan.allCases {
+            let existingID = w.automationID(for: scan).flatMap { existing($0) != nil ? $0 : nil }
+            guard scan == .fullScan || w.scans.contains(scan) || existingID != nil else { continue }
+            out[scan] = automation(for: scan, of: w, id: existingID ?? UUID(),
+                                   createdAt: existingID.flatMap { existing($0)?.createdAt })
+        }
+        return out
     }
 
     /// The automation behind one scan kind of a watch. Pure.
