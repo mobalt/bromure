@@ -12017,7 +12017,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         AppLog.stamp("restore of '\(profile.name)' failed: \(error.localizedDescription)\(drift) — booting fresh\(who)")
                         sessionDisk.clearSavedState()
                         // VZ leaves the VM in an indeterminate state
-                        // after a failed restore; rebuild it.
+                        // after a failed restore: stop it (it may hold the
+                        // disk, and its later stop isn't this boot's), then
+                        // rebuild it.
+                        await sandbox.discardFailedRestore()
                         try sandbox.prepare()
                         try await sandbox.start()
                         // Restore failed → this is now a fresh boot. Drop the
@@ -14420,9 +14423,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// registry so a reattaching window can render it.
     private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM) {
         guard let pid = sandbox.sessionDisk?.profile.id else { return }
-        sandbox.onStopped = { [weak self] _ in
+        sandbox.onStopped = { [weak self, weak sandbox] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // Only the workspace's current sandbox stopping ends it: an
+                // earlier one's late stop (a launch since replaced it) tore
+                // the newer boot down — a resume "found itself off", and the
+                // next start shut down too.
+                guard Self.stopEndsSession(of: sandbox, current: self.runningSessions[pid]?.sandbox) else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] an earlier VM of this workspace stopped — the running one stays\n".utf8))
+                    return
+                }
                 // A reboot — whether requested from the app (pane.rebootRequested)
                 // or initiated inside the guest (`reboot`, which sets the session
                 // flag via onGuestReboot) — rebuilds a fresh VM in place. An
@@ -14711,6 +14723,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { await InferenceService.shared.clearWorkspace(profile.id) }
         InferenceRepairProxy.shared.clearActiveModel(profile.id)
         InferenceRepairProxy.shared.setExternalEngine(profile.id, nil)
+    }
+
+    /// Whether `stopped` stopping ends the workspace's session: it is the
+    /// session's sandbox, or no session has one yet (a boot still on its
+    /// way). Pure.
+    nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {
+        guard let current else { return true }
+        return stopped === current
     }
 
     /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an

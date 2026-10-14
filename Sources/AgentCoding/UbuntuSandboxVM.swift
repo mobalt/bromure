@@ -710,6 +710,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
     }
 
+    /// A restore failed: stop that instance, if it still can be, before the
+    /// fresh boot builds another. Left as VZ leaves it, it may still hold
+    /// the workspace's disk, and the fresh boot fails on it.
+    @MainActor
+    public func discardFailedRestore() async {
+        guard let vm else { return }
+        vm.delegate = nil   // its stop isn't the workspace's
+        await Self.discardPausedInstance(vm)
+    }
+
     // MARK: Configuration fingerprint (saved-state drift)
 
     static func fingerprintURL(for stateURL: URL) -> URL { stateURL.appendingPathExtension("json") }
@@ -1205,11 +1215,24 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
     }
 
+    /// A stop reported by an instance this sandbox already replaced (a
+    /// failed restore's, rebuilt by `prepare()` for the fresh-boot
+    /// fallback): not this sandbox's VM stopping. Handled as one, it tore
+    /// the running workspace down (state, MAC, metadata share, onStopped).
+    @MainActor func isCurrent(_ virtualMachine: VZVirtualMachine) -> Bool {
+        virtualMachine === vm
+    }
+
     public nonisolated func virtualMachine(
         _ virtualMachine: VZVirtualMachine,
         didStopWithError error: Error
     ) {
         Task { @MainActor in
+            guard self.isCurrent(virtualMachine) else {
+                FileHandle.standardError.write(Data(
+                    "[ac] a replaced VM instance stopped (\(error.localizedDescription)) — ignored\n".utf8))
+                return
+            }
             self.state = .error
             self.releaseSerialConsole()
             self.releaseMACToPool()
@@ -1219,6 +1242,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
     public nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Task { @MainActor in
+            guard self.isCurrent(virtualMachine) else {
+                FileHandle.standardError.write(Data("[ac] a replaced VM instance stopped — ignored\n".utf8))
+                return
+            }
             self.state = .stopped
             self.outboxPollTask?.cancel()
             self.sessionDisk?.cleanupMetadataShare()
