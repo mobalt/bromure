@@ -314,7 +314,7 @@ struct AutomationKanbanView: View {
             }
             if archived == nil {
                 Button(NSLocalizedString("Load older runs…", comment: "kanban")) {
-                    archived = AutomationRunArchive.loadArchivedRuns()
+                    archived = AutomationRunArchive.loadArchivedRuns().filter { !$0.isBacklogSeed }
                 }
                 .platformLinkButtonStyle()
                 .font(.system(size: 11))
