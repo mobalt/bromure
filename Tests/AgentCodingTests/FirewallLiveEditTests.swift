@@ -111,22 +111,22 @@ import SandboxEngine
     @Test("once Save is pressed nothing more goes live; a close meanwhile waits for the save's outcome")
     func saveInFlight() {
         // Saved: the edit still settling is dropped (the document carries
-        // it), a later edit waits for the save, and the close doesn't revert.
+        // it), a later edit isn't sent, and the close doesn't revert.
         let host = Host(opening)
         let live = session(host, settle: 10)
         live.edited("default allow")                    // still settling
-        live.beginSave(rules: "default allow")
+        live.beginSave()
         live.edited("default deny")
         live.revert()                                   // the close button, mid-save
         #expect(host.commits.isEmpty)
-        live.keep()                                     // saved: the later edit follows it
-        #expect(host.rules == "default deny")
+        live.keep()                                     // saved: the document is the editor at the click
+        #expect(host.commits.isEmpty)
 
         // Failed: the close that came meanwhile reverts now.
         let h2 = Host(opening)
         let l2 = session(h2)
         l2.edited("default allow")
-        l2.beginSave(rules: "default allow")
+        l2.beginSave()
         l2.revert()
         #expect(h2.rules == "default allow")            // not yet: the save may still land
         l2.saveFailed()
@@ -135,32 +135,25 @@ import SandboxEngine
         // Failed with the window still open: edits go live again.
         let h3 = Host(opening)
         let l3 = session(h3)
-        l3.beginSave(rules: opening)
+        l3.beginSave()
         l3.saveFailed()
         l3.edited("default allow")
         #expect(h3.rules == "default allow")
     }
 
-    @Test("an edit made while the save is on its way isn't lost")
-    func editDuringSave() {
-        // Saved: the later edit goes in force after the save.
+    @Test("a save that fails with the editor open puts the table's rules in force, after the settle")
+    func failedSaveAppliesTable() async throws {
         let host = Host(opening)
-        let live = session(host)
-        live.beginSave(rules: opening)
-        host.rules = opening                             // the save's document lands
-        live.edited("default allow")                     // typed during the save
+        let live = session(host, settle: 0.1)
+        live.beginSave()
+        live.edited("allow tcp e:443\ndefault deny")       // mid-typing during the save
+        live.edited("allow tcp example.com:443\ndefault deny")
         #expect(host.commits.isEmpty)
-        live.keep()
-        #expect(host.rules == "default allow")
-
-        // Failed, window open: the table's rules go in force.
-        let h2 = Host(opening)
-        let l2 = session(h2)
-        l2.beginSave(rules: opening)
-        l2.edited("default allow")
-        l2.saveFailed()
-        #expect(h2.rules == "default allow")
-        #expect(!l2.isSaving)
+        live.saveFailed()
+        #expect(host.commits.isEmpty)                    // not frozen mid-field
+        #expect(!live.isSaving)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(host.commits == ["allow tcp example.com:443\ndefault deny"])
     }
 
     @Test("typing settles before it's put in force: only the last text lands")

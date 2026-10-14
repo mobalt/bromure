@@ -315,9 +315,8 @@ extension Notification.Name {
     /// close meanwhile reverts only if the save fails.
     private var saving = false
     private var revertIfSaveFails = false
-    /// The rules the save writes, and the table's latest text — edits made
-    /// while it was on its way are committed after it.
-    private var savedRules: String?
+    /// The table's latest text: if the save fails with the editor still
+    /// open, what it shows goes in force (through the usual settle).
     private var latest: String?
     var isSaving: Bool { saving }
     private var observer: NSObjectProtocol?
@@ -381,33 +380,27 @@ extension Notification.Name {
 
     /// Save pressed: the saved document carries the latest rules, so the
     /// edit still settling is dropped and nothing more is sent after it.
-    func beginSave(rules: String) {
+    func beginSave() {
         pending?.cancel()
         pending = nil
         saving = true
-        savedRules = rules
     }
 
     /// The save failed (the editor stays open): edits go live again, and a
     /// close that came meanwhile reverts now.
     func saveFailed() {
         saving = false
-        savedRules = nil
         if revertIfSaveFails { revertIfSaveFails = false; revert(); return }
-        // Still open: what the table shows is what's in force.
-        if let latest { apply(latest) }
+        // Still open: what the table shows goes in force, after the same
+        // settle a keystroke gets (a half-typed host isn't frozen in).
+        if let latest { edited(latest) }
     }
 
-    /// Saved: the edits stay. One made while the save was on its way goes
-    /// in force after it (the save wrote the table as it was at Save).
+    /// Saved: the edits stay. A Save writes the editor as it was at the
+    /// click — for every field, the rules too; the window then closes.
     func keep() {
         pending?.cancel()
         saving = false
-        if let latest, let saved = savedRules, latest != saved,
-           (try? EgressPolicy.parse(latest)) != nil {
-            ownCommits.insert(latest)
-            if commit(latest) { applied = latest }
-        }
         finished = true
     }
 

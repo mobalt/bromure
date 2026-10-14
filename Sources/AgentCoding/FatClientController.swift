@@ -4039,12 +4039,12 @@ final class RemoteHostWindow: NSWindow {
         let c = controller
         // The firewall's live commits and this document are one ordered
         // stream: nothing more goes live, the ones sent land first, then the
-        // document (its rules are the latest) — and a close meanwhile only
-        // reverts if the save fails.
+        // document — the editor as it was at the click, every field alike —
+        // and a close meanwhile only reverts if the save fails.
         let live = settingsFirewall[id]?.live
         // One save at a time: a second document could land before the first.
         guard live?.isSaving != true else { return }
-        live?.beginSave(rules: edited.egressRules)
+        live?.beginSave()
         Task { @MainActor [weak self] in
             do {
                 await c.firewallCommitsSent()
