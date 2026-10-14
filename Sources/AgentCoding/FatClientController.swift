@@ -3946,6 +3946,9 @@ final class RemoteHostWindow: NSWindow {
         Task { @MainActor [weak self] in
             guard let self else { return }
             if let pending = self.settingsSaves[id] { _ = await pending.result }
+            // A close's revert (or a failed save's) only queues its POST:
+            // the fetch below reads the host once it has landed.
+            await c.firewallCommitsSent()
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
             let remoteGlobalModels: ModelSettings
