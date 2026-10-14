@@ -2075,6 +2075,14 @@ final class RemoteHostController {
         }
     }
 
+    /// Every live firewall commit sent so far has reached the host — what a
+    /// settings save waits for, so its document lands after them.
+    func firewallCommitsSent() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            firewallQueue.async { done.resume() }
+        }
+    }
+
     /// Secret-preserving whole-document save (the counterpart of
     /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
     /// when the doc asked for a generated key).
@@ -4029,10 +4037,17 @@ final class RemoteHostWindow: NSWindow {
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
         let c = controller
+        // The firewall's live commits and this document are one ordered
+        // stream: nothing more goes live, the ones sent land first, then the
+        // document (its rules are the latest) — and a close meanwhile only
+        // reverts if the save fails.
+        let live = settingsFirewall[id]?.live
+        live?.beginSave()
         Task { @MainActor [weak self] in
             do {
+                await c.firewallCommitsSent()
                 let resp = try await c.saveProfileDoc(id, doc)
-                self?.settingsFirewall[id]?.live.keep()
+                live?.keep()
                 self?.closeSettingsWindow(id)
                 if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
                     let a = NSAlert()
@@ -4052,6 +4067,7 @@ final class RemoteHostWindow: NSWindow {
                     self.promptRestartToApply(id)
                 }
             } catch {
+                live?.saveFailed()
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't save the workspace", comment: ""), error)
             }

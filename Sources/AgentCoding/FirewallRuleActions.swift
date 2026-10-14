@@ -310,6 +310,11 @@ extension Notification.Name {
     /// arrive after a later edit) are its own, not changes made elsewhere.
     private var ownCommits: Set<String> = []
     private var finished = false
+    /// A save is on its way (a fat client's: its document reaches the host
+    /// after the live commits already sent): no more edits go out, and a
+    /// close meanwhile reverts only if the save fails.
+    private var saving = false
+    private var revertIfSaveFails = false
     private var observer: NSObjectProtocol?
     /// Typing settles first: a host half typed isn't put in force.
     private let settle: TimeInterval
@@ -335,7 +340,7 @@ extension Notification.Name {
     /// The table changed: in force once the typing settles, when it parses
     /// (a half-typed rule waits for the next keystroke).
     func edited(_ text: String) {
-        guard !finished else { return }
+        guard !finished, !saving else { return }
         pending?.cancel()
         pending = nil
         guard settle > 0 else { apply(text); return }
@@ -348,7 +353,7 @@ extension Notification.Name {
 
     private func apply(_ text: String) {
         pending = nil
-        guard !finished, text != (applied ?? restore), (try? EgressPolicy.parse(text)) != nil else { return }
+        guard !finished, !saving, text != (applied ?? restore), (try? EgressPolicy.parse(text)) != nil else { return }
         // Marked first: the host may announce the change before returning.
         ownCommits.insert(text)
         if commit(text) { applied = text }
@@ -367,9 +372,25 @@ extension Notification.Name {
         }
     }
 
+    /// Save pressed: the saved document carries the latest rules, so the
+    /// edit still settling is dropped and nothing more is sent after it.
+    func beginSave() {
+        pending?.cancel()
+        pending = nil
+        saving = true
+    }
+
+    /// The save failed (the editor stays open): edits go live again, and a
+    /// close that came meanwhile reverts now.
+    func saveFailed() {
+        saving = false
+        if revertIfSaveFails { revertIfSaveFails = false; revert() }
+    }
+
     /// Saved: the edits stay (the save writes the latest ones).
     func keep() {
         pending?.cancel()
+        saving = false
         finished = true
     }
 
@@ -377,6 +398,8 @@ extension Notification.Name {
     /// elsewhere) back in force — nothing to do when no edit was applied.
     func revert(now: Date = Date()) {
         guard !finished else { return }
+        // Closed while its save is on its way: the save decides.
+        if saving { revertIfSaveFails = true; return }
         pending?.cancel()
         finished = true
         guard let applied else { return }

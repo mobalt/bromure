@@ -108,6 +108,39 @@ import SandboxEngine
         #expect(host.rules == opening)
     }
 
+    @Test("once Save is pressed nothing more goes live; a close meanwhile waits for the save's outcome")
+    func saveInFlight() {
+        // Saved: the edit still settling is dropped (the document carries
+        // it), a later edit isn't sent, and the close doesn't revert.
+        let host = Host(opening)
+        let live = session(host, settle: 10)
+        live.edited("default allow")                    // still settling
+        live.beginSave()
+        live.edited("default deny")
+        live.revert()                                   // the close button, mid-save
+        #expect(host.commits.isEmpty)
+        live.keep()
+        #expect(host.commits.isEmpty)
+
+        // Failed: the close that came meanwhile reverts now.
+        let h2 = Host(opening)
+        let l2 = session(h2)
+        l2.edited("default allow")
+        l2.beginSave()
+        l2.revert()
+        #expect(h2.rules == "default allow")            // not yet: the save may still land
+        l2.saveFailed()
+        #expect(h2.rules == opening)
+
+        // Failed with the window still open: edits go live again.
+        let h3 = Host(opening)
+        let l3 = session(h3)
+        l3.beginSave()
+        l3.saveFailed()
+        l3.edited("default allow")
+        #expect(h3.rules == "default allow")
+    }
+
     @Test("typing settles before it's put in force: only the last text lands")
     func typingSettles() async throws {
         let host = Host(opening)
