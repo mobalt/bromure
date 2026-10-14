@@ -300,9 +300,8 @@ public final class TokenSwapper: @unchecked Sendable {
         // header was present; a stale length truncates the upstream's
         // view of the body and breaks JSON parsing on the OAuth
         // endpoint. We re-derive the length unconditionally when the
-        // body changed; otherwise the original request bytes are
-        // shipped verbatim (header-only swaps preserve length because
-        // fake and real are length-matched).
+        // body changed. A header-only swap (one inside Basic credentials
+        // included) may change the header's length, never the body's.
         if bodyDirty {
             headerStr = Self.replaceContentLength(headerStr, newLength: newBody.count)
         }
