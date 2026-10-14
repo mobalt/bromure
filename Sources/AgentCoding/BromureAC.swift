@@ -1373,6 +1373,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var editorWindow: NSWindow?
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
+    /// The open editor's firewall edits, in force as they're made: kept by a
+    /// save, put back by any other close.
+    private var editorFirewallLive: FirewallLiveEdit?
+    private var editorCloseObserver: NSObjectProtocol?
 
     /// One *attached* window per profile. Each window holds N tabs, all
     /// rendering the same VM. Note this is only the windows currently on
@@ -5123,6 +5127,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onExportProfile = { [weak self] key in self?.automationProfileExport(key) }
         server.onCreateProfile = { [weak self] doc in
             self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onCommitFirewall = { [weak self] id, rules in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id),
+                      self.profiles.contains(where: { $0.id == uuid }),
+                      (try? EgressPolicy.parse(rules)) != nil else { return nil }
+                return self.commitFirewallRules(rules, profileID: uuid)
+            }
         }
         server.onUpdateProfile = { [weak self] key, doc in
             self?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "unavailable"]
@@ -9903,6 +9915,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // their own values.
         let initialDraft: Profile? = editing
             ?? store.newProfileFromTemplate(name: nextDefaultProfileName())
+        // An existing workspace's firewall edits apply as they're made (a
+        // new one has nothing running to apply them to).
+        let live = editing.map { p in
+            FirewallLiveEdit(profileID: p.id, opening: p.egressRules) { [weak self] text in
+                self?.commitFirewallRules(text, profileID: p.id) ?? false
+            }
+        }
+        editorFirewallLive = live
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
             isNew: editing == nil,
@@ -9914,6 +9934,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
             onCancel: { self.closeEditorWindow() },
+            onFirewallEdited: live.map { live in { live.edited($0) } },
             onTitleChange: { [weak win] title in win?.title = title },
             onImportSSHKey: { [weak self] url, passphrase, label in
                 // Import requires a saved profile (we need an id for
@@ -10044,6 +10065,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
         editorWindow = win
+        // Closed any way but a save (Cancel, the close button, another
+        // workspace's editor taking its place): the firewall edits go back.
+        editorCloseObserver.map(NotificationCenter.default.removeObserver)
+        editorCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.endEditorFirewallLive() }
+        }
+    }
+
+    /// The editor closed: its unsaved firewall edits are put back.
+    private func endEditorFirewallLive() {
+        editorFirewallLive?.revert()
+        editorFirewallLive = nil
+        editorCloseObserver.map(NotificationCenter.default.removeObserver)
+        editorCloseObserver = nil
     }
 
     /// Snapshot of where this profile's data lives + how to nuke it.
@@ -10093,6 +10129,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func closeEditorWindow() {
+        endEditorFirewallLive()
         editorWindow?.close()
         editorWindow = nil
         editorEditingProfile = nil
@@ -10305,6 +10342,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       : "Couldn't save the workspace.")
             return
         }
+        editorFirewallLive?.keep()
         closeEditorWindow()
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).

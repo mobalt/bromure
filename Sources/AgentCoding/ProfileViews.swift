@@ -612,6 +612,10 @@ struct ProfileEditorView: View {
 
     let onSave: (Profile, _ generateSSH: Bool) -> Void
     let onCancel: () -> Void
+    /// The firewall table changed: put those rules in force now (the host
+    /// puts the opening ones back unless the editor is saved). nil: they
+    /// apply on Save.
+    let onFirewallEdited: ((String) -> Void)?
     /// Fires as the name is typed so a hosting NSWindow can keep its title bar
     /// in sync. SwiftUI's `navigationTitle` doesn't reach the window behind an
     /// NSHostingView, so the host is told explicitly.
@@ -683,6 +687,7 @@ struct ProfileEditorView: View {
         siblingWorkspaces: [WorkspaceRef] = [],
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
+        onFirewallEdited: ((String) -> Void)? = nil,
         onTitleChange: ((String) -> Void)? = nil,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
@@ -777,6 +782,7 @@ struct ProfileEditorView: View {
         self.siblingWorkspaces = siblingWorkspaces
         self.onSave = onSave
         self.onCancel = onCancel
+        self.onFirewallEdited = onFirewallEdited
         self.onTitleChange = onTitleChange
     }
 
@@ -4386,7 +4392,8 @@ struct ProfileEditorView: View {
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
                 EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
-                                  logAllowed: $draft.logAllowedConnections)
+                                  logAllowed: $draft.logAllowedConnections,
+                                  onEdited: onFirewallEdited)
                 #else
                 Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
                     .font(.caption).foregroundStyle(.secondary)

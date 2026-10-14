@@ -12,6 +12,9 @@ struct EgressRulesEditor: View {
     var profileID: UUID? = nil
     /// The workspace's "Log allowed connections" choice (nil: automatic).
     var logAllowed: Binding<Bool?>? = nil
+    /// The table changed (a rule added, edited, switched, timed, moved):
+    /// the host puts it in force now. nil: the rules apply on Save.
+    var onEdited: ((String) -> Void)? = nil
 
     @State private var rows: [EgressPolicy.EditRow] = []
     @State private var defaultAllow = true
@@ -68,7 +71,9 @@ struct EgressRulesEditor: View {
             Text("Outbound connections").font(.headline)
             Text("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Timeline, and enforcement is host-side so a compromised agent can't bypass it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.")
+            Text(onEdited != nil
+                 ? LocalizedStringKey("Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.")
+                 : LocalizedStringKey("Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time."))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             Picker("Unmatched traffic", selection: $defaultAllow) {
@@ -400,6 +405,7 @@ struct EgressRulesEditor: View {
 
     private func syncToText() {
         pfText = EgressPolicy.pfText(rows: rows, defaultAllow: defaultAllow)
+        onEdited?(pfText)
     }
 
     /// Hint text for the Methods field — only meaningful for `web` rules, and
