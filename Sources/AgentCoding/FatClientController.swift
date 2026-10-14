@@ -56,6 +56,19 @@ final class RemoteHostController {
     /// without the link having gone quiet long enough to call it down): a
     /// calm indicator, content stays live.
     private(set) var linkSlow = false
+    /// What the user sent that the host hasn't answered yet (an action, a
+    /// typed prompt, a new session), since when — the window's "Sending…"
+    /// cue. On a slow link (a train, a tunnel) they wait in the queue
+    /// behind a poll, and nothing showed they were still on their way.
+    private(set) var outgoing: [UUID: Date] = [:]
+
+    func beginOutgoing() -> UUID {
+        let id = UUID()
+        outgoing[id] = Date()
+        return id
+    }
+
+    func endOutgoing(_ id: UUID) { outgoing[id] = nil }
     /// The measured link, one line ("request RTT 820 ms (min 610, ±90) ·
     /// 1.4 MB/s · P2P relay"), for the slow-link indicator's tooltip and the
     /// debug state. Refreshed on every poll outcome.
@@ -128,11 +141,56 @@ final class RemoteHostController {
         new - prev > 1
     }
 
-    /// The boot date shown for a host that stamps its boot: a moved stamp
-    /// takes the new sample; a stable one keeps the earlier of the two.
-    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool) -> Date {
-        stampMoved ? derived : min(prev, derived)
+    /// The stamp moved BACKWARD and the uptime itself started over (well
+    /// below the last one reported): a new boot all the same — the host's
+    /// clock was set back between the two starts, so the new boot's stamp is
+    /// the earlier one. A backward stamp alone isn't one (an agent host
+    /// restarted after a clock change re-reads its Mac's boot time, moved by
+    /// the change), and the uptime is compared as reported, not as a boot
+    /// date: an agent host's uptime pauses through sleep, which moves its
+    /// derived date later without any reboot.
+    nonisolated static func bootStampWentBack(prev: Double, new: Double,
+                                              lastUptime: Int, uptime: Int) -> Bool {
+        prev - new > 1 && lastUptime - uptime > 20
     }
+
+    /// The boot date shown for a host that stamps its boot: a moved stamp
+    /// takes the new sample; a stable one keeps the earlier of the two —
+    /// unless the date kept is `confirmed` (a second sample agreed with it)
+    /// and this one is earlier by more than a late reply explains: a host
+    /// that counts uptime on its wall clock (before it used a monotonic one)
+    /// had its clock stepped forward, and `min` kept that date for the rest
+    /// of the boot. An unconfirmed date may be a first reply that came in
+    /// late (a stalled first connection): the on-time one corrects it.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool,
+                                     confirmed: Bool = false) -> Date {
+        if stampMoved { return derived }
+        if confirmed, prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
+        return min(prev, derived)
+    }
+
+    /// A sample within this of the date kept confirms it; one earlier than
+    /// a confirmed date by more is a clock step, not a sooner reply.
+    nonisolated static let earlierSampleCap: TimeInterval = 120
+
+    /// This Mac's wall clock against a clock that setting it can't move:
+    /// a change between two snapshots is a clock step here, and every boot
+    /// date kept (on the wall clock) moves by it — or `now − uptime`
+    /// samples would sit off by the step (read as a reboot, or refused).
+    nonisolated static func wallClockOffset(now: Date = Date()) -> TimeInterval {
+        let d = monotonicAnchor.duration(to: .now)
+        let mono = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        return now.timeIntervalSince1970 - mono
+    }
+    private nonisolated static let monotonicAnchor = ContinuousClock.now
+
+    /// The step to apply to kept boot dates: the offset's change since the
+    /// last snapshot, or 0 within jitter.
+    nonisolated static func clockStep(last: TimeInterval?, now: TimeInterval) -> TimeInterval {
+        guard let last, abs(now - last) > 2 else { return 0 }
+        return now - last
+    }
+    private var lastWallClockOffset: TimeInterval?
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -169,6 +227,10 @@ final class RemoteHostController {
     private(set) var bootTimes: [Profile.ID: Date] = [:]
     /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
     private var bootStamps: [Profile.ID: Double] = [:]
+    /// Each VM's last reported uptime, for `bootStampWentBack`.
+    private var lastUptimes: [Profile.ID: Int] = [:]
+    /// Boot dates a second sample agreed with (`bootTime`'s `confirmed`).
+    private var bootConfirmed = Set<Profile.ID>()
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -747,6 +809,12 @@ final class RemoteHostController {
                             } else {
                                 self.peerFailStreak = 0
                                 FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
+                                // Everything closing the window drops (what
+                                // reconnecting by hand did and this didn't):
+                                // the pooled SSH connections over the old path
+                                // too, half-open ones included — the next dial
+                                // starts clean.
+                                SSHDialer.shared.closeHost(host.id)
                                 P2PBroker.shared.closePeer(pid)
                             }
                         }
@@ -760,13 +828,17 @@ final class RemoteHostController {
     private func send(_ method: String, _ path: String, body: [String: Any]? = nil,
                       then refresh: Bool = true) {
         let host = self.host
+        // On its way from now — queued behind a poll included — until the
+        // host answers (or the request fails).
+        let token = beginOutgoing()
         pollQueue.async { [weak self] in
             FatClientLog.log("send START \(method) \(path)")   // paired with DONE — a START with no DONE = a hung request blocking the serial pollQueue
             let client = RemoteTransport.client(for: host)
             let resp = try? client.request(method, path, body: body)
             FatClientLog.log("send DONE \(method) \(path) status=\(resp?.status ?? -1)")
-            if refresh {
-                DispatchQueue.main.async { self?.pollOnce() }
+            DispatchQueue.main.async {
+                self?.endOutgoing(token)
+                if refresh { self?.pollOnce() }
             }
         }
     }
@@ -905,6 +977,7 @@ final class RemoteHostController {
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
             p.memoryGB = spec.memoryGB
+            p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
             // surfaces render the workspace's colors/fonts (absent = fall back
             // to this device's own terminal defaults, like resolveStyle does).
@@ -916,7 +989,8 @@ final class RemoteHostController {
             if let gh = w["hasGitHubToken"] as? Bool {
                 newCredentials[id] = WorkspaceCredentials(
                     github: gh, linear: w["hasLinearToken"] as? Bool ?? false,
-                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [])
+                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [],
+                    readyTools: Self.readyTools(from: w))
             }
         }
         // Restyle live terminal surfaces when a workspace's appearance changed
@@ -940,6 +1014,12 @@ final class RemoteHostController {
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
         var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
+        let offset = Self.wallClockOffset()
+        let step = Self.clockStep(last: lastWallClockOffset, now: offset)
+        lastWallClockOffset = offset
+        if step != 0 {
+            for (k, d) in bootTimes { bootTimes[k] = d.addingTimeInterval(step) }
+        }
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard
@@ -964,10 +1044,19 @@ final class RemoteHostController {
                 if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
                     rebootedIDs.insert(id)
                     stampMoved = true
+                } else if let prev = bootStamps[id], let last = lastUptimes[id],
+                          let up = vm["uptimeSeconds"] as? Int,
+                          Self.bootStampWentBack(prev: prev, new: stamp, lastUptime: last, uptime: up) {
+                    // Before, `min` kept the previous boot's date for the
+                    // whole new boot (dashboard uptime, the iPad transcript
+                    // floor letting the last boot's questions through).
+                    rebootedIDs.insert(id)
+                    stampMoved = true
                 }
                 bootStamps[id] = stamp
             }
             if let up = vm["uptimeSeconds"] as? Int {
+                lastUptimes[id] = up
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
                 if stamp != nil, let prev = bootTimes[id] {
                     // The host stamps its boot: the date here (dashboard
@@ -976,7 +1065,13 @@ final class RemoteHostController {
                     // never later: a late reply (its uptime short by the
                     // delay) or a Mac that slept (awake-only uptime) moved
                     // it forward, cutting the uptime and the transcript.
-                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved)
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved,
+                                                  confirmed: bootConfirmed.contains(id))
+                    if stampMoved {
+                        bootConfirmed.remove(id)
+                    } else if abs(prev.timeIntervalSince(derived)) <= Self.earlierSampleCap {
+                        bootConfirmed.insert(id)
+                    }
                 } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
                         if stamp == nil { rebootedIDs.insert(id) }
@@ -987,6 +1082,7 @@ final class RemoteHostController {
                     // else stable — keep prev (dashboard uptime doesn't wobble)
                 } else {
                     bootTimes[id] = derived   // first sighting, never a reboot
+                    bootConfirmed.remove(id)
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
@@ -1237,7 +1333,8 @@ final class RemoteHostController {
         let iso = ISO8601DateFormatter()
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
-        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires,
+                               timeZone: (autos["timeZone"] as? String).flatMap(TimeZone.init(identifier:)))
         #if os(macOS)
         // Absent on a server without repository watches: leave the mirror empty.
         if autos["watches"] != nil || autos["findings"] != nil {
@@ -1407,6 +1504,13 @@ final class RemoteHostController {
         }
     }
 
+    /// How long a Start waits for the server's answer. An attached machine's
+    /// start runs up to 60 s on the server, and a repeated Send waits there
+    /// for the first one (`SessionStartCoalescer.pendingWait`, 75 s) before
+    /// running its own: with the 12 s default the client gave up while the
+    /// session was still being made, and the user's next click raced it.
+    nonisolated static let sessionStartTimeout = 150
+
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
@@ -1439,9 +1543,12 @@ final class RemoteHostController {
         // connection, not only after the next (up to 5 s) heartbeat poll.
         ConsolePresence.shared.noteMirror()
         let idle = String(ConsolePresence.shared.idleMillis())
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request(
                 "POST", "/agent-sessions/start", body: body,
+                recvTimeoutSeconds: Self.sessionStartTimeout,
                 extraHeaders: [("X-Bromure-Console-Idle-Ms", idle)])
         }.value
         pollOnce()
@@ -1605,8 +1712,13 @@ final class RemoteHostController {
         var github: Bool
         var linear: Bool
         var askBeforeUseLabels: [String]
+        /// The agents the host can run there — its Models settings and
+        /// sign-ins included. nil: an older host; the profile's own list.
+        var readyTools: [Profile.ToolSpec]? = nil
     }
     private(set) var credentialsByID: [Profile.ID: WorkspaceCredentials] = [:]
+    /// The firewall editor's live commits, sent in the order made.
+    private let firewallQueue = DispatchQueue(label: "io.bromure.fatclient.firewall")
     func credentials(for id: Profile.ID) -> WorkspaceCredentials? { credentialsByID[id] }
     /// Mirrored profiles in source-list order (the automation editor's
     /// workspace picker + default owner rely on a stable order).
@@ -1956,6 +2068,25 @@ final class RemoteHostController {
         return c
     }
 
+    /// Put a workspace's firewall rules in force on the host now (saved and
+    /// applied live) — what its editor does as the rules are edited. An
+    /// older host has no route: the rules then apply on Save, as before.
+    func commitFirewall(_ id: Profile.ID, rules: String) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))/firewall"
+        firewallQueue.async {
+            _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["rules": rules])
+        }
+    }
+
+    /// Every live firewall commit sent so far has reached the host — what a
+    /// settings save waits for, so its document lands after them.
+    func firewallCommitsSent() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            firewallQueue.async { done.resume() }
+        }
+    }
+
     /// Secret-preserving whole-document save (the counterpart of
     /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
     /// when the doc asked for a generated key).
@@ -2188,6 +2319,8 @@ final class RemoteHostController {
               let targetJSON = try? JSONSerialization.jsonObject(with: data) else { return .unsupported }
         let host = self.host
         let path = "/vms/\(seg(id))/type"
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             // Staging, typing and confirming can take ~20 s on the server.
             try RemoteTransport.bulkClient(for: host)
@@ -2275,6 +2408,65 @@ final class RemoteHostController {
     }
     func deleteTask(_ id: UUID) {
         send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
+    }
+
+    /// The automation / watch editors' token-backed lists, fetched by the
+    /// host with the workspace's own credentials (they aren't mirrored).
+    /// A refusal throws: a GitHub 401 as GitHubPoller/401 (the editors'
+    /// "token rejected"), anything else (an older host without the route
+    /// too) as an error the editor shows above its free-text field.
+    /// A workspace's other agents from the host's list (tool + auth mode;
+    /// no keys) — an older host sends none: the primary only, as before.
+    nonisolated static func additionalTools(from w: [String: Any], primary: Profile.Tool) -> [Profile.ToolSpec] {
+        ((w["additionalTools"] as? [[String: Any]]) ?? []).compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)), tool != primary
+            else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
+    /// The agents the host says a workspace can run — nil from an older
+    /// host, which doesn't send them.
+    nonisolated static func readyTools(from w: [String: Any]) -> [Profile.ToolSpec]? {
+        (w["readyTools"] as? [[String: Any]])?.compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
+    /// The agents a mirrored workspace's pickers offer: what the host says
+    /// it can run. An older host doesn't say, and the mirror can't see its
+    /// Models settings or sign-ins: every agent, as the watch editor offers
+    /// them — the host decides (its own list alone was the bug).
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        Self.offeredTools(p, hostSays: credentials(for: p.id)?.readyTools)
+    }
+
+    nonisolated static func offeredTools(_ p: Profile, hostSays: [Profile.ToolSpec]?) -> [Profile.ToolSpec] {
+        if let hostSays { return hostSays }
+        let own = p.allToolSpecs
+        return own + Profile.Tool.allCases.filter { t in !own.contains { $0.tool == t } }
+            .map { Profile.ToolSpec(tool: $0, authMode: .token) }
+    }
+
+    var automationSources: AutomationSources {
+        let host = self.host
+        return AutomationSources { body in
+            let resp = try await Task.detached(priority: .userInitiated) {
+                // The host is silent until GitHub / Linear answer (it waits
+                // up to 60 s): the default 12 s of quiet gave up first.
+                try RemoteTransport.client(for: host).request("POST", "/automation-sources", body: body,
+                                                              recvTimeoutSeconds: 75)
+            }.value
+            if resp.status == 200, resp.json["error"] == nil { return resp.json }
+            let code = resp.json["code"] as? Int ?? 0
+            let msg = resp.json["error"] as? String
+                ?? String(format: NSLocalizedString("The host couldn't list them (HTTP %d).", comment: "automation editor"), resp.status)
+            throw NSError(domain: code != 0 ? "GitHubPoller" : "AutomationSources", code: code,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
     }
     func upsertTask(_ task: CodingTask) {
         guard let doc = ACAppDelegate.codableToDict(task) else { return }
@@ -2767,18 +2959,34 @@ struct RemoteToolbarBar: View {
 @MainActor
 final class RemoteToolbarDelegate: NSObject, NSToolbarDelegate {
     static let itemID = NSToolbarItem.Identifier("io.bromure.ac.remote.controls")
+    /// The "Sending…" cue, left of the controls: in the toolbar only while
+    /// something is on its way, so the controls keep the trailing edge and
+    /// no empty bubble shows beside them.
+    static let sendingID = NSToolbarItem.Identifier("io.bromure.ac.remote.sending")
     private let rootView: AnyView
-    init(rootView: AnyView) { self.rootView = rootView }
+    private let sendingView: AnyView?
+    init(rootView: AnyView, sendingView: AnyView? = nil) {
+        self.rootView = rootView
+        self.sendingView = sendingView
+    }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.flexibleSpace, Self.itemID]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.itemID]
+        [.flexibleSpace, Self.sendingID, Self.itemID]
     }
     func toolbar(_ t: NSToolbar,
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == Self.sendingID, let sendingView {
+            let item = NSToolbarItem(itemIdentifier: id)
+            let host = NSHostingView(rootView: sendingView)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            host.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            item.view = host
+            return item
+        }
         guard id == Self.itemID else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         let host = NSHostingView(rootView: rootView)
@@ -3015,12 +3223,18 @@ final class RemoteHostWindow: NSWindow {
     private var expandedSidebarWidth: CGFloat = 240
     private static let sidebarRailWidth: CGFloat = 44
     /// Per-workspace settings editors (the pill's gearshape) — same
-    /// `ProfileEditorView` as local, saving over the tunnel.
-    private var settingsWindows: [Profile.ID: NSWindow] = [:]
+    /// `ProfileEditorView` as local, saving over the tunnel — and each one's
+    /// firewall edits, in force on the host as made: kept by a save, put
+    /// back by any other close, which also forgets the window.
+    private var settingsSessions: [Profile.ID: SettingsWindowSession] = [:]
     /// The full profile the settings editor opened with, so a save can diff it
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// A settings save still resolving, by workspace (its window may be
+    /// closed already): a reopen waits for it, so the new editor reads what
+    /// the save left in force and the old save can't touch the new window.
+    private var settingsSaves: [Profile.ID: Task<String?, Error>] = [:]
     /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
     /// local window opens, backed by a `RemoteTraceStore` that fetches the
     /// remote's records + decrypted bodies over the tunnel. One per host window.
@@ -3077,6 +3291,37 @@ final class RemoteHostWindow: NSWindow {
     /// A slow link is said in the title bar ("Slow connection · request RTT
     /// …") — an overlay pill sat on the session header. Re-armed on every
     /// change of the controller's link state.
+    /// "Sending…" left of the toolbar's controls while something the user
+    /// sent is still on its way past a beat. A trailing title-bar accessory
+    /// held its width even when empty and pushed the controls off the edge.
+    private func observeSending() {
+        withObservationTracking {
+            updateSendingItem()
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeSending() }
+        }
+    }
+
+    private func updateSendingItem() {
+        guard let tb = toolbar else { return }
+        let oldest = controller.outgoing.values.min()
+        let show = OutgoingIndicator.shows(oldest: oldest)
+        let at = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.sendingID }
+        if show, at == nil {
+            let controls = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.itemID }
+            tb.insertItem(withItemIdentifier: RemoteToolbarDelegate.sendingID, at: controls ?? tb.items.count)
+        } else if !show, let at {
+            tb.removeItem(at: at)
+        }
+        // Not yet a beat old: look again when it is (the send may end first).
+        if let oldest, !show {
+            let wait = OutgoingIndicator.delay - Date().timeIntervalSince(oldest)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(wait, 0.01)) { [weak self] in
+                self?.updateSendingItem()
+            }
+        }
+    }
+
     private func observeLinkSubtitle() {
         withObservationTracking {
             let slow = controller.linkSlow && controller.linkPresentation != .reconnecting
@@ -3101,6 +3346,7 @@ final class RemoteHostWindow: NSWindow {
         observeLinkSubtitle()
         buildLayout()
         buildToolbar()
+        observeSending()
         showGrid()
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
@@ -3186,8 +3432,8 @@ final class RemoteHostWindow: NSWindow {
         clearDockerDashboard()
         clearKubeDashboard()
         clearRegistryDashboard()
-        for (_, w) in settingsWindows { w.close() }
-        settingsWindows.removeAll()
+        for s in Array(settingsSessions.values) { s.close() }
+        settingsSessions.removeAll()
         traceInspectorWindow?.close()   // willClose → reapTraceInspector stops polling
         traceInspectorWindow = nil
         remoteTraceStore?.stop()
@@ -3685,7 +3931,9 @@ final class RemoteHostWindow: NSWindow {
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
-        let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
+        let delegate = RemoteToolbarDelegate(
+            rootView: AnyView(bar),
+            sendingView: AnyView(OutgoingIndicator(controller: controller)))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
         tb.delegate = delegate
@@ -3735,10 +3983,14 @@ final class RemoteHostWindow: NSWindow {
     /// (SSH-key import, subscription registration) stay hidden — their
     /// callbacks are nil, exactly like a freshly-created local profile.
     private func openWorkspaceSettings(_ id: Profile.ID) {
-        if let win = settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+        if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if let pending = self.settingsSaves[id] { _ = await pending.result }
+            // A close's revert (or a failed save's) only queues its POST:
+            // the fetch below reads the host once it has landed.
+            await c.firewallCommitsSent()
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
             let remoteGlobalModels: ModelSettings
@@ -3762,8 +4014,11 @@ final class RemoteHostWindow: NSWindow {
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
             }
-            if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+            if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
+            let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
+                                        commit: { [c] text in c.commitFirewall(id, rules: text); return true },
+                                        observeChanges: false)
             let win = NSWindow(
                 contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3794,6 +4049,7 @@ final class RemoteHostWindow: NSWindow {
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
                 onCancel: { [weak self] in self?.closeSettingsWindow(id) },
+                onFirewallEdited: { live.edited($0) },
                 onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
                 claudeAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.registeredAt },
                 claudeReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.reauthRequiredAt },
@@ -3815,7 +4071,13 @@ final class RemoteHostWindow: NSWindow {
                 modelsPane: .workspace(global: remoteGlobalModels))
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
-            self.settingsWindows[id] = win
+            // Closed any way but a save: the firewall edits go back, and the
+            // window is forgotten — reopening reads the rules in force.
+            self.settingsSessions[id] = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+                guard let self, self.settingsSessions[id] === gone else { return }
+                self.settingsSessions[id] = nil
+                self.settingsOriginals[id] = nil
+            }
         }
     }
 
@@ -3847,11 +4109,34 @@ final class RemoteHostWindow: NSWindow {
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
         let c = controller
-        Task { @MainActor [weak self] in
+        // The firewall's live commits and this document are one ordered
+        // stream: nothing more goes live, the ones sent land first, then the
+        // document — the editor as it was at the click, every field alike —
+        // and a close meanwhile only reverts if the save fails.
+        // This window's session, not whichever is open when the save lands.
+        let session = settingsSessions[id]
+        let live = session?.live
+        // One save at a time: a second document could land before the first.
+        guard live?.isSaving != true, settingsSaves[id] == nil else { return }
+        live?.beginSave()
+        let save = Task { @MainActor () throws -> String? in
             do {
+                await c.firewallCommitsSent()
                 let resp = try await c.saveProfileDoc(id, doc)
-                self?.closeSettingsWindow(id)
-                if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
+                live?.keep()
+                session?.close()
+                return resp["sshPublicKey"] as? String
+            } catch {
+                live?.saveFailed()
+                throw error
+            }
+        }
+        settingsSaves[id] = save
+        Task { @MainActor [weak self] in
+            defer { if self?.settingsSaves[id] == save { self?.settingsSaves[id] = nil } }
+            do {
+                let pub = try await save.value
+                if generateSSH, let pub, !pub.isEmpty {
                     let a = NSAlert()
                     a.messageText = NSLocalizedString("New SSH key generated", comment: "")
                     a.informativeText = String(format: NSLocalizedString(
@@ -3892,8 +4177,8 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func closeSettingsWindow(_ id: Profile.ID) {
-        settingsWindows[id]?.close()
-        settingsWindows[id] = nil
+        settingsSessions[id]?.close()
+        settingsSessions[id] = nil
         settingsOriginals[id] = nil
     }
 
@@ -4094,6 +4379,9 @@ final class RemoteHostWindow: NSWindow {
             credentials: { [controller] id in
                 controller.credentials(for: id).map { ($0.github, $0.linear) }
             },
+            toolSpecs: { [controller] p in controller.readyToolSpecs(for: p) },
+            sources: controller.automationSources,
+            listFolders: { [controller] pid, path in await controller.listSessionFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -4268,9 +4556,8 @@ final class RemoteHostWindow: NSWindow {
                         c.findingCommand(id, "duplicate", body: ["of": of.uuidString])
                     },
                     deleteFinding: { c.findingCommand($0, "") },
-                    // No remote repo listing: the editor falls back to typing
-                    // owner/name.
-                    fetchRepos: { _ in [] }))
+                    // Listed by the host, with the workspace's token.
+                    fetchRepos: { [controller = c] pid in try await controller.automationSources.repos(pid) }))
             let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -4369,13 +4656,15 @@ final class RemoteHostWindow: NSWindow {
                 // mirror shows what it found.
                 guard let self, await self.controller.taskCommandReply(task.id, "locate", body: [:]) != nil
                 else { return false }
-                for i in 1...40 {
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    guard let t = self.controller.taskStore.task(task.id) else { return false }
-                    if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
-                    if i % 6 == 0 { self.controller.foregroundKick() }
-                }
-                return false
+                // The mirror shows the host looking (`isLocating`) at once.
+                self.controller.foregroundKick()
+                // Until the host's look ends (it tries one session after
+                // another): as long as the mirror shows it looking, within
+                // `locateWindow`; 20 s for a host that never shows it (older).
+                // Review closed (the task cancelled) ends it at once.
+                let controller = self.controller
+                return await CodingTask.awaitLocate(task: { controller.taskStore.task(task.id) },
+                                                    kick: { controller.foregroundKick() })
             }))
 
     /// Native planning-conversation windows for the mirrored board — the
@@ -4606,6 +4895,7 @@ final class RemoteHostWindow: NSWindow {
                 store: c.taskStore,
                 model: c.listModel,
                 profilesProvider: { c.profiles },
+                toolSpecs: { c.readyToolSpecs(for: $0) },
                 actions: CodingKanbanView.Actions(
                     start: { c.taskCommand($0, "start") },
                     plan: { [weak self] id in
@@ -4628,6 +4918,7 @@ final class RemoteHostWindow: NSWindow {
                     markDone: { c.taskCommand($0, "mark-done") },
                     stop: { c.taskCommand($0, "stop") },
                     startOver: { c.taskCommand($0, "start-over") },
+                    reorder: { c.taskCommand($0, "rank", body: ["rank": $1]) },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in
@@ -6044,7 +6335,7 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true]
         case "shot-settings":
             // E2E hook: render that editor window to a PNG (`path`).
-            guard let id = resolveID(), let win = settingsWindows[id] else {
+            guard let id = resolveID(), let win = settingsSessions[id]?.window else {
                 return ["error": "settings window not open"]
             }
             let path = (p["path"] as? String) ?? "/tmp/bromure-remote-settings.png"
@@ -6827,7 +7118,7 @@ final class RemoteHostWindow: NSWindow {
             controller.listModel.selectedID = nil
         }
         for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
-        for id in Array(settingsWindows.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+        for id in Array(settingsSessions.keys) where controller.isGone(id) { closeSettingsWindow(id) }
     }
 
     /// The ids among `ids` whose workspace is gone from the mirror.
@@ -7875,3 +8166,51 @@ extension RemoteHostController: RemoteDelegationLink {
         return (data, size, (r["eof"] as? Bool) ?? data.isEmpty)
     }
 }
+
+#if os(macOS)
+/// The title bar's "Sending…" cue: an upload arrow that pulses while what
+/// the user sent (an action, a prompt, a new session) is still on its way —
+/// shown only past a beat, so a quick link never flickers it.
+struct OutgoingIndicator: View {
+    let controller: RemoteHostController
+    @State private var shown = false
+
+    static let delay: TimeInterval = 0.4
+
+    /// Whether the cue shows: something still on its way for a beat.
+    static func shows(oldest: Date?, now: Date = Date()) -> Bool {
+        guard let oldest else { return false }
+        return now.timeIntervalSince(oldest) >= delay
+    }
+
+    var body: some View {
+        let count = controller.outgoing.count
+        HStack(spacing: 4) {
+            if shown, count > 0 {
+                Image(systemName: "arrow.up.circle")
+                    .symbolEffect(.pulse, options: .repeating)
+                    .foregroundStyle(.secondary)
+                Text(count > 1
+                     ? String(format: NSLocalizedString("Sending %d…", comment: "fat client title bar: requests on their way"), count)
+                     : NSLocalizedString("Sending…", comment: "fat client title bar: a request on its way"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.2), value: shown && count > 0)
+        .help(NSLocalizedString("Still sending to the host — the link is slow", comment: "fat client title bar"))
+        .task(id: controller.outgoing.values.min()) {
+            // Only once the oldest still-pending send has waited a beat.
+            guard let oldest = controller.outgoing.values.min() else { shown = false; return }
+            let wait = Self.delay - Date().timeIntervalSince(oldest)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            if !Task.isCancelled { shown = Self.shows(oldest: controller.outgoing.values.min()) }
+        }
+    }
+}
+#endif
+

@@ -4599,6 +4599,19 @@ func mitmSanitizedAcceptEncoding(_ value: String) -> String? {
     return kept.isEmpty ? nil : kept.joined(separator: ", ")
 }
 
+/// Whether the upstream is asked for the body as is (`Accept-Encoding:
+/// identity`): a file that's already compressed — a `.tgz`, a `.gz`. Served
+/// with `Content-Encoding: gzip` (GitHub Pages does, e.g. Helm charts),
+/// URLSession sometimes leaves such a body encoded — for these paths with a
+/// binary Content-Type (octet-stream, x-gzip, x-tar), unlike application/gzip
+/// — while the head we emit has no Content-Encoding: the client saved the
+/// gzip wrapper as the file. Asked for identity, there is nothing to decode;
+/// compressing a compressed file saved nothing anyway.
+func mitmFetchesIdentity(_ url: URL) -> Bool {
+    let path = url.path.lowercased()
+    return path.hasSuffix(".gz") || path.hasSuffix(".tgz")
+}
+
 /// Collect the full upstream response (no TLS write side-effect).
 /// Shared between the buffered relay and any other call site that
 /// needs the full body before responding to the client.
@@ -4639,6 +4652,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
             req.setValue(value, forHTTPHeaderField: name)
         }
     }
+    if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
     let stripped: Set<String> = [
         "content-encoding", "content-length",
         "transfer-encoding", "connection",
@@ -5009,6 +5023,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             req.setValue(value, forHTTPHeaderField: name)
         }
     }
+    if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
     if local && !keepGuestKey {
         // Swap in this VM's own engine key, not the admin key: the engine
         // accepts either, but only the per-VM key lets the repair proxy

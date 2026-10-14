@@ -731,6 +731,27 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
     }
 
+    /// A restore failed: stop that instance, if it still can be, before the
+    /// fresh boot builds another. Left as VZ leaves it, it may still hold
+    /// the workspace's disk, and the fresh boot fails on it.
+    @MainActor
+    public func discardFailedRestore() async {
+        guard let failed = vm else { return }
+        // Detached before anything awaits: a stop it already reported is
+        // queued for the main actor and runs at the first await — it must
+        // find an instance that isn't this sandbox's (a cluster node's
+        // onStopped would drop the node from its cluster mid-reboot).
+        failed.delegate = nil
+        vm = nil
+        // What its stop callback released — now ignored, so released here,
+        // before prepare() builds the next ones: the switch port (an fd and
+        // a read loop otherwise held until the app quits), the bridged
+        // filter, the MAC claim and the serial console.
+        releaseSerialConsole()
+        releaseMACToPool()
+        await Self.discardPausedInstance(failed)
+    }
+
     // MARK: Configuration fingerprint (saved-state drift)
 
     static func fingerprintURL(for stateURL: URL) -> URL { stateURL.appendingPathExtension("json") }
@@ -1250,11 +1271,24 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
     }
 
+    /// A stop reported by an instance this sandbox already replaced (a
+    /// failed restore's, rebuilt by `prepare()` for the fresh-boot
+    /// fallback): not this sandbox's VM stopping. Handled as one, it tore
+    /// the running workspace down (state, MAC, metadata share, onStopped).
+    @MainActor func isCurrent(_ virtualMachine: VZVirtualMachine) -> Bool {
+        virtualMachine === vm
+    }
+
     public nonisolated func virtualMachine(
         _ virtualMachine: VZVirtualMachine,
         didStopWithError error: Error
     ) {
         Task { @MainActor in
+            guard self.isCurrent(virtualMachine) else {
+                FileHandle.standardError.write(Data(
+                    "[ac] a replaced VM instance stopped (\(error.localizedDescription)) — ignored\n".utf8))
+                return
+            }
             self.state = .error
             self.releaseSerialConsole()
             self.releaseMACToPool()
@@ -1264,6 +1298,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
     public nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Task { @MainActor in
+            guard self.isCurrent(virtualMachine) else {
+                FileHandle.standardError.write(Data("[ac] a replaced VM instance stopped — ignored\n".utf8))
+                return
+            }
             self.state = .stopped
             self.outboxPollTask?.cancel()
             self.sessionDisk?.cleanupMetadataShare()

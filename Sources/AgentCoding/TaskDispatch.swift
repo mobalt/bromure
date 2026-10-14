@@ -111,7 +111,7 @@ final class TaskDispatcher {
                           && $0.lastError == nil && !$0.isStarting
                           && $0.unmetDependencies(in: tasks).isEmpty
                           && !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }
-                .sorted { $0.createdAt < $1.createdAt }
+                .sorted(by: CodingTask.backlogOrder)   // the Backlog's order: top first
             for next in ready.prefix(limit - running) {
                 if a.kind == .worktree {
                     BACDebug.log("tasks", "“\(next.title)” picked up by a new agent")
@@ -398,7 +398,10 @@ final class TaskDispatcher {
         case .note:
             // The host speaking for the far end: a failure, the peer ending.
             store.mutate(task.id) { $0.assigneeNote = m.text }
-            if d.status == .failed || store.task(task.id)?.stage == .inProgress && m.text.hasPrefix("failed") {
+            if m.text == DelegationEngine.backText {
+                // The assignee's session came back: its "gone" failure is moot.
+                store.mutate(task.id) { if $0.lastError?.contains(DelegationEngine.goneText(d)) == true { $0.lastError = nil } }
+            } else if d.status == .failed || store.task(task.id)?.stage == .inProgress && m.text.hasPrefix("failed") {
                 store.mutate(task.id) { $0.lastError = m.text }
             }
         case .brief, .answer, .steer, .cancel:
@@ -441,11 +444,19 @@ final class TaskDispatcher {
         }
         delegate.codingTaskStore.mutate(taskID) {
             guard Self.mayReturnToReview($0) else { return }
-            $0.stage = .testing
-            $0.testingAt = Date()
-            $0.branch = branch
-            $0.lastError = Self.noWorktreeText(branch)
+            Self.deliveredWithoutFind(&$0, branch: branch)
         }
+    }
+
+    /// A delivery whose look found no worktree: to Review, saying so — unless
+    /// the card has its checkout already (the review window's look, or an
+    /// earlier delivery's, found it while this one's exec failed): a miss
+    /// says nothing about a checkout someone else found.
+    nonisolated static func deliveredWithoutFind(_ t: inout CodingTask, branch: String) {
+        t.stage = .testing
+        t.testingAt = Date()
+        t.branch = branch
+        if (t.worktreeDir ?? "").isEmpty { t.lastError = noWorktreeText(branch) }
     }
 
     /// A delivered card in Review whose worktree wasn't found when it came
@@ -460,6 +471,15 @@ final class TaskDispatcher {
         let branch = "wt/\(slug)"
         let child = task.delegationID
             .flatMap { delegate.delegationEngine.store.delegation(matching: $0.uuidString) }?.childSessionID
+        // Looking: the card isn't "no code" until this ends (no one-click
+        // Mark Done while the worktree may yet turn up).
+        let started = Date()
+        delegate.codingTaskStore.mutate(taskID) { $0.locatingSince = started }
+        defer {
+            delegate.codingTaskStore.mutate(taskID) {
+                if $0.locatingSince == started { $0.locatingSince = nil }
+            }
+        }
         guard let found = await findDelivery(task, branch: branch, childSessionID: child) else { return false }
         var moved = false
         delegate.codingTaskStore.mutate(taskID) {
@@ -618,6 +638,29 @@ final class TaskDispatcher {
 
     // MARK: Housekeeping
 
+    /// Whether a board delegation's session coming back should pick the work
+    /// up again: its card still there and not done.
+    func wantsRevival(_ d: Delegation) -> Bool {
+        Self.wantsRevival(d, tasks: delegate?.codingTaskStore.tasks ?? [])
+    }
+
+    nonisolated static func wantsRevival(_ d: Delegation, tasks: [CodingTask]) -> Bool {
+        guard let task = tasks.first(where: { $0.delegationID == d.id }) else { return false }
+        return task.stage != .done
+    }
+
+    /// The board delegations `sync` settles: open ones, and gone ones (their
+    /// machine away) — the cancel or close is on the record when it's back.
+    nonisolated static func syncs(_ d: Delegation) -> Bool { d.status.isOpen || d.goneFrom != nil }
+
+    /// Whether `sync` closes a done card's delegation now: not while the
+    /// landing's grace is on — the assignee's report (its summary on the
+    /// card) can still come, even from a session that was away; a close
+    /// first refused it. The report, or the grace running out, ends it.
+    nonisolated static func closesNow(_ task: CodingTask, inLandingGrace: Bool) -> Bool {
+        task.stage == .done && !inLandingGrace
+    }
+
     /// Close the requests of tasks that are over, and cancel the ones whose
     /// card is gone — the assignee hears either way.
     func sync() {
@@ -625,14 +668,17 @@ final class TaskDispatcher {
         pump()
         let engine = delegate.delegationEngine
         let tasks = delegate.codingTaskStore.tasks
-        for d in engine.store.delegations(parent: DelegationEngine.boardSessionID) where d.status.isOpen {
+        // A gone one too (its machine away): left alone, a deleted or finished
+        // card's delegation came back to life with its session.
+        for d in engine.store.delegations(parent: DelegationEngine.boardSessionID) where Self.syncs(d) {
             guard let task = tasks.first(where: { $0.delegationID == d.id }) else {
                 Task { try? await engine.cancel(from: DelegationEngine.boardSessionID,
                                                 delegationKey: d.id.uuidString,
                                                 reason: "The task was removed from the board.", by: .user) }
                 continue
             }
-            guard task.stage == .done else { continue }
+            guard Self.closesNow(task, inLandingGrace: delegate.codingTaskEngine.inLandingGrace(task.id))
+            else { continue }
             let note: String
             let accepted: Bool
             switch task.effectiveCompletion {

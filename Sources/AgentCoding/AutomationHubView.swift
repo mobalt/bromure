@@ -373,6 +373,7 @@ struct AutomationHubView: View {
                 workspaces: workspaces(),
                 promptGuardInstalled: promptGuardInstalled(),
                 fetchRepos: actions.fetchRepos,
+                scheduleTimeZone: automationStore.scheduleTimeZone,
                 onEditWorkspace: { id in
                     hub.editingWatch = nil
                     actions.editWorkspace(id)
@@ -654,11 +655,19 @@ struct HubOverviewTab: View {
                     attention
                     recentScans
                 }
+                // A pick whose watch is gone: back to all repositories, so
+                // the picker doesn't sit on a blank selection.
+                .onAppear { dropStalePick() }
+                .onChange(of: findingStore.watches.map(\.repo)) { _, _ in dropStalePick() }
                 .padding(16)
                 .frame(maxWidth: 1400)
                 .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    private func dropStalePick() {
+        if hub.pipelineRepo != nil, overviewRepo == nil { hub.pipelineRepo = nil }
     }
 
     private var tiles: some View {
@@ -705,16 +714,51 @@ struct HubOverviewTab: View {
         }
     }
 
+    /// The repository the overview is narrowed to (its picker, above the
+    /// pipeline): the lists under it follow it too, not only the graph.
+    private var overviewRepo: String? {
+        Self.pickedRepo(hub.pipelineRepo, watched: findingStore.watches.map(\.repo))
+    }
+
+    /// A pick still among the watched repositories, else none: a watch
+    /// deleted after it was picked left its name behind — with the picker
+    /// hidden once one watch is left, nothing could clear it, and the
+    /// lists showed nothing of the repositories still watched.
+    static func pickedRepo(_ picked: String?, watched: [String]) -> String? {
+        guard let picked, watched.contains(picked) else { return nil }
+        return picked
+    }
+
+    /// Automation runs of the overview's repository — its watch's — or every
+    /// run when none is picked.
+    private func inOverviewRepo(_ runs: [AutomationRunRecord]) -> [AutomationRunRecord] {
+        Self.runs(runs, of: overviewRepo, watches: findingStore.watches)
+    }
+
+    /// `runs` of `repo`'s watch (all of them when `repo` is nil).
+    static func runs(_ runs: [AutomationRunRecord], of repo: String?, watches: [WatchedRepo]) -> [AutomationRunRecord] {
+        guard let repo else { return runs }
+        let ids = Set(watches.filter { $0.repo == repo }.flatMap { $0.automationIDs.values })
+        return runs.filter { ids.contains($0.automationID) }
+    }
+
+    /// `findings` of `repo` (all of them when `repo` is nil).
+    static func findings(_ findings: [RepoFinding], of repo: String?) -> [RepoFinding] {
+        guard let repo else { return findings }
+        return findings.filter { $0.repo == repo }
+    }
+
     private var attention: some View {
-        let open = findingStore.findings
+        let open = Self.findings(findingStore.findings, of: overviewRepo)
             .filter { $0.status == .new || $0.status == .triaged }
             .sortedForTriage()
-        let failed = AutomationBoard.classify(runs: automationStore.runs) { liveRunIDs.contains($0.id) }
-            .needsAttention
+        let failed = inOverviewRepo(AutomationBoard.classify(runs: automationStore.runs) { liveRunIDs.contains($0.id) }
+            .needsAttention)
         return HubCard(NSLocalizedString("Needs attention", comment: "hub section"),
                        trailing: open.count > 8 ? AnyView(
                         Button(String(format: NSLocalizedString("All %d", comment: "hub"), open.count)) {
                             hub.statusFilter = .open
+                            hub.repoFilter = overviewRepo
                             hub.showSecurity(.findings)
                         }.platformLinkButtonStyle()) : nil) {
             if open.isEmpty && failed.isEmpty {
@@ -746,8 +790,8 @@ struct HubOverviewTab: View {
 
     private var recentScans: some View {
         let watchAutomationIDs = Set(findingStore.watches.flatMap { $0.automationIDs.values })
-        let runs = automationStore.runs
-            .filter { watchAutomationIDs.contains($0.automationID) && $0.outcome != .skipped }
+        let runs = inOverviewRepo(automationStore.runs
+            .filter { watchAutomationIDs.contains($0.automationID) && $0.outcome != .skipped })
             .prefix(8)
         return HubCard(NSLocalizedString("Recent scans", comment: "hub section")) {
             if runs.isEmpty {
@@ -1083,8 +1127,7 @@ struct HubPipelineCard: View {
     @Binding var selectedRepo: String?
 
     private var scoped: [RepoFinding] {
-        guard let r = selectedRepo else { return findings }
-        return findings.filter { $0.repo == r }
+        HubOverviewTab.findings(findings, of: HubOverviewTab.pickedRepo(selectedRepo, watched: repos))
     }
 
     var body: some View {
@@ -1561,6 +1604,23 @@ struct HubFindingsTab: View {
     @Bindable var hub: AutomationHubModel
     let actions: AutomationHubView.Actions
 
+    /// The repository filter, while it names a repository still watched or
+    /// with findings — else none. Stopping a watch deletes its findings and
+    /// left the filter on its name: an empty chart and list, and no picker
+    /// to clear it once one repository was left.
+    private var repoFilter: String? {
+        Self.activeRepoFilter(hub.repoFilter, watched: findingStore.watches.map(\.repo),
+                              findings: findingStore.findings)
+    }
+
+    static func activeRepoFilter(_ picked: String?, watched: [String], findings: [RepoFinding]) -> String? {
+        HubOverviewTab.pickedRepo(picked, watched: watched + findings.map(\.repo))
+    }
+
+    private func dropStaleFilter() {
+        if hub.repoFilter != nil, repoFilter == nil { hub.repoFilter = nil }
+    }
+
     private var filtered: [RepoFinding] {
         let q = hub.search.trimmingCharacters(in: .whitespaces)
         return findingStore.findings.filter { f in
@@ -1570,7 +1630,7 @@ struct HubFindingsTab: View {
             case .only(let s): if f.status != s { return false }
             }
             if let sev = hub.severityFilter, f.severity != sev { return false }
-            if let r = hub.repoFilter, f.repo != r { return false }
+            if let r = repoFilter, f.repo != r { return false }
             if !q.isEmpty {
                 let hay = [f.title, f.file ?? "", f.summary, f.cwe ?? "", f.repo].joined(separator: " ")
                 if !hay.localizedCaseInsensitiveContains(q) { return false }
@@ -1583,7 +1643,7 @@ struct HubFindingsTab: View {
         VStack(spacing: 0) {
             // The chart follows the repository picker (its own columns are
             // severity and status, so those filters don't narrow it).
-            HubFindingsFlow(findings: hub.repoFilter.map { r in findingStore.findings.filter { $0.repo == r } }
+            HubFindingsFlow(findings: repoFilter.map { r in findingStore.findings.filter { $0.repo == r } }
                                 ?? findingStore.findings)
                 .frame(height: 150)
                 .padding(.horizontal, 16)
@@ -1608,6 +1668,9 @@ struct HubFindingsTab: View {
                 }
             }
         }
+        .onAppear { dropStaleFilter() }
+        .onChange(of: findingStore.watches.map(\.repo)) { _, _ in dropStaleFilter() }
+        .onChange(of: Set(findingStore.findings.map(\.repo))) { _, _ in dropStaleFilter() }
     }
 
     private var filterBar: some View {
@@ -2450,6 +2513,8 @@ struct WatchEditorSheet: View {
     let workspaces: [WatchWorkspaceChoice]
     let promptGuardInstalled: Bool
     let fetchRepos: (UUID) async throws -> [String]
+    /// The clock scans run on (the host's): the hour picker is that time.
+    var scheduleTimeZone: TimeZone = .current
     var onEditWorkspace: (UUID) -> Void
     var onCancel: () -> Void
     var onSave: (WatchedRepo, Bool) -> Void
@@ -2462,6 +2527,7 @@ struct WatchEditorSheet: View {
     init(draft: WatchedRepo, isNew: Bool, workspaces: [WatchWorkspaceChoice],
          promptGuardInstalled: Bool,
          fetchRepos: @escaping (UUID) async throws -> [String],
+         scheduleTimeZone: TimeZone = .current,
          onEditWorkspace: @escaping (UUID) -> Void,
          onCancel: @escaping () -> Void,
          onSave: @escaping (WatchedRepo, Bool) -> Void) {
@@ -2472,6 +2538,7 @@ struct WatchEditorSheet: View {
         self.workspaces = workspaces
         self.promptGuardInstalled = promptGuardInstalled
         self.fetchRepos = fetchRepos
+        self.scheduleTimeZone = scheduleTimeZone
         self.onEditWorkspace = onEditWorkspace
         self.onCancel = onCancel
         self.onSave = onSave
@@ -2639,6 +2706,12 @@ struct WatchEditorSheet: View {
                                 }
                                 .labelsHidden()
                                 .fixedSize()
+                                if AutomationDescriber.differs(scheduleTimeZone, .current, at: Date()) {
+                                    Text(String(format: NSLocalizedString("%@ (the host's time)", comment: "automation editor: time zone"),
+                                                AutomationDescriber.zoneName(scheduleTimeZone, at: Date())))
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -2799,9 +2872,14 @@ struct WatchEditorSheet: View {
         repoError = nil
         tokenRejected = false
         guard workspace?.hasGitHubToken == true else { return }
+        // Another workspace picked meanwhile (the task cancelled): its late
+        // reply — or its 401, which disabled Save — isn't this one's.
         do {
-            repoChoices = try await fetchRepos(draft.profileID)
+            let repos = try await fetchRepos(draft.profileID)
+            guard !Task.isCancelled else { return }
+            repoChoices = repos
         } catch {
+            guard !Task.isCancelled else { return }
             let ns = error as NSError
             if ns.domain == "GitHubPoller", ns.code == 401 {
                 tokenRejected = true

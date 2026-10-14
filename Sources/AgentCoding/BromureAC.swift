@@ -476,6 +476,10 @@ struct Init: ParsableCommand {
                              visibility: .hidden))
     var downloadOnly = false
 
+    @Flag(name: .long,
+          help: "Re-download the image and reinstall the agents even when the saved copy of the published image is current.")
+    var fresh = false
+
     @Option(name: .long,
             help: ArgumentHelp("Install into this directory instead of Application Support (pipeline tests).",
                                visibility: .hidden))
@@ -516,6 +520,7 @@ struct Init: ParsableCommand {
         var result: Result<Void, Error>?
         let buildLocal = self.buildLocal
         let downloadOnly = self.downloadOnly
+        let fresh = self.fresh
         Task {
             let progress: (String) -> Void = { msg in
                 FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
@@ -539,7 +544,7 @@ struct Init: ParsableCommand {
                 } else {
                     do {
                         try await imageManager.downloadBaseImage(
-                            catalogStore: catalogStore, progress: progress)
+                            catalogStore: catalogStore, fresh: fresh, progress: progress)
                     } catch let error where !downloadOnly
                         && UbuntuImageManager.isDownloadSideFailure(error) {
                         // Only download-side failures (catalog, transfer,
@@ -1223,6 +1228,16 @@ final class RunningSession {
     var kubeClusterID: UUID?
     /// When the VM booted — surfaced as uptime in `vm ls`.
     let startedAt: Date
+    /// The boot on a clock the Mac's own clock setting can't move (it runs
+    /// through sleep): what `uptime` counts from.
+    let startedClock = ContinuousClock.now
+    /// How long the VM has run. Not `now − startedAt`: a host clock step
+    /// moved that by the step while `bootedAt` stayed put, and a fat
+    /// client's boot date (`now − uptime` on its clock) followed it.
+    var uptime: TimeInterval {
+        let d = ContinuousClock.now - startedClock
+        return Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+    }
     /// Last tab snapshot, captured on detach so a reattaching window can
     /// rebuild its bar against the kittys still running inside the guest.
     var lastTabsSnapshot: SessionDisk.TabsState?
@@ -1356,9 +1371,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Internal so the AppleScript bridge can read window IDs.
     var mainWindow: NSWindow?
-    var editorWindow: NSWindow?
+    var editorWindow: NSWindow? { editorSession?.window }
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
+    /// The open editor and its firewall edits, in force as they're made:
+    /// kept by a save, put back by any other close — which also forgets
+    /// the window, so reopening builds it again from the rules in force.
+    private var editorSession: SettingsWindowSession?
 
     /// One *attached* window per profile. Each window holds N tabs, all
     /// rendering the same VM. Note this is only the windows currently on
@@ -2185,6 +2204,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Boots `launch` has started but not finished (see `BootsInFlight`).
     let bootsInFlight = BootsInFlight()
+    /// Workspaces with a launch question up (the base-image upgrade, the
+    /// compromise wipe). A second start of the same workspace meanwhile (a
+    /// double-clicked Start, a control-socket start the modal pumps) asks
+    /// nothing and boots nothing: the first one's answer decides, and its
+    /// launch boots. Two answers raced — a second "Yes" was told "wasn't
+    /// upgraded, start it again to be asked again" while the first's
+    /// upgrade was booting, or after the first's "No" was saved.
+    var launchQuestions = LaunchQuestionGate()
 
     /// A VM has (or is about to have) this workspace's disk and home open:
     /// it is running, or its boot is under way. Deleting, resetting or
@@ -2762,6 +2789,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// profile (its own, or the shared one it inherits). Fed to the model
     /// overlay so a signed-in subscription authenticates at launch even when the
     /// Models pane's mirror flag hasn't synced.
+    /// The agents a workspace can run, for every agent picker (automation,
+    /// task, a new session): the same set a new session counts as ready. A
+    /// plain Mac runs whatever agent its user installed.
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        if attachedMachines[p.id] != nil {
+            return p.allToolSpecs + Profile.Tool.allCases
+                .filter { t in !p.allToolSpecs.contains { $0.tool == t } }
+                .map { Profile.ToolSpec(tool: $0, authMode: .token) }
+        }
+        return p.readyToolSpecs(ModelSettingsStore.shared.effective(for: p),
+                                subscribed: subscribedProviders(for: p))
+    }
+
     func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
         guard let e = mitmEngine else { return [] }
         var s = Set<ModelProvider>()
@@ -3602,6 +3642,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // through the delegation engine to the board.
         delegationEngine.onBoardMessage = { [weak self] d, m in
             self?.taskDispatcher.handle(d, m)
+        }
+        delegationEngine.boardWantsRevival = { [weak self] d in
+            self?.taskDispatcher.wantsRevival(d) ?? true
         }
         taskDispatcher.start()
         // ⇧⌥Space from any app: the Quick Task panel.
@@ -5183,6 +5226,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onCreateProfile = { [weak self] doc in
             self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
         }
+        server.onCommitFirewall = { [weak self] id, rules in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id),
+                      self.profiles.contains(where: { $0.id == uuid }),
+                      (try? EgressPolicy.parse(rules)) != nil else { return nil }
+                return self.commitFirewallRules(rules, profileID: uuid)
+            }
+        }
         server.onUpdateProfile = { [weak self] key, doc in
             self?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "unavailable"]
         }
@@ -5254,6 +5305,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onUpsertAutomation = { [weak self] doc in
             MainActor.assumeIsolated { self?.automationUpsertScheduled(doc) ?? false }
+        }
+        server.onAutomationSources = { [weak self] body in
+            await self?.automationSources(body) ?? ["error": "no app"]
         }
         server.onDeleteAutomation = { [weak self] id in
             MainActor.assumeIsolated {
@@ -5357,14 +5411,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {room}: started from a room's "New Session".
                     let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
                         .flatMap { self.agentRoomStore.room($0)?.id }
-                    let sid = self.agentSessionEngine.start(.init(
+                    let req = AgentSessionEngine.NewSessionRequest(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
                         attachments: attachments, roomID: room,
-                        instructions: body["instructions"] as? String), remotely: true)
-                    return ["ok": true, "id": sid.uuidString]
+                        instructions: body["instructions"] as? String)
+                    // Send clicked again while the reply crossed a slow link:
+                    // the session already started, not another one.
+                    return SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                        ["ok": true, "id": self.agentSessionEngine.start(req, remotely: true).uuidString]
+                    }
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
                     // clicked its row: {profile?} picks the workspace.
@@ -5813,6 +5871,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "mark-done":
                     self.codingTaskEngine.markDone(id)
+                case "rank":
+                    // A Backlog card dragged on a client: its new place.
+                    guard let rank = (body["rank"] as? NSNumber)?.doubleValue, rank.isFinite
+                    else { return ["error": "rank required"] }
+                    self.codingTaskStore.mutate(id) { $0.queueRank = rank }
                 case "locate":
                     // A fat client's review window: a delivered card without
                     // a worktree is looked for again; the mirror picks it up.
@@ -6344,7 +6407,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Snapshot of running VMs for `vm ls`.
     @MainActor private func automationVMList() -> [[String: Any]] {
-        let now = Date()
         return runningSessions.values.map { s in
             let stateStr: String
             switch s.sandbox.state {
@@ -6404,7 +6466,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // the machines list; the CLI can still `vm exec` it.
                 "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
-                "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                "uptimeSeconds": Int(s.uptime),
                 // The boot itself, on this host's clock: a client tells a
                 // reboot by this changing — never by uptime against its own
                 // clock, which a late reply (a slow relay) moved forward.
@@ -6492,6 +6554,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "hasGitHubToken": p.hasGitHubCredential,
                 "hasLinearToken": !p.linearToken.isEmpty,
                 "askBeforeUseLabels": p.askBeforeUseCredentialLabels,
+                // Its other agents (which, and how they sign in — never a
+                // key): a fat client's automation editor offered only the
+                // primary one.
+                "additionalTools": p.additionalTools.filter { $0.tool != p.tool }.map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
+                // The agents it can run (set up there, or through the Models
+                // settings / a shared sign-in) — what a fat client's agent
+                // pickers offer. Its mirror sees none of the host's models.
+                "readyTools": readyToolSpecs(for: p).map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
             ]
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
@@ -6531,6 +6605,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
+            // The clock the schedules run on: a client in another zone
+            // names it, and shows its own equivalent.
+            "timeZone": TimeZone.current.identifier,
             // Repository watches + findings ride along for the fat client.
             "watches": findingStore.watches.compactMap(Self.codableToDict),
             "findings": findingStore.findings.compactMap(Self.codableToDict),
@@ -7998,7 +8075,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func startInit(force: Bool = false, buildLocal: Bool = false,
-                           fromWizard: Bool = false) {
+                           freshDownload: Bool = false, fromWizard: Bool = false) {
         // Note: we do NOT delete the version stamp here even when
         // force == true. The stamp gates whether existing sessions
         // can launch from the old image — wiping it would brick the
@@ -8059,7 +8136,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else {
                     do {
                         try await self.imageManager.downloadBaseImage(
-                            progress: progressCB, output: outputCB)
+                            fresh: freshDownload, progress: progressCB, output: outputCB)
                     } catch let error where UbuntuImageManager.isDownloadSideFailure(error) {
                         // No prebuilt image reachable (offline, CDN
                         // outage, bad artifact) — the one class of
@@ -9379,6 +9456,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.closePreferencesWindow()
             },
             onCancel: { [weak self] in self?.closePreferencesWindow() },
+            // File import stays off here (a key file is copied into ONE
+            // workspace's folder; the template has none), but a host-agent
+            // key is only a public key + socket, so new workspaces can
+            // inherit it. The editor discovers sockets off the main thread.
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             claudeReauthRequiredAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: nil) },
             codexReauthRequiredAt: { [weak self] in self?.mitmEngine?.codexSubscriptionStore.reauthRequiredAt(for: nil) },
@@ -9522,9 +9604,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         switch RebuildBaseImageWindow.run() {
-        case .download: startInit(force: true)
-        case .local:    startInit(force: true, buildLocal: true)
-        case nil:       break
+        case (.download, let fresh)?: startInit(force: true, freshDownload: fresh)
+        case (.local, _)?:            startInit(force: true, buildLocal: true)
+        case nil:                     break
         }
     }
 
@@ -9981,8 +10063,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // old one down and rebuild. The previous guard re-surfaced whatever
         // editor was open regardless of `editing`, so once any profile's
         // Settings had been opened, every later "Settings" click re-showed
-        // that same window — and since the editor isn't nil'd on a red-button
-        // close, it stuck to the first profile edited this session.
+        // that same window. Only an OPEN editor is reused: a closed one is
+        // forgotten (its session), so reopening reads the rules in force.
         if let existing = editorWindow {
             if editorEditingProfile?.id == editing?.id {
                 existing.makeKeyAndOrderFront(nil)
@@ -10009,6 +10091,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // their own values.
         let initialDraft: Profile? = editing
             ?? store.newProfileFromTemplate(name: nextDefaultProfileName())
+        // An existing workspace's firewall edits apply as they're made (a
+        // new one has nothing running to apply them to).
+        let live = editing.map { p in
+            FirewallLiveEdit(profileID: p.id, opening: p.egressRules) { [weak self] text in
+                self?.commitFirewallRules(text, profileID: p.id) ?? false
+            }
+        }
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
             isNew: editing == nil,
@@ -10020,6 +10109,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
             onCancel: { self.closeEditorWindow() },
+            onFirewallEdited: live.map { live in { live.edited($0) } },
             onTitleChange: { [weak win] title in win?.title = title },
             onImportSSHKey: { [weak self] url, passphrase, label in
                 // Import requires a saved profile (we need an id for
@@ -10039,6 +10129,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onRemoveSSHKey: { [weak self] key in
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
+            },
+            // Socket discovery runs off the main thread inside the editor.
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
+            consentGrants: editing.flatMap { p in
+                mitmEngine.map { Self.consentGrantControls($0.consent, profileID: p.id) }
             },
             claudeAccountSavedAt: (editing ?? initialDraft).map { p in
                 { [weak self] in
@@ -10144,7 +10239,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         .withSubscriptionHealth({ [weak self] provider in self?.localSubscriptionHealth(provider, profileID: editing?.id) }))
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
-        editorWindow = win
+        // Closed any way but a save (Cancel, the close button, another
+        // workspace's editor taking its place): the firewall edits go back,
+        // and the window is forgotten.
+        editorSession = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+            guard let self, self.editorSession === gone else { return }
+            self.editorSession = nil
+            self.editorEditingProfile = nil
+        }
     }
 
     /// Snapshot of where this profile's data lives + how to nuke it.
@@ -10194,8 +10296,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func closeEditorWindow() {
-        editorWindow?.close()
-        editorWindow = nil
+        editorSession?.close()
+        editorSession = nil
         editorEditingProfile = nil
     }
 
@@ -10406,6 +10508,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       : "Couldn't save the workspace.")
             return
         }
+        editorSession?.live?.keep()
         closeEditorWindow()
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).
@@ -11248,6 +11351,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if old.sshKeyRequiresApproval != new.sshKeyRequiresApproval, let engine = mitmEngine {
             engine.sshAgent.setKeys(loadAgentKeys(for: new), for: new.id)
         }
+        // The imported and host-agent keys' gates too: "Require approval"
+        // turned on was only read at launch — the key kept signing, and a
+        // Guardrails deny (badge and all) was never asked, until a cold boot.
+        if old.importedSSHKeys != new.importedSSHKeys, let engine = mitmEngine {
+            engine.sshAgent.setImportedKeyApprovals(
+                Self.liveImportedKeyApprovals(running: engine.sshAgent.importedKeyApprovals(for: new.id), to: new),
+                for: new.id)
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(new), for: new.id)
+        }
 
         // Transparent (IP-stack) interception on/off is a live L3/L4 flip of
         // the VM's switch port — no reboot, and BEFORE the guard so it applies
@@ -11500,6 +11612,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Then: "No" and "Remind me later" are still recorded (they touch no
     /// disk); "Yes" is not carried out, and says so (`upgradeSkipped`).
     /// Either way that other boot owns the workspace: this launch stops.
+    /// One launch question (upgrade, wipe) up per workspace at a time.
+    struct LaunchQuestionGate {
+        private var up = Set<Profile.ID>()
+        /// False: this workspace already has one up — don't ask, don't boot.
+        mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
+        mutating func end(_ id: Profile.ID) { up.remove(id) }
+    }
+
     enum UpgradeAnswerOutcome: Equatable {
         case applied
         case diskInUse(upgradeSkipped: Bool)
@@ -11812,7 +11932,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Local NSAlert only: a remote-initiated launch resolved (and
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
-            if !confirmWipeAndProceed(profile: profile) {
+            guard launchQuestions.begin(profile.id) else { return }
+            let wiped = confirmWipeAndProceed(profile: profile)
+            launchQuestions.end(profile.id)
+            if !wiped {
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -11836,6 +11959,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } else {
                 // Local NSAlert only: a remote-initiated launch resolved this in
                 // the async preflight above and re-entered with preflightResolved.
+                // The same question already up for this workspace: that one decides.
+                guard launchQuestions.begin(profile.id) else { return }
                 let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
                 let alert = NSAlert()
                 alert.messageText = title
@@ -11847,6 +11972,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case .alertSecondButtonReturn: index = 1
                 default: index = 2
                 }
+                launchQuestions.end(profile.id)
                 // Another boot began during the modal: it owns the disk now.
                 if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
                                                                                current: current) {
@@ -12041,15 +12167,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // process), so the broker is consulted just before that
             // forward. Keys without `publicKeyText` (no .pub on import)
             // can't be matched by blob and will sign without a prompt.
-            var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
-            for k in profile.importedSSHKeys where k.requireApproval {
-                guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
-                else { continue }
-                approvals[blob] = SSHAgentServer.ImportedApproval(
-                    label: k.label,
-                    consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
-            }
-            engine.sshAgent.setImportedKeyApprovals(approvals, for: profile.id)
+            engine.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
+            // Keys picked out of a host agent (YubiKey & co.): the allow-
+            // list of blobs the VM may see and sign with through that
+            // agent. Nothing else it holds is reachable.
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
         } else {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
@@ -12206,7 +12328,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         AppLog.stamp("restore of '\(profile.name)' failed: \(error.localizedDescription)\(drift) — booting fresh\(who)")
                         sessionDisk.clearSavedState()
                         // VZ leaves the VM in an indeterminate state
-                        // after a failed restore; rebuild it.
+                        // after a failed restore: stop it (it may hold the
+                        // disk, and its later stop isn't this boot's), then
+                        // rebuild it.
+                        await sandbox.discardFailedRestore()
                         try sandbox.prepare()
                         try await sandbox.start()
                         // Restore failed → this is now a fresh boot. Drop the
@@ -12290,7 +12415,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -14135,6 +14263,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func resolveRemoteLaunchPrompts(
         _ profile: Profile, detached: Bool, freshBootFallback: Bool, quiet: Bool = false) async {
         var profile = profile
+        // A question already up for this workspace (another start's): that
+        // one decides, and its launch boots.
+        guard launchQuestions.begin(profile.id) else { return }
+        var asking = true
+        defer { if asking { launchQuestions.end(profile.id) } }
         if SessionDisk.isCompromised(profile: profile, store: store) {
             guard await confirmWipeAndProceedAsync(profile: profile) else { return }
         }
@@ -14147,6 +14280,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
+            launchQuestions.end(profile.id); asking = false
             if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
                                                                            current: current) {
                 // The start already returned to the client: it hears it
@@ -14725,9 +14859,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// registry so a reattaching window can render it.
     private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM) {
         guard let pid = sandbox.sessionDisk?.profile.id else { return }
-        sandbox.onStopped = { [weak self] _ in
+        sandbox.onStopped = { [weak self, weak sandbox] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // Only the workspace's current sandbox stopping ends it: an
+                // earlier one's late stop (a launch since replaced it) tore
+                // the newer boot down — a resume "found itself off", and the
+                // next start shut down too.
+                guard Self.stopEndsSession(of: sandbox, current: self.runningSessions[pid]?.sandbox) else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] an earlier VM of this workspace stopped — the running one stays\n".utf8))
+                    return
+                }
                 // A reboot — whether requested from the app (pane.rebootRequested)
                 // or initiated inside the guest (`reboot`, which sets the session
                 // flag via onGuestReboot) — rebuilds a fresh VM in place. An
@@ -15032,6 +15175,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { await InferenceService.shared.clearWorkspace(profile.id) }
         InferenceRepairProxy.shared.clearActiveModel(profile.id)
         InferenceRepairProxy.shared.setExternalEngine(profile.id, nil)
+    }
+
+    /// Whether `stopped` stopping ends the workspace's session: it is the
+    /// session's sandbox, or no session has one yet (a boot still on its
+    /// way). Pure.
+    nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {
+        guard let current else { return true }
+        return stopped === current
     }
 
     /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an
@@ -15789,7 +15940,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -15915,7 +16069,48 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Returns nil for empty / malformed input — callers that can't
     /// resolve a blob skip the consent gate (better than refusing to
     /// sign for keys we can't identify).
+    /// The imported keys whose signing asks first (`requireApproval`), by
+    /// public-key blob. Keys without a public key can't be matched by blob
+    /// and sign without a prompt.
+    nonisolated static func importedKeyApprovals(_ profile: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
+        for k in profile.importedSSHKeys where k.requireApproval {
+            guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            approvals[blob] = SSHAgentServer.ImportedApproval(
+                label: k.label, consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
+        }
+        return approvals
+    }
+
+    /// A running session's gates after a live edit: the saved profile's —
+    /// plus every gate `running` holds for a key no longer on the list. A
+    /// key taken off stays loaded in the agent until the restart: it stays
+    /// gated, through any number of later edits (carried from the running
+    /// map, not from the profile before this one), never let through ungated.
+    nonisolated static func liveImportedKeyApprovals(running: [Data: SSHAgentServer.ImportedApproval],
+                                                     to new: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals = importedKeyApprovals(new)
+        let listed = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+        for (blob, a) in running where !listed.contains(blob) { approvals[blob] = a }
+        return approvals
+    }
+
+    /// Host-agent keys (YubiKey & co.) the VM may see and sign with: blob → socket.
+    nonisolated static func hostAgentKeys(_ profile: Profile) -> [Data: String] {
+        var keys: [Data: String] = [:]
+        for k in profile.importedSSHKeys {
+            guard let socket = k.hostAgentSocket,
+                  let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            keys[blob] = socket
+        }
+        return keys
+    }
+
     private func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
+        Self.sshPublicKeyBlob(fromOpenSSHText: text)
+    }
+
+    nonisolated static func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
         let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
             .first?
             .trimmingCharacters(in: .whitespaces) ?? ""
@@ -16016,9 +16211,72 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             hasPassphrase: hasPass)
     }
 
+    /// The Guardrails pane's view of one workspace's consent grants.
+    nonisolated static func consentGrantControls(_ broker: ConsentBroker,
+                                                 profileID: UUID) -> ProfileEditorView.ConsentGrantControls {
+        ProfileEditorView.ConsentGrantControls(
+            status: {
+                var out: [String: ProfileEditorView.ConsentGrantStatus] = [:]
+                for e in await broker.snapshot() where e.profileID == profileID {
+                    out[e.credentialID] = .init(denied: e.kind == .deny, expiration: e.expiration,
+                                                sessionScoped: e.isSessionScoped)
+                }
+                return out
+            },
+            allow: { id, name, minutes in
+                let decision: ConsentBroker.Decision = switch minutes {
+                case nil: .allowSession
+                case 5: .allow5min
+                default: .allow1hr
+                }
+                await broker.grant(profileID: profileID, credentialID: id, decision,
+                                   credentialDisplayName: name)
+            },
+            deny: { id, name, minutes in
+                await broker.deny(profileID: profileID, credentialID: id,
+                                  for: minutes.map { TimeInterval($0 * 60) },
+                                  credentialDisplayName: name)
+            },
+            revoke: { id in await broker.revoke(profileID: profileID, credentialID: id) })
+    }
+
+    /// The keys a host ssh-agent holds, as `ImportedSSHKey`s ready to
+    /// add to a profile: nothing is copied — `hostAgentSocket` points
+    /// signing back at the agent. `socket` is a `hostAgentSocket` value
+    /// ("" = this process's SSH_AUTH_SOCK).
+    nonisolated static func listHostAgentKeys(socket: String) throws -> [ImportedSSHKey] {
+        func fail(_ msg: String) -> NSError {
+            NSError(domain: "BromureAC", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        guard let path = HostAgentClient.resolveHostSocket(socket) else {
+            throw fail(NSLocalizedString("SSH_AUTH_SOCK isn't set for Bromure.", comment: ""))
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw fail(String(format: NSLocalizedString("No agent socket at %@.", comment: ""), path))
+        }
+        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+            // The blob opens with the key type as an ssh-string.
+            guard ident.blob.count > 4 else { return nil }
+            let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+            guard n > 0, 4 + n <= ident.blob.count,
+                  let type = String(data: ident.blob.subdata(in: 4..<(4 + n)), encoding: .utf8)
+            else { return nil }
+            let comment = ident.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ImportedSSHKey(
+                label: comment.isEmpty ? type : comment,
+                filename: "",
+                publicKeyText: "\(type) \(ident.blob.base64EncodedString())"
+                    + (comment.isEmpty ? "" : " \(comment)"),
+                hostAgentSocket: socket)
+        }
+    }
+
     /// Remove an imported key: file + (optional) keychain entry. The
     /// editor calls this when the user clicks the row's minus button.
     func removeImportedSSHKey(_ key: ImportedSSHKey, for profile: Profile) {
+        // A host-agent key has no file (filename "" would name the whole
+        // imported/ dir) — the agent keeps it.
+        guard !key.isFromHostAgent, !key.filename.isEmpty else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
         try? FileManager.default.removeItem(
@@ -16039,7 +16297,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
               let agentSocket = mitmEngine?.sshAgentSocket(for: profile.id) else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
-        for key in profile.importedSSHKeys {
+        for key in profile.importedSSHKeys where !key.isFromHostAgent {
             let path = importedDir.appendingPathComponent(key.filename).path
             guard FileManager.default.fileExists(atPath: path) else {
                 FileHandle.standardError.write(Data(
@@ -16576,7 +16834,8 @@ struct Reset: ParsableCommand {
         }
         let fm = FileManager.default
         for url in [imageManager.baseDiskURL, imageManager.efiVarsURL,
-                    imageManager.versionStampURL, imageManager.imageStateURL] {
+                    imageManager.versionStampURL, imageManager.imageStateURL,
+                    imageManager.stockDiskURL, imageManager.stockStateURL] {
             try? fm.removeItem(at: url)
         }
         print("Base image cleared.")
@@ -16651,9 +16910,11 @@ enum BaseImageCustomize {
 enum RebuildBaseImageWindow {
     enum Method { case download, local }
 
+    /// The method, and for a download whether to discard the saved stock
+    /// image (re-download, reinstall the agents) even if it's current.
     @MainActor
-    static func run() -> Method? {
-        var chosen: Method?
+    static func run() -> (method: Method, fresh: Bool)? {
+        var chosen: (method: Method, fresh: Bool)?
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
                            styleMask: [.titled, .closable, .fullSizeContentView],
                            backing: .buffered, defer: false)
@@ -16662,7 +16923,7 @@ enum RebuildBaseImageWindow {
         win.isMovableByWindowBackground = true
         win.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: RebuildBaseImageView(
-            onStart: { m in chosen = m; NSApp.stopModal() },
+            onStart: { m, fresh in chosen = (m, fresh); NSApp.stopModal() },
             onCancel: { NSApp.stopModal() }))
         win.contentView = host
         win.setContentSize(host.fittingSize)
@@ -16678,10 +16939,11 @@ enum RebuildBaseImageWindow {
 }
 
 struct RebuildBaseImageView: View {
-    let onStart: (RebuildBaseImageWindow.Method) -> Void
+    let onStart: (RebuildBaseImageWindow.Method, Bool) -> Void
     let onCancel: () -> Void
 
     @State private var method: RebuildBaseImageWindow.Method = .download
+    @State private var fresh = false
     @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
     @AppStorage(BaseImageCustomize.pathKey) private var path = ""
     @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
@@ -16705,6 +16967,20 @@ struct RebuildBaseImageView: View {
                            badge: nil)
             }
             .padding(.horizontal, 24)
+            if method == .download {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(NSLocalizedString("Re-download and reinstall the agents", comment: "rebuild base image"),
+                           isOn: $fresh)
+                        .font(.system(size: 12))
+                    Text(NSLocalizedString("Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run.", comment: "rebuild base image"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 20)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
+            }
             Label(NSLocalizedString("Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.", comment: "rebuild base image"),
                   systemImage: "checkmark.shield")
                 .font(.system(size: 11.5))
@@ -16724,7 +17000,7 @@ struct RebuildBaseImageView: View {
                     .controlSize(.large)
                 Button(method == .download
                        ? NSLocalizedString("Download & Update", comment: "rebuild base image")
-                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method) }
+                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method, fresh) }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)

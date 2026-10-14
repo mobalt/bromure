@@ -22,6 +22,8 @@ The pane lists every credential configured in [Credentials](credentials.mdx), in
 
 Off by default. When on, the first time the credential is used in a session the proxy pauses the request and asks, offering **Allow for 5 minutes**, **Allow for 1 hour**, **Allow for the rest of the session**, or **Don't allow**. Grants live in memory and end with the session; **Window › Credential Approvals…** lists the current ones. See [Credentials & the Wire Boundary](../08-credentials.mdx).
 
+While a credential has a live grant, its row shows how long is left next to the checkbox — an orange countdown (`4m`, then `45s`) for a timed grant, **allowed this session** for a rest-of-session one, and a red **denied** countdown (or **denied this session**) while a deny is in force. Right-click the row to **Allow for 5 minutes**, **Allow for 1 hour** or **Allow for the rest of the session**, to **Deny for 5 minutes**, **Deny for 1 hour** or **Deny for the rest of the session** (refused without asking), or **Revoke — ask next time** to clear either so the next use prompts again. A timed allow or deny starts from now, so a grant that's running low gets a fresh 5 minutes. These act on the running session at once; there's nothing to save. (The countdown appears in the workspace's own settings on the Mac running it, not in Preferences or on a remote client.)
+
 > **Note:** An automation that uses a credential with approval on can't run fully unattended: it pauses at the dialog until you answer on the Mac. The automation editor warns about this.
 
 ### Write policy

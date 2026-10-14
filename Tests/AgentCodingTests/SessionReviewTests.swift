@@ -30,7 +30,8 @@ struct SessionReviewTests {
         let br = TaskReviewData.sessionCommand(dir: "/x", base: .branch("main"))
         #expect(br.contains("git merge-base 'main' HEAD"))
         let last = TaskReviewData.sessionCommand(dir: "/x", base: .lastCommit)
-        #expect(last.contains("b=HEAD~1") && last.contains("git diff \"$b\" HEAD --") && !last.contains("ls-files"))
+        #expect(last.contains("b=HEAD~1") && !last.contains("ls-files --others"))   // no untracked files
+        #expect(last.contains("git diff \(RepoGitPrograms.diffFlags) \"$b\" HEAD --"))   // no repository program runs
     }
 
     @Test("parse picks up the base commit")

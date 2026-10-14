@@ -2031,7 +2031,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
                 var req = req
                 if let room { req.roomID = room }
-                let id = delegate.agentSessionEngine.start(req)
+                // The same start asked for again within seconds (Send
+                // clicked twice): the one already started.
+                let r = SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                    ["ok": true, "id": delegate.agentSessionEngine.start(req).uuidString]
+                }
+                guard let id = (r["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
                 // Started from a room: back to its grid, where it launches.
                 if let room, delegate.agentRoomStore.room(room) != nil {
                     self.showRoom(room)
@@ -2054,10 +2059,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 await delegate?.listGuestFolders(profileID: pid, path: path)
             },
             readyTools: { [weak delegate] p in
-                // A plain Mac runs whatever agent its user installed.
-                if delegate?.attachedMachines[p.id] != nil { return Set(Profile.Tool.allCases) }
-                return p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
-                                     subscribed: delegate?.subscribedProviders(for: p) ?? [])
+                Set((delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool))
             },
             peerMentions: { [weak delegate] pid in
                 delegate?.peerMentions(forWorkspace: pid, excluding: nil) ?? []
@@ -2316,13 +2318,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if let m = req.openingMessage, !m.isEmpty { body["message"] = m }
         let wire = req.attachments.filter { $0.folder == nil }.map(\.wireDictionary)
         if !wire.isEmpty { body["attachments"] = wire }
+        // Send clicked again while the machine starts it: one session.
+        let key = SessionStartCoalescer.machineKey(req, machine: machine.id, room: room)
         Task { @MainActor [weak self, weak machine] in
-            guard let machine,
-                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
-                  let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+            // The same start under way (a click before, or a client's through
+            // the hub): wait for it, then open its session — dropping this
+            // click left the window on the new-session screen.
+            var claim = SessionStartCoalescer.shared.claim(key)
+            let giveUp = Date().addingTimeInterval(SessionStartCoalescer.pendingWait)
+            while case .underWay = claim, Date() < giveUp {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                claim = SessionStartCoalescer.shared.claim(key)
+            }
+            let id: UUID
+            switch claim {
+            case .underWay:
+                // The other start never answered: say so, as a failed one does.
                 NSSound.beep()
                 return
+            case .done(let reply):
+                guard let started = (reply["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+                id = started
+            case .mine(let token):
+                guard let machine,
+                      let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60,
+                                                    total: SessionStartCoalescer.machineStartBudget),
+                      let started = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
+                    NSSound.beep()
+                    return
+                }
+                id = started
+                // The id too: a client's same start through this host gets it.
+                SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
             }
+            guard let machine else { return }
             // Started from a room ("Add to Room"): into it, and back to its grid.
             if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
                 delegate.assignMachineRoom(id, room)
@@ -3186,6 +3216,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let view = AutomationEditorView(
             store: delegate.scheduledAutomationStore,
             profiles: delegate.profiles,
+            toolSpecs: { [weak delegate] p in delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
+            listFolders: { [weak delegate] pid, path in await delegate?.listGuestFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -3399,6 +3431,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 store: delegate.codingTaskStore,
                 model: listModel,
                 profilesProvider: { [weak self] in self?.acDelegate?.profiles ?? [] },
+                toolSpecs: { [weak self] p in self?.acDelegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
                 actions: CodingKanbanView.Actions(
                     start: { [weak self] id in self?.acDelegate?.codingTaskEngine.start(id) },
                     plan: { [weak self] id in
@@ -3446,6 +3479,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     startOver: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.startOver(id)
+                    },
+                    reorder: { [weak self] id, rank in
+                        self?.acDelegate?.codingTaskStore.mutate(id) { $0.queueRank = rank }
                     },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)

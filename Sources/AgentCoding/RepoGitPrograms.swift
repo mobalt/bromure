@@ -20,7 +20,8 @@ import Foundation
 /// and a blank `process` (there is no no-op one) makes the filter not
 /// required (`git lfs install --local` sets `required`) — unless the user
 /// has a global/system clean or smudge for it, which the blank process
-/// shadows: then a required filter fails rather than pass raw bytes.
+/// shadows: then the filter is made required, so it fails rather than pass
+/// raw bytes (whatever the repository's own `required` says).
 /// A diff runs its programs only with `--no-ext-diff --no-textconv` off.
 enum RepoGitPrograms {
     /// The config keys whose value is a program git runs on its own.
@@ -42,9 +43,16 @@ enum RepoGitPrograms {
         // `includeIf gitdir:` all count, which `cd / && git config --global
         // --get` missed (an included driver read as none). Local, worktree
         // and command-line (a previous `off`) values never count. Fails
-        // when there is none.
-        let userValue = "_bg() { git -C \(dir) config --show-scope --get-all \"$1\" 2>/dev/null "
-            + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "global" || s == "system") { v = $0; sub(/^[^\t]*\t/, "", v); f = 1 } } END { if (f) print v; exit !f }'; }; "#
+        // when there is none. Read NUL-separated (`scope\0value\0`): git
+        // prints a value's newline as is, so a local value holding
+        // "\nglobal\t<command>" read as one more line passed for the user's
+        // own driver — and git ran the repository's command. A value's
+        // newlines become \001 for awk (which pairs scope and value lines)
+        // and are restored in the value printed. Bytes, not characters
+        // (LC_ALL=C): a non-UTF-8 byte in a repository value doesn't stop
+        // BSD tr, and the user's own value comes back byte for byte.
+        let userValue = "_bg() { git -C \(dir) config -z --show-scope --get-all \"$1\" 2>/dev/null "
+            + #"| LC_ALL=C tr '\n\000' '\001\n' | LC_ALL=C awk 'NR % 2 == 1 { s = $0; next } s == "global" || s == "system" { v = $0; f = 1 } END { if (f) { gsub(/\001/, "\n", v); print v }; exit !f }'; }; "#
         return userValue + "_bk=$( { \(read); } 2>/dev/null "
             + #"| awk '{ s = $0; sub(/\t.*/, "", s); if (s == "local" || s == "worktree") { sub(/^[^\t]*\t/, ""); print } }'); "#
             + "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null "
@@ -57,11 +65,12 @@ enum RepoGitPrograms {
             // at all for that filter: not required, the content passes
             // through unchanged, as `cat` would. With a global/system clean
             // or smudge, the blank process still shadows it (git can't unset
-            // a key from the environment) — `required` is left as it is, so
-            // git fails loudly instead of storing or writing raw bytes.
-            + "(filter.*.process) _bv=; _bd=${_bx%.process}; "
-            + #"[ -n "$( { _bg "$_bd.clean" || :; _bg "$_bd.smudge" || :; } )" ] "#
-            + "|| { export \"GIT_CONFIG_KEY_$_bn=$_bd.required\" \"GIT_CONFIG_VALUE_$_bn=false\"; _bn=$((_bn + 1)); } ;; "
+            // a key from the environment): required, set here — leaving it
+            // to the merged config let the repository's own `required=false`
+            // (or nobody's, false by default) store and write raw bytes.
+            + "(filter.*.process) _bv=; _bd=${_bx%.process}; _br=false; "
+            + #"if [ -n "$( { _bg "$_bd.clean" || :; _bg "$_bd.smudge" || :; } )" ]; then _br=true; fi; "#
+            + "export \"GIT_CONFIG_KEY_$_bn=$_bd.required\" \"GIT_CONFIG_VALUE_$_bn=$_br\"; _bn=$((_bn + 1)) ;; "
             + "(*) _bv= ;; esac; "
             + "export \"GIT_CONFIG_KEY_$_bn=$_bx\" \"GIT_CONFIG_VALUE_$_bn=$_bv\"; _bn=$((_bn + 1)); done; "
             + "IFS=$_bo; set +f; export GIT_CONFIG_COUNT=$_bn; "
@@ -71,7 +80,17 @@ enum RepoGitPrograms {
     /// clean": a status that FAILS prints this line, so a failure is never
     /// the empty output a clean tree gives (which let a worktree holding
     /// edits be discarded as empty).
-    static let statusFailed = " || echo '!! (git status failed)'"
+    static let statusFailed = " || echo '\(statusFailedLine)'"
+    static let statusFailedLine = "!! (git status failed)"
+
+    /// Shell: true when `value` (a "$var" holding such a status) holds the
+    /// failure line. "Dirty" and "couldn't look" are told apart where it
+    /// matters: a status that fails under `off` (a repository filter whose
+    /// blank process is required — every stat-dirty path it covers is
+    /// fatal) is no reason to hand the work to an agent's own git.
+    static func failedStatus(_ value: String) -> String {
+        "printf '%s\\n' \(value) | grep -qxF '\(statusFailedLine)'"
+    }
 
     /// Shell printing ` M <path>` (NUL-ended with `nul`, else newline-ended)
     /// for every checked-out submodule under `dir` (already shell-quoted, or

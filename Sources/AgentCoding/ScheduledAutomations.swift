@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 // MARK: - Model
 
@@ -15,6 +16,15 @@ import Observation
 /// already owns the bare `Automation*` prefix (AutomationServer, the
 /// `automation.*` defaults keys).
 struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
+    /// Whether `other` polls the same events as this one: same trigger, repo
+    /// or team, assignment and filters. An edit that keeps them keeps the
+    /// poll state (high-water mark, commit tip).
+    func pollsSameSource(as other: ScheduledAutomation) -> Bool {
+        trigger == other.trigger && githubRepo == other.githubRepo
+            && linearTeam == other.linearTeam && assignmentFilter == other.assignmentFilter
+            && filters == other.filters
+    }
+
     /// What starts a run. Schedules fire on the host clock; the GitHub
     /// triggers poll the repo from the host with the workspace's github.com
     /// token (never a webhook — no inbound network surface).
@@ -355,6 +365,15 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var automationID: UUID
     var firedAt: Date
     var outcome: Outcome
+
+    /// Ends the detail of an event that was already open when the trigger
+    /// started watching ("ignore backlog").
+    static let backlogMarker = "(pre-existing)"
+    /// That baseline record: kept as the event's dedup key, never a run —
+    /// the run lists leave it out.
+    var isBacklogSeed: Bool {
+        outcome == .skipped && itemKey != nil && detail.hasSuffix(Self.backlogMarker)
+    }
     /// Human-readable summary ("PR #12: fix leak", a skip reason, …).
     var detail: String
     /// The worktree branch slug a launched run was created under. Persisted
@@ -491,6 +510,10 @@ final class ScheduledAutomationStore {
         var lastError: String?
         /// Open items seen on the last successful poll (editor status line).
         var lastOpenCount: Int?
+        /// Commit trigger: the branch tip the last successful poll walked
+        /// back from — the next poll walks the branch's first-parent chain
+        /// down to it, so each landing is seen once whatever it touched.
+        var tipSHA: String?
     }
 
     private let fileURL: URL
@@ -524,16 +547,24 @@ final class ScheduledAutomationStore {
     /// Insert or replace. Any recorded next fire is dropped — the engine
     /// reschedules from the (possibly changed) recurrence on its next tick.
     func upsert(_ automation: ScheduledAutomation) {
+        let previous = automations.first { $0.id == automation.id }
         if let i = automations.firstIndex(where: { $0.id == automation.id }) {
             automations[i] = automation
         } else {
             automations.append(automation)
         }
         nextFires[automation.id.uuidString] = nil
-        // Re-baseline PR polling too: an edit may have pointed the trigger
-        // at a different repo, and a stale high-water mark from the old one
-        // could replay or swallow events.
-        pollStates[automation.id.uuidString] = nil
+        // Re-baseline event polling when an edit pointed the trigger
+        // elsewhere (another repo, branch, filter): a stale high-water mark
+        // or tip from the old source could replay or swallow events. An
+        // edit that leaves the source alone (a watch's focus, agent,
+        // prompt) keeps it — a re-baseline swallowed what landed since the
+        // last poll and listed every commit back as a skipped backlog item.
+        // Switched back on, it starts afresh: what landed while it was off
+        // isn't reviewed after the fact.
+        if previous.map({ !$0.pollsSameSource(as: automation) || (!$0.enabled && automation.enabled) }) ?? true {
+            pollStates[automation.id.uuidString] = nil
+        }
         save()
     }
 
@@ -602,10 +633,59 @@ final class ScheduledAutomationStore {
     /// mirrored board/sidebar can show "next …" like the host does.
     func mirror(automations newAutomations: [ScheduledAutomation],
                 runs newRuns: [AutomationRunRecord],
-                nextFires newNextFires: [String: Date]? = nil) {
+                nextFires newNextFires: [String: Date]? = nil,
+                timeZone newTimeZone: TimeZone? = nil) {
         if automations != newAutomations { automations = newAutomations }
         if runs != newRuns { runs = newRuns }
         if let newNextFires, nextFires != newNextFires { nextFires = newNextFires }
+        if let newTimeZone, mirroredTimeZone != newTimeZone { mirroredTimeZone = newTimeZone }
+    }
+
+    /// The clock the schedules run on: this Mac's, or — mirrored — the
+    /// host's. "Every day at 3:00" means 3:00 there; a client elsewhere
+    /// reads it with that zone named, and its local equivalent. This Mac's
+    /// is read live: stored at launch, it stayed put when the Mac changed
+    /// zone, and the editor set hours on a clock the engine no longer used.
+    var scheduleTimeZone: TimeZone {
+        _ = systemZoneChanges
+        return mirroredTimeZone ?? .current
+    }
+    /// The host's zone, as its /state names it (fat client). nil: this Mac's.
+    private var mirroredTimeZone: TimeZone?
+    /// Bumped when this Mac changes zone: views showing the schedules' clock
+    /// redraw.
+    private var systemZoneChanges = 0
+
+    /// This Mac changed time zone: drop the system zone Foundation cached,
+    /// and replan what was planted on the old clock.
+    func systemTimeZoneChanged(now: Date = Date()) {
+        NSTimeZone.resetSystemTimeZone()
+        systemZoneChanges += 1
+        replanWallClockFires(now: now)
+    }
+
+    /// Drop the planned fires of wall-clock schedules (daily, weekdays,
+    /// weekly) still ahead — planted on whatever clock was current then (a
+    /// zone change while running, or while the app was quit) — so the engine
+    /// plants them again on this one: "9:00" is 9:00 here now. Unchanged
+    /// zone: the same instant comes back. A fire already due stays, to run
+    /// or be skipped as missed; an interval keeps its phase (it's no clock
+    /// hour). A mirror's are the host's business.
+    func replanWallClockFires(now: Date = Date()) {
+        guard mirroredTimeZone == nil else { return }
+        let ahead = automations.filter { $0.trigger == .schedule && $0.frequency != .interval }
+            .map(\.id.uuidString)
+            .filter { (nextFires[$0] ?? .distantPast) > now }
+        guard !ahead.isEmpty else { return }
+        for k in ahead { nextFires[k] = nil }
+        save()
+    }
+
+    /// A calendar on the schedules' clock.
+    var scheduleCalendar: Calendar {
+        var c = Calendar.current
+        c.timeZone = scheduleTimeZone
+        return c
     }
 
     /// Every planned next fire, keyed by automation id — the /state payload
@@ -881,41 +961,205 @@ enum GitHubPRPoller {
             struct Sig: Decodable { var name: String?; var date: Date }
             var message: String
             var author: Sig?
+            var committer: Sig?
         }
         struct User: Decodable { var login: String; var type: String? }
+        struct Parent: Decodable { var sha: String }
         var sha: String
         var html_url: String
         var commit: Commit
         var author: User?
+        var parents: [Parent]?
     }
 
-    /// New commits on `branch` (or the default branch) touching `subfolder`
-    /// (repo-relative; empty = whole repo). GitHub's `path` query does the
-    /// subfolder filtering server-side. Newest first, page of 30.
-    nonisolated static func fetchCommits(repo: String, token: String,
-                                         branch: String, subfolder: String)
-        async throws -> [TriggerItem] {
-        var query = [URLQueryItem(name: "per_page", value: "30")]
-        let b = branch.trimmingCharacters(in: .whitespaces)
-        if !b.isEmpty { query.append(URLQueryItem(name: "sha", value: b)) }
-        let path = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
-        if !path.isEmpty { query.append(URLQueryItem(name: "path", value: path)) }
-        var comps = URLComponents(string: "https://api.github.com/repos/\(repo)/commits")!
-        comps.queryItems = query
-        let data = try await get(comps.url!, token: token)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([APICommit].self, from: data).map { c in
-            let short = String(c.sha.prefix(7))
-            let subject = c.commit.message.split(whereSeparator: \.isNewline).first
-                .map(String.init) ?? c.commit.message
-            return TriggerItem(
-                number: 0, title: subject, url: c.html_url, branch: b,
-                author: c.author?.login ?? c.commit.author?.name ?? "",
-                body: c.commit.message, createdAt: c.commit.author?.date ?? Date(),
-                identifier: short,
-                isBot: c.author?.type == "Bot" || (c.author?.login.hasSuffix("[bot]") ?? false))
+    /// One commit of a branch's history, as the commit trigger walks it.
+    struct BranchCommit: Equatable, Sendable {
+        var sha: String
+        var parents: [String]
+        var message: String
+        var author: String
+        var url: String
+        var date: Date
+        var isBot: Bool = false
+
+        var item: TriggerItem {
+            let subject = message.split(whereSeparator: \.isNewline).first
+                .map(String.init) ?? message
+            return TriggerItem(number: 0, title: subject, url: url, branch: "",
+                               author: author, body: message, createdAt: date,
+                               identifier: String(sha.prefix(7)), isBot: isBot)
         }
+    }
+
+    /// The most commits a walk with no tip to reach takes: a first poll's
+    /// backlog, or the newest of a history that lost its tip.
+    nonisolated static let landedCommitLimit = 30
+    /// How far a walk looks for its tip before deciding the history was
+    /// rewritten under it.
+    nonisolated static let landedCommitSearch = 500
+
+    /// What landed on a branch since `since`, oldest first: its first-parent
+    /// chain from `head` back to `since` (or to a commit `isKnown` says was
+    /// handled), at most `limit` deep — and whether it got there. A merged
+    /// branch is one entry, its merge commit: a branch's own commits are not
+    /// the branch's history — an early one may hold a bug a later one
+    /// fixed, and reviewing it reports what never reached the branch. Pure.
+    nonisolated static func landedCommits(
+        head: String, since: String?, limit: Int = landedCommitLimit,
+        isKnown: (String) -> Bool = { _ in false },
+        lookup: (String) async throws -> BranchCommit) async throws
+        -> (commits: [BranchCommit], reached: Bool) {
+        var walked: [BranchCommit] = []
+        var sha: String? = head
+        while let at = sha, at != since, !isKnown(at) {
+            guard walked.count < limit else { break }
+            let c = try await lookup(at)
+            walked.append(c)
+            sha = c.parents.first   // nil: the root
+        }
+        let reached = sha.map { $0 == since || isKnown($0) } ?? false
+        return (walked.reversed(), reached)
+    }
+
+    /// The tip the next poll walks back to: past every landed commit, oldest
+    /// first, that is `settled` (handled, or nothing to fire), up to the
+    /// first that isn't — one waiting for a run slot, or whose launch
+    /// failed, is walked again. Pure.
+    nonisolated static func settledTip(after landed: [LandedCommit], from previous: String?,
+                                       settled: (LandedCommit) -> Bool) -> String? {
+        var tip = previous
+        for c in landed {
+            guard settled(c) else { break }
+            tip = c.sha
+        }
+        return tip
+    }
+
+    /// Whether a change touches `subfolder`, from the paths it changes
+    /// (GitHub lists at most 300: a fuller list counts as touching it).
+    nonisolated static func touches(_ paths: [String], subfolder: String, listCapped: Bool) -> Bool {
+        let dir = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
+        if dir.isEmpty || listCapped { return true }
+        return paths.contains { $0 == dir || $0.hasPrefix(dir + "/") }
+    }
+
+    /// One commit that landed on the watched branch.
+    struct LandedCommit: Equatable, Sendable {
+        var sha: String
+        var item: TriggerItem
+        /// Its change — against its first parent, a merge's whole branch —
+        /// touches the trigger's subfolder (always, with none).
+        var touchesSubfolder: Bool
+        /// A merge: the tip of the branch it merged.
+        var mergedTip: String? = nil
+
+        /// A merge whose branch the old per-commit listing already
+        /// reviewed: it fired for that branch's tip.
+        func reviewedBefore(_ known: (String) -> Bool) -> Bool {
+            mergedTip.map(known) ?? false
+        }
+    }
+
+    /// Whether a commit's change touches a subfolder, by "repo sha folder":
+    /// a fact that never changes, asked again on every poll while an older
+    /// commit waits.
+    private static let touchCache = OSAllocatedUnfairLock(initialState: [String: Bool]())
+
+    /// The commits that landed on `branch` (or the default branch) since
+    /// `since`, oldest first; the tip walked from; and the commit they sit
+    /// on. Listing `/commits`
+    /// instead returns every commit reachable from the tip — a merged
+    /// branch's own commits included — and its `path` filter drops a merge
+    /// whose branch touched the folder.
+    nonisolated static func fetchLandedCommits(repo: String, token: String,
+                                               branch: String, subfolder: String,
+                                               since: String?,
+                                               isKnown: (String) -> Bool = { _ in false })
+        async throws -> (landed: [LandedCommit], head: String, base: String?) {
+        let branch = branch.trimmingCharacters(in: .whitespaces)
+        let folder = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
+        var cache: [String: BranchCommit] = [:]
+        // A page of history from `ref`, the commit itself first.
+        func page(_ ref: String) async throws -> [BranchCommit] {
+            var comps = URLComponents(string: "https://api.github.com/repos/\(repo)/commits")!
+            comps.queryItems = [URLQueryItem(name: "per_page", value: "100")]
+                + (ref.isEmpty ? [] : [URLQueryItem(name: "sha", value: ref)])
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let page = try decoder.decode([APICommit].self, from: try await get(comps.url!, token: token))
+                .map { c in
+                    BranchCommit(sha: c.sha, parents: (c.parents ?? []).map(\.sha),
+                                 message: c.commit.message,
+                                 author: c.author?.login ?? c.commit.author?.name ?? "",
+                                 url: c.html_url,
+                                 date: c.commit.committer?.date ?? c.commit.author?.date ?? Date(),
+                                 isBot: c.author?.type == "Bot"
+                                    || (c.author?.login.hasSuffix("[bot]") ?? false))
+                }
+            for c in page { cache[c.sha] = c }
+            return page
+        }
+        func lookup(_ sha: String) async throws -> BranchCommit {
+            if let c = cache[sha] { return c }
+            // Past the pages read so far (a long branch's commits came first).
+            guard let c = try await page(sha).first, c.sha == sha else {
+                throw URLError(.badServerResponse)
+            }
+            return c
+        }
+        guard let head = try await page(branch).first?.sha else {
+            throw URLError(.badServerResponse)
+        }
+        let walk = try await landedCommits(
+            head: head, since: since,
+            limit: since == nil ? landedCommitLimit : landedCommitSearch,
+            isKnown: isKnown, lookup: lookup)
+        // A tip the walk never reached: rewritten history (or a burst past
+        // the search) — the newest landings, as a first poll takes them.
+        let commits = since == nil || walk.reached
+            ? walk.commits : Array(walk.commits.suffix(landedCommitLimit))
+        if since != nil, !walk.reached {
+            BACDebug.log("automation", "\(repo): \(String(since!.prefix(7))) is no longer behind \(String(head.prefix(7))) — reviewing the newest \(commits.count) landing(s)")
+        }
+        var landed: [LandedCommit] = []
+        for c in commits {
+            var item = c.item
+            item.branch = branch
+            var touched = true
+            if !folder.isEmpty, let parent = c.parents.first {
+                let key = "\(repo) \(c.sha) \(folder)"
+                if let known = touchCache.withLock({ $0[key] }) {
+                    touched = known
+                } else {
+                    let (paths, capped) = try await changedPaths(repo: repo, token: token,
+                                                                 from: parent, to: c.sha)
+                    let found = touches(paths, subfolder: folder, listCapped: capped)
+                    touchCache.withLock { $0[key] = found }
+                    touched = found
+                }
+            }
+            landed.append(LandedCommit(sha: c.sha, item: item, touchesSubfolder: touched,
+                                       mergedTip: c.parents.count > 1 ? c.parents[1] : nil))
+        }
+        // What the landings sit on: where the walk stopped (nil: the root).
+        let base: String? = commits.isEmpty ? head : commits[0].parents.first
+        return (landed, head, base)
+    }
+
+    /// The paths a change from `from` to `to` touches (renames: both
+    /// names), and whether GitHub's list stopped at its 300-file cap.
+    private nonisolated static func changedPaths(repo: String, token: String,
+                                                 from: String, to: String)
+        async throws -> (paths: [String], capped: Bool) {
+        struct Compare: Decodable {
+            struct File: Decodable { var filename: String; var previous_filename: String? }
+            var files: [File]?
+        }
+        let data = try await get(URL(string: "https://api.github.com/repos/\(repo)/compare/\(from)...\(to)")!,
+                                 token: token)
+        let files = try JSONDecoder().decode(Compare.self, from: data).files ?? []
+        return (files.flatMap { [$0.filename] + ($0.previous_filename.map { [$0] } ?? []) },
+                files.count >= 300)
     }
 
     /// The commit at the tip of `branch` (empty = the default branch) — what
@@ -1252,6 +1496,8 @@ final class ScheduledAutomationEngine {
         self.delegate = delegate
     }
 
+    private var zoneObserver: NSObjectProtocol?
+
     /// A launched run's agent reported done (after the quiet settle) — the
     /// repository watches count a scan's findings off this.
     var onRunCompleted: ((AutomationRunRecord) -> Void)?
@@ -1287,13 +1533,26 @@ final class ScheduledAutomationEngine {
         t.tolerance = 5
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        zoneObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                BACDebug.log("automation", "time zone is now \(TimeZone.current.identifier) — replanning")
+                self.store.systemTimeZoneChanged()
+                self.tick()
+            }
+        }
         BACDebug.log("automation", "engine started — \(store.automations.count) automation(s)")
+        // The zone may have changed while the app was quit.
+        store.replanWallClockFires()
         tick()   // catch up fires missed while the app was quit
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        if let zoneObserver { NotificationCenter.default.removeObserver(zoneObserver) }
+        zoneObserver = nil
     }
 
     func tick(now: Date = Date()) {
@@ -1312,7 +1571,7 @@ final class ScheduledAutomationEngine {
     private func scheduleTick(_ a: ScheduledAutomation, now: Date) {
         guard let due = store.nextFire(for: a.id) else {
             // New, edited, or first-seen automation: plant the next fire.
-            let next = AutomationSchedule.nextFire(for: a, after: now)
+            let next = AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar)
             BACDebug.log("automation", "planted next fire for “\(a.name)” at \(next)")
             store.setNextFire(next, for: a.id)
             return
@@ -1329,7 +1588,7 @@ final class ScheduledAutomationEngine {
         } else {
             fire(a, now: now)
         }
-        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now), for: a.id)
+        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar), for: a.id)
     }
 
     private func eventTick(_ a: ScheduledAutomation, now: Date) {
@@ -1350,7 +1609,7 @@ final class ScheduledAutomationEngine {
     private func pollEvents(_ a: ScheduledAutomation, now: Date) async {
         let previous = store.pollState(for: a.id)
         var next = ScheduledAutomationStore.PRPollState(
-            lastPolledAt: now, highWater: previous?.highWater)
+            lastPolledAt: now, highWater: previous?.highWater, tipSHA: previous?.tipSHA)
         defer { store.setPollState(next, for: a.id) }
 
         guard let delegate,
@@ -1361,6 +1620,8 @@ final class ScheduledAutomationEngine {
         }
 
         let items: [TriggerItem]
+        var landed: [GitHubPRPoller.LandedCommit] = []
+        var reviewedBefore: (GitHubPRPoller.LandedCommit) -> Bool = { _ in false }
         let scope: String
         do {
             switch a.trigger {
@@ -1382,10 +1643,26 @@ final class ScheduledAutomationEngine {
                 }
                 scope = a.githubRepo
                 if a.trigger == .githubCommit {
-                    items = try await GitHubPRPoller.fetchCommits(
+                    // What landed since the settled tip — a merged branch
+                    // once, as its merge. A poll state from before tips were
+                    // kept walks back to the newest commit it fired, and
+                    // skips a merge whose branch the old listing reviewed
+                    // commit by commit.
+                    let upgraded = previous?.highWater != nil && previous?.tipSHA == nil
+                    let known = upgraded ? Set(store.runs(for: a.id).compactMap { $0.itemKey }) : []
+                    let isKnown = { (sha: String) in known.contains("commit:\(sha.prefix(7))") }
+                    let walk = try await GitHubPRPoller.fetchLandedCommits(
                         repo: a.githubRepo, token: token,
                         branch: a.filters.commitBranch,
-                        subfolder: a.filters.commitSubfolder)
+                        subfolder: a.filters.commitSubfolder,
+                        since: previous?.tipSHA, isKnown: isKnown)
+                    landed = walk.landed
+                    if upgraded {
+                        // Once: from here on the tip is where this walk stopped.
+                        next.tipSHA = walk.base
+                        reviewedBefore = { $0.reviewedBefore(isKnown) }
+                    }
+                    items = landed.filter { $0.touchesSubfolder && !reviewedBefore($0) }.map(\.item)
                 } else {
                     items = try await GitHubPRPoller.fetchOpenItems(
                         kind: a.trigger, repo: a.githubRepo, token: token,
@@ -1433,13 +1710,17 @@ final class ScheduledAutomationEngine {
         // with everything currently open — recorded as .skipped so it's
         // visible and never fires — then fire nothing this round.
         if firstPoll && a.ignoreBacklog {
-            for item in items {
+            // The commit trigger's baseline is its tip, set below: the
+            // commits already there need no record (they listed as a run of
+            // skipped commits — noise beside the reviews).
+            for item in items where a.trigger != .githubCommit {
                 store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .skipped,
-                    detail: "\(label) \(item.displayKey): \(item.title) (pre-existing)",
+                    detail: "\(label) \(item.displayKey): \(item.title) \(AutomationRunRecord.backlogMarker)",
                     itemKey: GitHubPRPoller.eventKey(item, kind: a.trigger)))
             }
             BACDebug.log("automation", "“\(a.name)”: baseline of \(scope) — seeded \(items.count) backlog item(s), firing none")
+            if a.trigger == .githubCommit { next.tipSHA = landed.last?.sha ?? next.tipSHA }
             return
         }
 
@@ -1452,7 +1733,21 @@ final class ScheduledAutomationEngine {
                 store.runs, automationID: a.id, profileID: a.profileID, now: Date(),
                 liveBranches: { delegate.liveWorktreeBranches(profileID: $0) })
                 - (launching[a.id]?.count ?? 0))
-        for item in items.sorted(by: { $0.createdAt < $1.createdAt })
+        // Commits come in the order they landed already: dates can lie.
+        let ordered = a.trigger == .githubCommit
+            ? items : items.sorted(by: { $0.createdAt < $1.createdAt })
+        // The commit trigger walks back to the newest commit everything
+        // up to which is handled — whatever happens to this round's.
+        defer {
+            if a.trigger == .githubCommit {
+                next.tipSHA = GitHubPRPoller.settledTip(after: landed, from: next.tipSHA) { c in
+                    !c.touchesSubfolder || reviewedBefore(c)
+                        || !a.filters.matches(c.item, kind: a.trigger)
+                        || processed.contains(GitHubPRPoller.eventKey(c.item, kind: a.trigger))
+                }
+            }
+        }
+        for item in ordered
         where a.filters.matches(item, kind: a.trigger) {
             let key = GitHubPRPoller.eventKey(item, kind: a.trigger)
             if processed.contains(key) { continue }   // already dispatched/blocked
@@ -2173,15 +2468,84 @@ enum AutomationDescriber {
         return a.trigger == .schedule ? .scheduled : .event
     }
 
-    static func time(_ a: ScheduledAutomation) -> String {
-        var c = DateComponents()
-        c.hour = a.hour; c.minute = a.minute
-        let date = Calendar.current.date(from: c) ?? Date()
-        return date.formatted(date: .omitted, time: .shortened)
+    /// The schedule's time of day — on the clock it runs on (`timeZone`, the
+    /// host's). Seen from another zone, that zone is named and the time here
+    /// follows: "3:00 AM EDT (4:00 PM JST here)". The sidebar showed the next
+    /// run in local time and the editor the host's wall time, unlabeled.
+    ///
+    /// The host's weekday doesn't carry over: 6:00 PM EDT is 7:00 AM JST the
+    /// next day, so a weekly run names the day it falls on here ("Sunday
+    /// 6:00 PM EDT (Monday 7:00 AM JST here)") and a weekday one the days
+    /// ("Tue–Sat 7:00 AM JST here").
+    static func time(_ a: ScheduledAutomation, timeZone: TimeZone = .current,
+                     viewer: TimeZone = .current, now: Date = Date()) -> String {
+        var cal = Calendar.current
+        cal.timeZone = timeZone
+        var date = cal.date(bySettingHour: a.hour, minute: a.minute, second: 0, of: now) ?? now
+        if a.frequency == .weekly {
+            let match = DateComponents(hour: a.hour, minute: a.minute, weekday: min(max(a.weekday, 1), 7))
+            date = cal.nextDate(after: now, matching: match, matchingPolicy: .nextTime) ?? date
+        }
+        let there = clock(date, in: timeZone)
+        guard differs(timeZone, viewer, at: date) else { return there }
+        var here = clock(date, in: viewer)
+        var local = Calendar.current
+        local.timeZone = viewer
+        let hostDay = cal.component(.weekday, from: date), localDay = local.component(.weekday, from: date)
+        if hostDay != localDay {
+            // How far the run moves on the calendar here: a day either way —
+            // two between zones more than a day apart (UTC+14 and UTC−11).
+            let raw = (localDay - hostDay + 7) % 7
+            let shift = raw <= 3 ? raw : raw - 7
+            func day(_ w: Int) -> Int { (w - 1 + shift + 7) % 7 }   // 0-based symbol index
+            switch a.frequency {
+            case .weekly:
+                here = Calendar.current.weekdaySymbols[day(min(max(a.weekday, 1), 7))] + " " + here
+            case .weekdays:
+                let symbols = Calendar.current.shortWeekdaySymbols
+                here = symbols[day(2)] + "–" + symbols[day(6)] + " " + here   // Monday…Friday there
+            case .daily, .interval:
+                break   // every day there is every day here
+            }
+        }
+        return String(format: NSLocalizedString("%1$@ %2$@ (%3$@ %4$@ here)",
+                                                comment: "describer: host time, host zone, local time, local zone"),
+                      there, zoneName(timeZone, at: date), here, zoneName(viewer, at: date))
+    }
+
+    /// A moment (a next run) in the viewer's time, its zone named when the
+    /// schedules run on another clock.
+    static func moment(_ date: Date, scheduleTimeZone: TimeZone, viewer: TimeZone = .current,
+                       withDate: Bool = true) -> String {
+        let f = DateFormatter()
+        f.timeZone = viewer
+        f.dateStyle = withDate ? .medium : .none
+        f.timeStyle = .short
+        f.doesRelativeDateFormatting = withDate
+        let s = f.string(from: date)
+        return differs(scheduleTimeZone, viewer, at: date) ? s + " " + zoneName(viewer, at: date) : s
+    }
+
+    static func differs(_ a: TimeZone, _ b: TimeZone, at date: Date) -> Bool {
+        a.secondsFromGMT(for: date) != b.secondsFromGMT(for: date)
+    }
+
+    static func zoneName(_ tz: TimeZone, at date: Date) -> String {
+        tz.abbreviation(for: date) ?? tz.identifier
+    }
+
+    private static func clock(_ date: Date, in tz: TimeZone) -> String {
+        let f = DateFormatter()
+        f.timeZone = tz
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
     }
 
     /// "Every weekday at 9:00 AM", "When a pull request is opened on acme/api", …
-    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil) -> String {
+    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil,
+                     timeZone: TimeZone = .current) -> String {
+        func time(_ a: ScheduledAutomation) -> String { Self.time(a, timeZone: timeZone) }
         let repo = a.githubRepo.isEmpty ? NSLocalizedString("a repository", comment: "describer") : a.githubRepo
         switch a.trigger {
         case .schedule:

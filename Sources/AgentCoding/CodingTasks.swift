@@ -47,7 +47,14 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// diff that was seen.
     var reviewViewed: [String: String]?
 
-    var createdAt: Date
+    var createdAt: Date { didSet { createdAtExact = createdAt.timeIntervalSince1970 } }
+    /// `createdAt` to the fraction of a second. tasks.json and the /state
+    /// snapshot write it as an ISO-8601 string in whole seconds — and stay
+    /// so: a build on macOS 14 / iOS 17 rejects a fraction there, and would
+    /// drop every task. The Backlog ranks on creation time, and a card sent
+    /// to the bottom sits a millisecond past now: truncated, a task created
+    /// later that second reloaded above it. nil: saved before this existed.
+    var createdAtExact: Double?
     /// When the task last changed (the store stamps it). nil: not since
     /// it was created.
     var updatedAt: Date?
@@ -119,6 +126,12 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// Where the user put it in the Backlog (dragged): its place, between its
+    /// neighbours' ranks. nil: where its creation put it (`backlogRank`).
+    var queueRank: Double?
+    /// The host is looking for this delivered card's worktree (since then):
+    /// `TaskDispatcher.relocateDelivery`. Not "no code" meanwhile.
+    var locatingSince: Date?
     /// What the assignee said when it merged the task on acceptance.
     var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
@@ -196,6 +209,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.rootRepo = rootRepo
         self.comments = comments
         self.createdAt = createdAt
+        self.createdAtExact = createdAt.timeIntervalSince1970
         self.startedAt = startedAt
         self.testingAt = testingAt
         self.completedAt = completedAt
@@ -278,13 +292,140 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return Date().timeIntervalSince(at) < 900
     }
 
+    /// Its place in the Backlog and in its assignee's queue: top runs first.
+    var backlogRank: Double { queueRank ?? createdTime }
+
+    /// When it was created, with the fraction `createdAt` loses on disk and
+    /// over the wire — unless `createdAt` was since set elsewhere (an older
+    /// build doesn't keep `createdAtExact` in step).
+    var createdTime: Double {
+        let whole = createdAt.timeIntervalSince1970
+        guard let exact = createdAtExact, abs(exact - whole) < 1 else { return whole }
+        return exact
+    }
+
+    /// Backlog order: by rank, oldest first among equals, then by id — a
+    /// total order, so cards created the same second don't swap places
+    /// between redraws (Swift's sort isn't stable).
+    static func backlogOrder(_ a: CodingTask, _ b: CodingTask) -> Bool {
+        if a.backlogRank != b.backlogRank { return a.backlogRank < b.backlogRank }
+        if a.createdTime != b.createdTime { return a.createdTime < b.createdTime }
+        return a.id.uuidString < b.id.uuidString
+    }
+
+    /// The rank that puts a card dropped on `target` just above it — or at
+    /// the bottom, `target` nil — among the column `ordered` (by rank),
+    /// leaving out the card being moved. A collapsed midpoint (many drops into
+    /// one gap) fails `fits`, and the drag respaces that gap.
+    static func rank(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                     now: Date = Date()) -> Double {
+        let others = ordered.filter { $0.id != moving }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }) else {
+            // The bottom: just past the last card and past now — not a whole
+            // second past the last card, which put the next new card (ranked
+            // by when it's created) above the one just sent to the bottom.
+            return max(others.last?.backlogRank ?? 0, now.timeIntervalSince1970) + 0.001
+        }
+        let after = others[i].backlogRank
+        guard i > 0 else { return after - 1 }
+        return (others[i - 1].backlogRank + after) / 2
+    }
+
+    /// New ranks when there's no room left between `target` and the card
+    /// above it (cards created the same second, or many drags into one gap):
+    /// the midpoint would equal one of them and the card would snap back.
+    /// Only that gap is respaced: every task (`all` — not just the column on
+    /// show: a hidden brief, a card in progress keep ranks the queue sorts
+    /// on) ranked between those two neighbours, in its order, with `moving`
+    /// just above `target`, spread over the open interval to the nearest
+    /// ranks outside — so nobody else changes place. Renumbering the visible
+    /// column from its minimum jumped the tasks it didn't show. Only the
+    /// ranks that change.
+    static func respaced(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                         all: [CodingTask]) -> [(UUID, Double)] {
+        let others = ordered.filter { $0.id != moving }
+        guard let card = ordered.first(where: { $0.id == moving }) ?? all.first(where: { $0.id == moving })
+        else { return [] }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }), i > 0 else {
+            return [(moving, rank(dropping: moving, before: target, in: ordered))]
+        }
+        let lowRank = others[i - 1].backlogRank, highRank = others[i].backlogRank
+        let (x, y) = (min(lowRank, highRank), max(lowRank, highRank))
+        let rest = all.filter { $0.id != moving }
+        var cluster = rest.filter { $0.backlogRank >= x && $0.backlogRank <= y }.sorted(by: backlogOrder)
+        let at = cluster.firstIndex { $0.id == target } ?? cluster.count
+        cluster.insert(card, at: at)
+        let lo = rest.map(\.backlogRank).filter { $0 < x }.max() ?? (x - 1)
+        let hi = rest.map(\.backlogRank).filter { $0 > y }.min() ?? (y + 1)
+        let step = (hi - lo) / Double(cluster.count + 1)
+        return cluster.enumerated().compactMap { n, t in
+            let r = lo + step * Double(n + 1)
+            if t.id != moving, let old = rest.first(where: { $0.id == t.id }), old.backlogRank == r { return nil }
+            return (t.id, r)
+        }
+    }
+
+    /// Whether `rank` lands between its new neighbours (it doesn't once the
+    /// gap is used up).
+    static func fits(_ rank: Double, dropping moving: UUID, in ordered: [CodingTask]) -> Bool {
+        !ordered.contains { $0.id != moving && $0.backlogRank == rank }
+    }
+
     /// A task with nothing to merge: no branch at all, a delegated delivery
     /// whose worktree was never found, or a branch measured with no change
     /// against its target. Review offers Mark Done, not git.
     var isNoCode: Bool {
         if branch == nil && branchSlug == nil { return true }
-        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return true }
+        // While the host still looks for it, the worktree may well be there:
+        // "no code" then offered a one-click Mark Done that closed the card
+        // and made the look's find be dropped.
+        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return !isLocating }
         return codeChanges == 0
+    }
+
+    /// The host is still looking for the worktree (a look that never ended —
+    /// the app quit mid-way — counts for `locateWindow` at most).
+    var isLocating: Bool {
+        guard awaitsRelocation, let at = locatingSince else { return false }
+        return Date().timeIntervalSince(at) < Self.locateWindow
+    }
+    static let locateWindow: TimeInterval = 600
+    /// A fat client waiting on the host's look, at its `polls`-th look at
+    /// the mirror (2 a second): found (true), over (false), or keep waiting
+    /// (nil) — for as long as the host shows it looking; 20 s for a host that
+    /// never does (older). A fixed 20 s gave up while the host was still
+    /// trying the next session, each up to 15 s.
+    static func locateOutcome(_ t: CodingTask?, sawLocating: Bool, polls: Int) -> Bool? {
+        guard let t else { return false }
+        if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+        if t.isLocating { return nil }
+        return sawLocating || polls >= 40 ? false : nil
+    }
+
+    /// The fat client's wait on the host's look: polls the mirrored card
+    /// every `interval` until `locateOutcome` settles, `window` passes, or
+    /// the waiting task is cancelled (false) — a closed Review window's
+    /// sleep throws at once, and without that check the loop spun the main
+    /// actor flat out for the rest of the look. `kick`: a poll now and then.
+    @MainActor
+    static func awaitLocate(interval: UInt64 = 500_000_000, window: TimeInterval = locateWindow,
+                            task: () -> CodingTask?, kick: () -> Void) async -> Bool {
+        var sawLocating = false
+        let deadline = Date().addingTimeInterval(window)
+        var i = 0
+        while Date() < deadline, !Task.isCancelled {
+            i += 1
+            try? await Task.sleep(nanoseconds: interval)
+            let t = task()
+            if t?.isLocating == true { sawLocating = true }
+            if let done = locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
+            if i % 6 == 0 { kick() }
+        }
+        return false
+    }
+
+    static var locatingText: String {
+        NSLocalizedString("Looking for the worktree…", comment: "task card: Review is still looking for a delivered branch's checkout")
     }
 
     /// A delivered card in Review whose worktree wasn't found when it came
@@ -307,7 +448,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// A parent that isn't a plain branch name (it's read from the agent's
     /// machine) is no target.
     var landingTarget: String? {
-        landing?.target ?? parentBranch.flatMap { CodingTaskEngine.isSafeBranchName($0) ? $0 : nil }
+        landing?.target ?? parentBranch.flatMap { BranchMergeCommands.isSafeBranchName($0) ? $0 : nil }
     }
 
     /// How the card got to Done — recorded, or derived for cards an older
@@ -506,7 +647,7 @@ struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
     static func queuePosition(of task: CodingTask, in tasks: [CodingTask]) -> Int? {
         guard task.stage == .backlog, let a = task.assignment else { return nil }
         let queue = tasks.filter { $0.stage == .backlog && a.same(as: $0.assignment) }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: CodingTask.backlogOrder)
         return queue.firstIndex { $0.id == task.id }.map { $0 + 1 }
     }
 
@@ -589,6 +730,14 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// A finish's snapshot of its card when it was armed: the card was moved
+/// by hand since (sent back, put back to work) when either stamp changed.
+struct TaskFinishArmed: Equatable, Sendable {
+    var startedAt: Date?
+    var testingAt: Date?
+    func moved(_ t: CodingTask) -> Bool { t.startedAt != startedAt || t.testingAt != testingAt }
+}
+
 // MARK: - Store
 
 /// Persistence for the coding board: one JSON blob at
@@ -636,12 +785,14 @@ final class CodingTaskStore {
     /// column and disappears from Backlog (it stays in the store as the
     /// phases' parent — title chip, plan overview). If every phase is
     /// later deleted, the brief resurfaces.
+    /// The Backlog column, top first: the order its assignees' queues run.
     func backlogTasks() -> [CodingTask] {
         tasks.filter { t in
             t.stage == .backlog
                 && !(t.validatedAt != nil
                      && tasks.contains { $0.parentTaskID == t.id })
         }
+        .sorted(by: CodingTask.backlogOrder)
     }
 
     func remove(_ id: UUID) {
@@ -1391,6 +1542,14 @@ struct PaneTarget: Equatable, Sendable, Codable {
         if let w = worktree, !w.isEmpty { t.expectWorktree = w }
         return t
     }
+}
+
+/// What a provider's `typeRemotely` came back with.
+enum RemoteTypeResult {
+    /// No such route (local, or an older server): type it from here.
+    case unsupported
+    /// The guard's output there; nil when that machine couldn't be asked.
+    case output(String?)
 }
 
 /// Why a guarded send typed nothing.
@@ -2555,6 +2714,10 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(task.id) else { return }
             settling.insert(task.id)
+            // The card as this finish found it: moved by hand while it waits
+            // (Move to Review, then Send Back or Back to In Progress), the
+            // finish no longer moves it.
+            let armed = TaskFinishArmed(startedAt: task.startedAt, testingAt: task.testingAt)
             // Finalize only after the session is quiet — a Stop-hook done
             // with background subagents still running isn't done.
             Task { [weak self] in
@@ -2563,7 +2726,7 @@ final class CodingTaskEngine {
                 guard let self else { return }
                 self.settling.remove(task.id)
                 await self.finalizeTaskDone(task.id, profileID: profileID,
-                                            branch: branch)
+                                            branch: branch, armed: armed)
             }
             return
         }
@@ -2622,9 +2785,11 @@ final class CodingTaskEngine {
     /// diff), stage → Testing, session tab closed. Idempotent via the
     /// stage guard.
     private func finalizeTaskDone(_ taskID: UUID, profileID: UUID,
-                                  branch: String) async {
+                                  branch: String, armed: TaskFinishArmed) async {
+        // Moved to Review while the session settled: it still needs the
+        // branch and checkout this finish looks up.
         guard let task = store.task(taskID),
-              task.stage == .inProgress || task.stage == .planning else { return }
+              task.stage == .inProgress || task.stage == .planning || Self.fillsReview(task) else { return }
         let tab = delegate?.pane(for: profileID)?.model.tabs
             .first { $0.worktreeBranch == branch }
         var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
@@ -2639,10 +2804,20 @@ final class CodingTaskEngine {
             root = root ?? m.root
         }
         BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
+        var wrote = false
         store.mutate(taskID) {
-            // The lookup above awaited: marked done, discarded or moved on
-            // meanwhile, the card stays where it is now.
+            // The lookup above awaited. Moved to Review meanwhile (Move to
+            // Review, a delegated delivery): it keeps its state, but gets
+            // the branch and checkout it lacks — without them Merge marked
+            // it done unmerged and Send Back did nothing.
+            let atWork = $0.stage == .inProgress || $0.stage == .planning
+            if Self.fillsReview($0) || (atWork && armed.moved($0)) {
+                wrote = Self.fillWorktree(&$0, branch: branch, dir: dir, parent: parent, root: root)
+                return
+            }
+            // Marked done, discarded or stopped meanwhile: it stays as it is.
             guard $0.stage == .inProgress || $0.stage == .planning else { return }
+            wrote = true
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
@@ -2654,7 +2829,8 @@ final class CodingTaskEngine {
             $0.lastError = nil
             $0.restartNeeded = nil
             if let dir { $0.worktreeDir = dir }
-            if let parent { $0.parentBranch = parent }
+            // Read from the guest (its registry, or HEAD): a plain branch name only.
+            if let parent, parent != branch, Self.isSafeBranchName(parent) { $0.parentBranch = parent }
             if let root { $0.rootRepo = root }
         }
         // The agent stays in its tab through review: send-back types into
@@ -2662,7 +2838,57 @@ final class CodingTaskEngine {
         // that wrote the change. The tab is put away when the task lands, is
         // marked done or discarded — or after a long idle spell in Review
         // (`sweepIdleReview`).
-        await measureCodeChanges(taskID)
+        if wrote { await measureCodeChanges(taskID) }
+    }
+
+    /// The branch a Review card stands for: the one recorded, or — not yet
+    /// recorded — its live tab's, when exactly one tab is the slug's (an old
+    /// `wt/<slug>` beside the new `wt/<slug>-2` is ambiguous: wait).
+    /// The guest may have suffixed the slug ("-2"), so the slug alone
+    /// names a branch that isn't this card's. nil: wait for the lookup.
+    func reviewBranch(_ t: CodingTask) -> String? {
+        if let b = t.branch { return b }
+        guard let slug = t.branchSlug else { return nil }
+        let tabs = delegate?.pane(for: t.profileID)?.model.tabs.map(\.worktreeBranch) ?? []
+        return Self.onlyBranch(tabs, slug: slug)
+    }
+
+    /// The one branch among `tabs` that is the slug's, or nil (none, or more).
+    nonisolated static func onlyBranch(_ tabs: [String?], slug: String) -> String? {
+        let hits = Set(tabs.compactMap { $0 }.filter { AutomationBoard.branchMatches($0, slug: slug) })
+        return hits.count == 1 ? hits.first : nil
+    }
+
+    nonisolated static var branchPendingText: String {
+        NSLocalizedString("The branch is still being recorded — try again in a moment.",
+                          comment: "task card: Merge/Send Back on a card whose branch isn't known yet")
+    }
+
+    /// A card a finished agent's lookup only fills in: already in Review,
+    /// not landed or closed.
+    nonisolated static func fillsReview(_ t: CodingTask) -> Bool {
+        t.stage == .testing && t.landing?.phase != .landed && t.completion == nil
+    }
+
+    /// The branch and checkout a Review card lacks, from a lookup — never
+    /// over what it has (another branch, a checkout already found), and
+    /// nothing else (its landing, its stage). True when it wrote anything.
+    @discardableResult
+    nonisolated static func fillWorktree(_ t: inout CodingTask, branch: String, dir: String?,
+                                         parent: String?, root: String?) -> Bool {
+        guard t.branch == nil || t.branch == branch else { return false }
+        let before = t
+        if t.branch == nil { t.branch = branch }
+        if (t.worktreeDir ?? "").isEmpty, let dir { t.worktreeDir = dir }
+        if (t.parentBranch ?? "").isEmpty, let parent, parent != branch, isSafeBranchName(parent) {
+            t.parentBranch = parent
+        }
+        if (t.rootRepo ?? "").isEmpty, let root { t.rootRepo = root }
+        // Merge / Send Back's "still being recorded" is moot once it is.
+        if t.lastError == branchPendingText { t.lastError = nil }
+        // A delivery's "no worktree" error is moot once there is one.
+        if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskDispatcher.noWorktreeText(branch) { t.lastError = nil }
+        return t != before
     }
 
     /// Tab-independent worktree metadata: the checkout dir from
@@ -2788,8 +3014,11 @@ final class CodingTaskEngine {
     /// confirmed; a failed one leaves them pending with the reason on the
     /// card, and Restart Session sends them.
     func sendBack(_ taskID: UUID) async {
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let delegate else { return }
+        guard let task = store.task(taskID), task.stage == .testing, let delegate else { return }
+        guard let branch = reviewBranch(task) else {
+            if task.branchSlug != nil { store.mutate(taskID) { $0.lastError = Self.branchPendingText } }
+            return
+        }
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
         let ids = Set(unsent.map(\.id))

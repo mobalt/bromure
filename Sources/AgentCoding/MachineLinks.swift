@@ -310,16 +310,40 @@ final class MachineLinkHub: @unchecked Sendable {
     // MARK: Requests down a link
 
     /// One control-API request to the machine; the status and JSON body.
+    /// `timeout` bounds each read. `total`: the whole call — the wait for a
+    /// link, the body's write and the reply — ends by then, however slowly
+    /// the link moves (a session start, which a repeat waits out: see
+    /// `SessionStartCoalescer.machineStartBudget`).
     func request(_ id: UUID, _ method: String, _ path: String, body: [String: Any]? = nil,
-                 timeout: TimeInterval = 30) -> (status: Int, json: [String: Any])? {
-        guard let fd = open(id, verb: "control") else { return nil }
+                 timeout: TimeInterval = 30, total: TimeInterval? = nil) -> (status: Int, json: [String: Any])? {
+        let deadline = total.map { Date().addingTimeInterval($0) }
+        /// What's left of `limit` before the deadline (nil: none left).
+        func within(_ limit: TimeInterval) -> TimeInterval? {
+            guard let deadline else { return limit }
+            let left = deadline.timeIntervalSinceNow
+            return left > 0 ? min(limit, left) : nil
+        }
+        func setTimeout(_ fd: Int32, _ option: Int32, _ t: TimeInterval) {
+            // Never zero: a zero timeval waits for ever.
+            let us = max(1000, Int(t * 1_000_000))
+            var tv = timeval(tv_sec: us / 1_000_000, tv_usec: Int32(us % 1_000_000))
+            setsockopt(fd, SOL_SOCKET, option, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
+        guard let wait = within(10), let fd = open(id, verb: "control", timeout: wait) else { return nil }
         defer { close(fd) }
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard let firstRead = within(timeout) else { return nil }
+        setTimeout(fd, SO_RCVTIMEO, firstRead)
         let payload = body.flatMap { try? JSONSerialization.data(withJSONObject: $0) } ?? Data()
         let head = "\(method) \(path) HTTP/1.1\r\nHost: machine\r\nContent-Type: application/json\r\n"
             + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
-        guard Self.writeAll(fd, Data(head.utf8) + payload) else { return nil }
+        // With a deadline, each write's wait is what's left of it (a write
+        // that moves a little at a time restarts the socket's own timer).
+        let beforeWrite: (() -> Bool)? = deadline == nil ? nil : {
+            guard let t = within(timeout) else { return false }
+            setTimeout(fd, SO_SNDTIMEO, t)
+            return true
+        }
+        guard Self.writeAll(fd, Data(head.utf8) + payload, before: beforeWrite) else { return nil }
         // Read to Content-Length, not to EOF: over an SSH link the machine's
         // half-close doesn't come through, and waiting for EOF sat out the
         // whole receive timeout on every call.
@@ -335,6 +359,12 @@ final class MachineLinkHub: @unchecked Sendable {
                 }
             }
             if let expected, data.count >= expected { break }
+            if deadline != nil {
+                // Each read's wait shrinks to what's left: a reply that
+                // trickles in no longer stretches the call past `total`.
+                guard let t = within(timeout) else { break }
+                setTimeout(fd, SO_RCVTIMEO, t)
+            }
             let n = read(fd, &buf, buf.count)
             if n <= 0 { break }
             data.append(contentsOf: buf[0..<n])
@@ -353,13 +383,32 @@ final class MachineLinkHub: @unchecked Sendable {
         // A new session: note its id at once, so the calls that follow it
         // (before the next poll lists it) are routed here too.
         if path == "/agent-sessions/start" {
-            let r = request(id, method, path, body: body, timeout: 60)
-            if let sid = (r?.json["id"] as? String)?.uppercased() {
+            // A client's Send clicked again while the first start crossed a
+            // slow link: the machine's answer to the first, not a second
+            // session on it.
+            let key = SessionStartCoalescer.key(
+                profile: id.uuidString, tool: body["tool"] as? String ?? "", cwd: body["cwd"] as? String,
+                cloneURL: body["cloneURL"] as? String, message: body["message"] as? String,
+                instructions: body["instructions"] as? String, room: body["room"] as? String,
+                attachments: ((body["attachments"] as? [[String: Any]]) ?? []).map(SessionStartCoalescer.attachment(wire:)))
+            var status = 502
+            let json = SessionStartCoalescer.shared.run(key) { () -> [String: Any] in
+                let r = request(id, method, path, body: body, timeout: 60,
+                                total: SessionStartCoalescer.machineStartBudget)
+                status = r?.status ?? 502
+                var j = r?.json ?? ["error": "That machine isn't connected right now"]
+                if status != 200, j["error"] == nil { j["error"] = "HTTP \(status)" }
+                return j
+            }
+            // Routed here from now on — the first start's answer or a repeat's.
+            if json["error"] == nil, let sid = (json["id"] as? String)?.uppercased() {
+                status = 200
                 cond.lock(); fragments[id]?.sessionIDs.insert(sid); cond.unlock()
                 if let u = UUID(uuidString: sid) { onSessionStarted?(u, body) }
+            } else if json["error"] == nil {
+                status = 502
             }
-            let out = (try? JSONSerialization.data(withJSONObject: r?.json ?? ["error": "That machine isn't connected right now"])) ?? Data()
-            let status = r?.status ?? 502
+            let out = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
             _ = Self.writeAll(clientFD, Data(("HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\n"
                 + "Content-Type: application/json\r\nContent-Length: \(out.count)\r\nConnection: close\r\n\r\n").utf8) + out)
             close(clientFD)
@@ -523,11 +572,13 @@ final class MachineLinkHub: @unchecked Sendable {
 
     // MARK: Byte plumbing
 
-    static func writeAll(_ fd: Int32, _ data: Data) -> Bool {
+    /// `before`: asked ahead of each write; false stops it (failed).
+    static func writeAll(_ fd: Int32, _ data: Data, before: (() -> Bool)? = nil) -> Bool {
         data.withUnsafeBytes { raw -> Bool in
             guard var base = raw.baseAddress else { return true }
             var rem = raw.count
             while rem > 0 {
+                if let before, !before() { return false }
                 let w = write(fd, base, rem)
                 if w > 0 { base += w; rem -= w; continue }
                 if w < 0 && errno == EINTR { continue }
@@ -707,15 +758,15 @@ final class AttachedMachine {
 
     /// One call to the machine's control API, for the local window.
     func control(_ method: String, _ path: String, _ body: [String: Any]?,
-                 timeout: TimeInterval = 30) async -> (status: Int, json: [String: Any])? {
-        await call(method, path, body, timeout: timeout)
+                 timeout: TimeInterval = 30, total: TimeInterval? = nil) async -> (status: Int, json: [String: Any])? {
+        await call(method, path, body, timeout: timeout, total: total)
     }
 
     private func call(_ method: String, _ path: String, _ body: [String: Any]?,
-                      timeout: TimeInterval = 30) async -> (status: Int, json: [String: Any])? {
+                      timeout: TimeInterval = 30, total: TimeInterval? = nil) async -> (status: Int, json: [String: Any])? {
         let id = self.id
         return await Task.detached {
-            MachineLinkHub.shared.request(id, method, path, body: body, timeout: timeout)
+            MachineLinkHub.shared.request(id, method, path, body: body, timeout: timeout, total: total)
         }.value
     }
 }

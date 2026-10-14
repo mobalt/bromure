@@ -393,6 +393,9 @@ struct CodingKanbanView: View {
         /// A fresh run on a new branch, when there's nothing left to resume
         /// into (repository or branch gone).
         var startOver: (UUID) -> Void = { _ in }
+        /// A Backlog card dragged to a new place: its new rank (the queue's
+        /// order too). nil: the board can't reorder.
+        var reorder: ((UUID, Double) -> Void)? = nil
         /// No review window here (iOS): the board confirms a Merge itself.
         var mergeNeedsConfirm = false
         var delete: (UUID) -> Void = { _ in }
@@ -429,6 +432,9 @@ struct CodingKanbanView: View {
     @Bindable var model: SessionListModel
     /// Fresh profile snapshot for the editor sheet's pickers.
     let profilesProvider: () -> [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     let actions: Actions
     /// The sessions behind the cards: a running card reads its agent's
     /// state exactly as the sidebar row does. nil: the tab roster alone.
@@ -537,6 +543,7 @@ struct CodingKanbanView: View {
             TaskEditorSheet(
                 task: task,
                 profiles: profilesProvider(),
+                toolSpecs: toolSpecs,
                 siblings: task.parentTaskID.map { parent in
                     store.tasks.filter { $0.parentTaskID == parent && $0.id != task.id }
                         .sorted { $0.createdAt < $1.createdAt }
@@ -845,11 +852,54 @@ struct CodingKanbanView: View {
                     onAssign: actions.assign == nil ? nil : { assigning = task },
                     onUnassign: actions.assign.map { assign in { assign(task.id, nil) } })
                     .draggable(task.id.uuidString)
+                    // Dropped on another card: just above it.
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: task.id, in: tasks)
+                    }
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
             }
+            // Dropped below the cards: to the bottom. Only there — on the
+            // whole column, a drop on the header (aimed at the top) or in a
+            // gap sent the card to the end of its assignee's queue.
+            if !tasks.isEmpty {
+                Color.clear
+                    .frame(maxWidth: .infinity, minHeight: Self.backlogTailHeight)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: nil, in: tasks)
+                    }
+            }
         }
+    }
+
+    /// The drop zone under the Backlog's last card ("to the bottom").
+    static let backlogTailHeight: CGFloat = 120
+
+    /// Backlog cards dragged to a new place in the column (top runs first —
+    /// the order their assignees' queues follow). Cards from elsewhere
+    /// aren't the Backlog's to take.
+    private func reorderBacklog(_ items: [String], before target: UUID?, in column: [CodingTask]) -> Bool {
+        guard let reorder = actions.reorder else { return false }
+        var column = column
+        var moved = false
+        for id in items.compactMap(UUID.init(uuidString:)) where id != target {
+            guard let t = store.task(id), t.stage == .backlog else { continue }
+            let rank = CodingTask.rank(dropping: id, before: target, in: column)
+            // No room left between the two neighbours: respace that gap,
+            // with every task the queue sorts on (not just this column).
+            let changes = CodingTask.fits(rank, dropping: id, in: column) ? [(id, rank)]
+                : CodingTask.respaced(dropping: id, before: target, in: column, all: store.tasks)
+            for (cid, r) in changes {
+                reorder(cid, r)
+                // The next dragged card goes after this one, in the same spot.
+                if let i = column.firstIndex(where: { $0.id == cid }) { column[i].queueRank = r }
+            }
+            column.sort(by: CodingTask.backlogOrder)
+            moved = true
+        }
+        return moved
     }
 
     private var planColumn: some View {
@@ -1030,7 +1080,7 @@ struct CodingKanbanView: View {
     /// A Review card that can go in a batch merge: something to merge, not
     /// landing already.
     private func batchable(_ t: CodingTask) -> Bool {
-        !t.isNoCode && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
+        !t.isNoCode && !t.isLocating && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
     }
 
     private func toggleReview(_ id: UUID) {
@@ -1058,27 +1108,17 @@ struct CodingKanbanView: View {
                     .help(NSLocalizedString(
                         "Merges every selected task into its target in one go: Bromure merges the clean ones itself; the rest go to one agent, which merges them all, fixes conflicts and runs the checks once.",
                         comment: "review column"))
-                    .confirmationDialog(
-                        String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), selected.count),
-                        isPresented: $confirmingBatchMerge, titleVisibility: .visible
-                    ) {
-                        Button(NSLocalizedString("Merge", comment: "landing confirm")) {
-                            mergeBatch(selected.map(\.id), false)
-                            selectedReview.removeAll()
-                        }
-                        Button(NSLocalizedString("Merge & Push", comment: "landing confirm")) {
-                            mergeBatch(selected.map(\.id), true)
-                            selectedReview.removeAll()
-                        }
-                        Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
-                    } message: {
-                        Text(String(format: NSLocalizedString(
-                            "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
-                            comment: "review column: batch merge"),
-                            Set(selected.compactMap(\.landingTarget)).sorted().joined(separator: ", "),
-                            selected.first?.workerName ?? "")
-                            // What's approved, in full: a card shows three lines of its title.
-                            + "\n\n" + selected.map { "• \($0.title)" }.joined(separator: "\n"))
+                    .sheet(isPresented: $confirmingBatchMerge) {
+                        BatchMergeSheet(
+                            titles: selected.map(\.title),
+                            targets: Set(selected.compactMap(\.landingTarget)).sorted(),
+                            agentName: selected.first?.workerName ?? "",
+                            onCancel: { confirmingBatchMerge = false },
+                            onConfirm: { push in
+                                confirmingBatchMerge = false
+                                mergeBatch(selected.map(\.id), push)
+                                selectedReview.removeAll()
+                            })
                     }
                     Button(NSLocalizedString("Clear", comment: "plan column")) { selectedReview.removeAll() }
                         .controlSize(.small)
@@ -1133,7 +1173,7 @@ struct CodingKanbanView: View {
                 toggleReview(task.id)
             })
         }
-        if !task.isNoCode, landable {
+        if !task.isNoCode, !task.isLocating, landable {
             d.append(.init(title: String(format: NSLocalizedString("Merge into %@…", comment: "kanban menu"),
                                          task.landingTarget ?? NSLocalizedString("parent", comment: "kanban menu"))) {
                 requestMerge(task)
@@ -1211,6 +1251,75 @@ struct CodingKanbanView: View {
 /// Hover-revealed ✕ on a kanban card, behind a confirmation so a stray
 /// click can't nuke a task. Removal deletes the card only — a running
 /// agent session, its branch, and its worktree are untouched.
+/// "Merge N tasks?" — a sheet, not a confirmation dialog: every approved
+/// title is listed, and a long batch grew the alert past the screen, its
+/// buttons out of reach. The list scrolls; the buttons stay put.
+struct BatchMergeSheet: View {
+    let titles: [String]
+    let targets: [String]
+    let agentName: String
+    let onCancel: () -> Void
+    let onConfirm: (_ push: Bool) -> Void
+    /// Button titles: Cancel, Merge, Merge & Push (a test passes others).
+    var labels = (cancel: NSLocalizedString("Cancel", comment: ""),
+                  merge: NSLocalizedString("Merge", comment: "landing confirm"),
+                  push: NSLocalizedString("Merge & Push", comment: "landing confirm"))
+    /// iPhone: the sheet fills the screen, no fixed width.
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    @ViewBuilder private var buttons: some View {
+        Button(labels.cancel, action: onCancel)
+            .keyboardShortcut(.cancelAction)
+        Button(labels.merge) { onConfirm(false) }
+            .keyboardShortcut(.defaultAction)
+        // ⌘↩: the one that also pushes.
+        Button(labels.push) { onConfirm(true) }
+            .keyboardShortcut(.return, modifiers: .command)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), titles.count))
+                .font(.system(size: 15, weight: .semibold))
+            Text(String(format: NSLocalizedString(
+                "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
+                comment: "review column: batch merge"),
+                targets.joined(separator: ", "), agentName))
+                .font(.system(size: 12.5))
+                .fixedSize(horizontal: false, vertical: true)
+            // What's approved, in full: a card shows three lines of its title.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(titles.enumerated()), id: \.offset) { _, title in
+                        Text("• \(title)")
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(minHeight: min(CGFloat(titles.count) * 20 + 16, 260), maxHeight: 260)
+            .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+            // Three buttons side by side don't fit every language (German
+            // runs past the width): then they stack, Merge & Push still on
+            // screen.
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Spacer()
+                    buttons
+                }
+                VStack(alignment: .trailing, spacing: 8) {
+                    buttons
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(20)
+        .frame(width: hSize == .compact ? nil : 460)
+    }
+}
+
 private struct RemovableCard: ViewModifier {
     let title: String
     let stage: CodingTask.Stage
@@ -2477,7 +2586,8 @@ private struct TestingTaskCard: View {
         .modifier(CardAccessibility(
             label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
                     TaskLandingText.line(for: task)
-                        ?? (task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                        ?? (task.isLocating ? CodingTask.locatingText
+                            : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                           : NSLocalizedString("Ready to land", comment: "task card")),
                     unsent > 0 ? TaskPlurals.comments(unsent) : nil,
                     task.lastError].compactMap { $0 }.joined(separator: ", "),
@@ -2554,7 +2664,8 @@ private struct TestingTaskCard: View {
                     quickDone
                 }
             }
-        } else if let err = task.lastError {
+        } else if let err = task.lastError, !task.isLocating {
+            // (While the look runs, its "no worktree" error is out of date.)
             HStack(alignment: .top, spacing: 6) {
                 CardErrorLine(text: err)
                 Spacer(minLength: 0)
@@ -2564,7 +2675,8 @@ private struct TestingTaskCard: View {
             // The state on its own row, the actions below it: side by side
             // at the narrowest column they wrapped mid-word.
             VStack(alignment: .leading, spacing: 6) {
-                Text(task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                Text(task.isLocating ? CodingTask.locatingText
+                     : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                    : NSLocalizedString("Ready to land", comment: "task card"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
@@ -2658,6 +2770,9 @@ private struct DoneTaskCard: View {
 struct TaskEditorSheet: View {
     @State var task: CodingTask
     let profiles: [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     /// Fellow phases of the same plan (any stage), in plan order — the
     /// pool a phase's dependencies are picked from. Empty for plain tasks.
     let siblings: [CodingTask]
@@ -2686,7 +2801,8 @@ struct TaskEditorSheet: View {
     }
 
     private var toolChoices: [Profile.ToolSpec] {
-        selectedProfile?.allToolSpecs ?? []
+        guard let p = selectedProfile else { return [] }
+        return toolSpecs?(p) ?? p.allToolSpecs
     }
 
     /// A title, or a description to take one from — not every task

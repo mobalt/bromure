@@ -33,6 +33,9 @@ enum LandingCheck: Equatable, Sendable {
     case dirtyTarget
     case noTarget
     case noBranch
+    /// `git status` in the branch's checkout failed under `RepoGitPrograms`
+    /// (a filter it can't run safely): whether it's clean is unknown.
+    case statusFailed
     /// The machine answered nothing usable.
     case failed
 }
@@ -57,6 +60,10 @@ enum LandingVerification: Equatable, Sendable {
     /// credentials, a dead URL): whether it's pushed is unknown, whatever
     /// the local merge says.
     case remoteUnreachable
+    /// In the target, but the task's checkout can't be read (`git status`
+    /// fails): whether it holds work the target doesn't is unknown — never
+    /// verified, the user looks.
+    case checkoutUnreadable
     /// The machine couldn't be asked.
     case unknown
 
@@ -64,7 +71,9 @@ enum LandingVerification: Equatable, Sendable {
     static func parse(_ out: String?) -> LandingVerification {
         guard let out else { return .unknown }
         if out.contains("NOREMOTE") { return .remoteUnreachable }
-        if out.contains("LANDED") { return .landed }
+        if out.contains("LANDED") {
+            return out.contains(CodingTaskEngine.treeUnknownWord) ? .checkoutUnreadable : .landed
+        }
         if out.contains("PENDING") { return .pending }
         return .unknown
     }
@@ -82,6 +91,9 @@ enum LandingReportOutcome: Equatable, Sendable {
     /// be checked — the user looks (the branch is kept), never Done on
     /// the agent's word.
     case remoteUnchecked
+    /// In the target, its checkout unreadable: the user looks (the branch
+    /// and checkout are kept).
+    case checkoutUnreadable
     case prOpened(String?)
     case blocked(String)
     case invalid(String)
@@ -102,6 +114,7 @@ enum LandingReportOutcome: Equatable, Sendable {
             case .landed: return .finishVerified
             case .pending: return .notYet
             case .remoteUnreachable: return .remoteUnchecked
+            case .checkoutUnreadable: return .checkoutUnreadable
             case .unknown: return .finishUnverified
             }
         case "pr_opened":
@@ -179,30 +192,10 @@ extension CodingTaskEngine {
             + "push -q --no-verify --no-signed --recurse-submodules=no --receive-pack=git-receive-pack -- \(q(remote)) \(q(refspec))"
     }
 
-    /// A remote name safe to hand git and an agent: one plain token, never
-    /// an option. Quoting stops the shell, not git — a remote named
-    /// `--exec=./pwn.sh` (whatever `.git/config` lists first: a copied
-    /// worktree, a zip with its .git, the agent itself) ran that program
-    /// on Merge & Push.
-    nonisolated static func isSafeRemoteName(_ s: String) -> Bool {
-        s.range(of: #"^[A-Za-z0-9][A-Za-z0-9._/-]*$"#, options: .regularExpression) != nil
-            && !s.contains("..") && !s.hasSuffix("/")
-    }
-
-    /// `remote` when it is safe, else nil.
-    nonisolated static func safeRemote(_ remote: String?) -> String? {
-        remote.flatMap { isSafeRemoteName($0) ? $0 : nil }
-    }
-
-    /// The shell that prints the remote a landing pushes to: "origin" when
-    /// the repo has one, else its first remote with a safe name — nothing
-    /// when none (an unsafe name is never picked). `repo`: shell-quoted.
-    /// The Swift twin is `pickRemote`.
-    nonisolated static func pickRemoteShell(repo: String) -> String {
-        "git -C \(repo) remote 2>/dev/null | awk "
-            + #"'/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/ && !/\.\./ && !/\/$/ { if ($0 == "origin") o = 1; else if (f == "") f = $0 } "#
-            + #"END { if (o) print "origin"; else if (f != "") print f }'"#
-    }
+    /// A remote name safe to hand git and an agent (`BranchMergeCommands`).
+    nonisolated static func isSafeRemoteName(_ s: String) -> Bool { BranchMergeCommands.isSafeRemoteName(s) }
+    nonisolated static func safeRemote(_ remote: String?) -> String? { BranchMergeCommands.safeRemote(remote) }
+    nonisolated static func pickRemoteShell(repo: String) -> String { BranchMergeCommands.pickRemoteShell(repo: repo) }
 
     /// A branch name safe to hand git — Bromure's commands and an agent's
     /// brief alike: what `git check-ref-format --branch` accepts, and never
@@ -245,7 +238,12 @@ extension CodingTaskEngine {
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + target)) >/dev/null 2>&1 || { echo no-target; exit 0; }; "
             + "\(pinnedGit("\"$r\"")) rev-parse -q --verify \(q("refs/heads/" + branch)) >/dev/null 2>&1 || { echo no-branch; exit 0; }; "
         if let src = sourceDir, !src.isEmpty {
-            cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo dirty-source; exit 0; fi; "
+            // A status that failed isn't uncommitted work: handing it to the
+            // agent (whose own git runs the repository's programs) for a
+            // clean checkout stalled the landing.
+            cmd += "if [ -d \(q(src)) ]; then s=$(\(TaskLitter.status(q(src)))); "
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then echo status-failed; exit 0; fi; "
+                + "if [ -n \"$s\" ]; then echo dirty-source; exit 0; fi; fi; "
         }
         cmd += "a=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(target + ".." + branch)) 2>/dev/null) || { echo failed; exit 0; }; "
             + "b=$(\(pinnedGit("\"$r\"")) rev-list --count \(q(branch + ".." + target)) 2>/dev/null) || { echo failed; exit 0; }; "
@@ -278,6 +276,7 @@ extension CodingTaskEngine {
         case "dirty-target": return .dirtyTarget
         case "no-target": return .noTarget
         case "no-branch": return .noBranch
+        case "status-failed": return .statusFailed
         default: return .failed
         }
     }
@@ -293,7 +292,17 @@ extension CodingTaskEngine {
         guard isSafeBranchName(branch), isSafeBranchName(target) else { return "echo PENDING" }
         var cmd = RepoGitPrograms.off(q(root))
         if let src = sourceDir, !src.isEmpty {
-            cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
+            cmd += "if [ -d \(q(src)) ]; then s=$(\(TaskLitter.status(q(src)))); "
+                // A status that fails (a filter git can't run safely): the
+                // checkout's state is unknown, but whether the branch is in
+                // the target isn't — still looked at, never "unknown" (an
+                // agent's "merged" then went Done unchecked).
+                // Anything else listed with it (a dirty submodule, printed
+                // after the failure) is uncommitted work: pending.
+                + "if \(RepoGitPrograms.failedStatus("\"$s\"")); then "
+                + "if printf '%s\\n' \"$s\" | grep -vqxF '\(RepoGitPrograms.statusFailedLine)'; then echo PENDING; exit 0; fi; "
+                + "echo \(Self.treeUnknownWord); "
+                + "elif [ -n \"$s\" ]; then echo PENDING; exit 0; fi; fi; "
         }
         func inRef(_ t: String) -> String {
             // Revisions after --end-of-options: never an option, whatever
@@ -445,7 +454,13 @@ extension CodingTaskEngine {
         guard let task = store.task(taskID), task.stage == .testing else { return }
         if let l = task.landing, l.phase != .needsYou { return }
         // Nothing to land: a task without a branch is simply done.
-        guard let branch = task.branch else { markDone(taskID); return }
+        guard task.branch != nil || task.branchSlug != nil else { markDone(taskID); return }
+        // One whose branch isn't recorded yet (moved to Review mid-lookup)
+        // lands its live tab's, or waits — never done, never a guess.
+        guard let branch = reviewBranch(task) else {
+            store.mutate(taskID) { $0.lastError = Self.branchPendingText }
+            return
+        }
         let wanted = targetOverride ?? task.parentBranch ?? ""
         store.mutate(taskID) {
             $0.landing = TaskLanding(mode: mode, target: wanted, phase: .checking,
@@ -628,11 +643,19 @@ extension CodingTaskEngine {
             guard let t = store.task(id), t.stage == .testing,
                   t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou,
                   t.landing?.batchLead == leadID else { continue }
-            let seen = await landingVerified(t)
+            let verdict = await landingVerification(t)
+            let seen: Bool? = switch verdict {
+            case .landed: true
+            case .pending, .remoteUnreachable, .checkoutUnreadable: false
+            case .unknown: nil
+            }
             // The look awaited: still this batch's card, still waiting? (A
             // Retry meanwhile replaced its landing — not this report's.)
             guard let now = store.task(id), now.stage == .testing, now.landing?.batchLead == leadID,
                   now.landing?.phase == .agentLanding || now.landing?.phase == .needsYou else { continue }
+            // In the target, its checkout unreadable: the look said why
+            // (statusFailedText) — not "isn't in the target".
+            if verdict == .checkoutUnreadable { continue }
             if seen == true {
                 finishLanding(id, verified: true, by: nil)
             } else if seen == nil, reportedMerged, t.delegationID != nil {
@@ -662,6 +685,37 @@ extension CodingTaskEngine {
             $0.landing?.handingOver = nil
         }
         BACDebug.log("tasks", "landing needs you: \(why)")
+    }
+
+    /// A hand-over that failed may still say so: the lead is still landing.
+    /// Moved on during the await — the assignee asked (Needs you, its
+    /// question on every card), or it was cancelled or landed — it stays.
+    nonisolated static func stillHandingOver(_ lead: CodingTask?) -> Bool {
+        lead?.landing?.phase == .agentLanding
+    }
+
+    /// A lead that moved on during a steer that then failed: what it shows
+    /// stays (the question), the steer's own error goes, and it is no longer
+    /// "handing over" — left set, the sweep never watched it again, and a
+    /// merge the assignee didn't report kept it on Needs you for good.
+    /// True when it is to be watched now (`watchLanding`): the only loop that
+    /// finishes a landing the repository shows, and nothing else would start
+    /// one for it — the brief did reach the agent, which may well merge
+    /// after its answer. Not a pull request (the agent reports it), nor a
+    /// lead that was cancelled or landed meanwhile.
+    @discardableResult
+    nonisolated static func settleFailedSteer(_ t: inout CodingTask, steerError: String?) -> Bool {
+        if let steerError, t.lastError == steerError { t.lastError = nil }
+        guard t.landing != nil else { return false }
+        t.landing?.handingOver = nil
+        return t.landing?.phase == .needsYou && t.landing?.mode != .pr
+    }
+
+    /// `settleFailedSteer` on the card, and the watch it calls for.
+    func settleFailedHandOver(_ taskID: UUID, steerError: String?) {
+        var watch = false
+        store.mutate(taskID) { watch = Self.settleFailedSteer(&$0, steerError: steerError) }
+        if watch { watchLanding(taskID) }
     }
 
     /// `batched`: part of a batch landing — what needs an agent comes back
@@ -741,6 +795,9 @@ extension CodingTaskEngine {
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry.",
                     comment: "task landing"), target))
+                return nil
+            case .statusFailed:
+                needsYou(taskID, Self.statusFailedText)
                 return nil
             case .failed where out == nil && !delegated:
                 needsYou(taskID, NSLocalizedString("Couldn't reach the workspace — is it running?",
@@ -830,7 +887,15 @@ extension CodingTaskEngine {
         }
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.steerLanding(taskID, text: prompt) else {
-                let why = store.task(taskID)?.lastError ?? NSLocalizedString(
+                let steerError = store.task(taskID)?.lastError
+                // The assignee asked while the steer awaited (the brief did
+                // reach it): its question is on every card — the steer's
+                // error must not replace it, nor sit beside it.
+                guard Self.stillHandingOver(store.task(taskID)) else {
+                    settleFailedHandOver(taskID, steerError: steerError)
+                    return
+                }
+                let why = steerError ?? NSLocalizedString(
                     "Couldn't reach the session that did the task.", comment: "task landing")
                 needsYou(taskID, why)
                 batchNeedsYou(taskID, why)
@@ -842,8 +907,15 @@ extension CodingTaskEngine {
             // "Handing over…" until that's confirmed; a failure is "Needs
             // you" with the reason right away, not after the stall timeout.
             let before = await lastAgentLine(task)
+            let errorBefore = store.task(taskID)?.lastError
             guard await deliverToConversation(taskID, branch: branch, text: prompt) else {
-                guard store.task(taskID)?.landing?.phase == .agentLanding else { return }
+                // Moved on meanwhile (the agent asked): the same as a
+                // delegated steer's — left "handing over" and unwatched.
+                guard Self.stillHandingOver(store.task(taskID)) else {
+                    let error = store.task(taskID)?.lastError
+                    settleFailedHandOver(taskID, steerError: error != errorBefore ? error : nil)
+                    return
+                }
                 let why = store.task(taskID)?.lastError ?? String(format: NSLocalizedString(
                     "The landing brief didn't reach %@.", comment: "task landing"), task.workerName)
                 store.mutate(taskID) { $0.lastError = nil }
@@ -898,7 +970,7 @@ extension CodingTaskEngine {
     func landingVerified(_ task: CodingTask) async -> Bool? {
         switch await landingVerification(task) {
         case .landed: return true
-        case .pending, .remoteUnreachable: return false
+        case .pending, .remoteUnreachable, .checkoutUnreadable: return false
         case .unknown: return nil
         }
     }
@@ -908,14 +980,46 @@ extension CodingTaskEngine {
     func landingVerification(_ task: CodingTask) async -> LandingVerification {
         guard let delegate, let branch = task.branch, let root = task.rootRepo,
               let target = task.landingTarget, !target.isEmpty else { return .unknown }
+        let observed = store.task(task.id)?.landing
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.landingVerifyCommand(root: root, branch: branch, target: target,
                                                sourceDir: task.worktreeDir,
                                                remote: task.landing.flatMap { $0.pushes ? $0.remote : nil }),
             timeout: 30)
-        return LandingVerification.parse(out)
+        // In the target, its checkout unreadable: never verified — it may
+        // hold work the target doesn't. The branch and checkout are kept
+        // (the cleanup's force-remove would take that work with it), and
+        // the user looks, as when the fast path can't read it.
+        // Only on the landing this look was for: a Retry meanwhile (a new
+        // landing, checking or handed to the agent) isn't sent back to
+        // Needs you by an old answer — and once flagged, the polls that
+        // follow change nothing.
+        let verdict = LandingVerification.parse(out)
+        if verdict == .checkoutUnreadable {
+            let effects = Self.unreadableEffects(observed: observed, now: store.task(task.id)?.landing)
+            if effects.keepBranch { store.mutate(task.id) { $0.landing?.keepBranch = true } }
+            if effects.needsYou { needsYou(task.id, Self.statusFailedText) }
+        }
+        return verdict
     }
+
+    /// What an unreadable-checkout look does to the landing: only to the
+    /// one looked at (same start). Its checkout is kept; it asks the user —
+    /// unless it moved on during the look, or already waits on the user for
+    /// any reason (this one, or the agent's own question: not replaced).
+    nonisolated static func unreadableEffects(observed: TaskLanding?,
+                                              now: TaskLanding?) -> (keepBranch: Bool, needsYou: Bool) {
+        guard let now, let observed, now.startedAt == observed.startedAt else { return (false, false) }
+        return (!now.keepBranch, now.phase == observed.phase && now.phase != .needsYou)
+    }
+
+    /// The verify command's word for a checkout whose status can't be read.
+    nonisolated static let treeUnknownWord = "TREEUNKNOWN"
+
+    nonisolated static let statusFailedText = NSLocalizedString(
+        "Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done.",
+        comment: "task landing: git status fails with the repository's programs switched off")
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
     /// What a landing that stalled says (and how a batch's delivery tells a
@@ -1251,6 +1355,8 @@ extension CodingTaskEngine {
                 "Couldn't reach %@ to check the push — the branch is kept. Check it's pushed, then mark it done or retry.",
                 comment: "task landing: the remote couldn't be fetched to verify a push"), remote))
             return (true, "Recorded, but Bromure couldn't fetch '\(remote)' to check the push — the user will look. Stop here.")
+        case .checkoutUnreadable:
+            return (true, "Recorded, but git can't read the task's checkout, so Bromure can't tell whether it's all in '\(l.target)' — the user will look. Stop here.")
         case .notYet:
             return (false, "'\(fresh.branch ?? "")' isn't in '\(l.target)' yet (or its checkout still has uncommitted changes) — finish landing it, then report again.")
         case .prOpened(let url):

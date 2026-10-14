@@ -2397,7 +2397,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Registrieren Sie links eine Quelle. Jeder Agent nutzt das Standardmodell seines Anbieters, sofern Sie rechts kein anderes wählen.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Melden Sie sich bei den gewünschten Anbietern an oder fügen Sie API-Schlüssel ein. Jeder Agent nutzt dann das Standardmodell seines Anbieters — wählen Sie rechts bei Bedarf ein bestimmtes, jetzt oder später unter Einstellungen → Modelle.";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d Modell(e)";
 "%d need you" = "%d brauchen Sie";
@@ -3565,6 +3564,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "Das neueste veröffentlichte Image, dann die empfohlenen Pakete. Ein paar Minuten.";
 "Recommended" = "Empfohlen";
 "Rebuild locally" = "Lokal neu erstellen";
+"Re-download and reinstall the agents" = "Erneut herunterladen und die Agenten neu installieren";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Andernfalls wird, solange sich das veröffentlichte Image nicht geändert hat, die gespeicherte Kopie wiederverwendet: Nur neue Pakete und Ihr Anpassungsskript werden ausgeführt.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Auf diesem Mac mit dem vollständigen Installer neu erstellt. Etwa 10 Minuten.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Ihre Workspaces bleiben unverändert – jeder bietet beim nächsten Start ein Zurücksetzen auf das neue Image an.";
 "Download & Update" = "Laden und aktualisieren";
@@ -4156,3 +4157,56 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "„%@“ wurde nicht aktualisiert";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Es wurde mit seinem bisherigen Datenträger gestartet, während die Frage offen war (eine Automation hat es gestartet). Fahren Sie es herunter und starten Sie es erneut, um wieder gefragt zu werden.";
+
+/* automation editor */
+"This workspace has no github.com token." = "Dieser Workspace hat kein github.com-Token.";
+
+/* automation editor */
+"This workspace has no Linear key." = "Dieser Workspace hat keinen Linear-Schlüssel.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "Der Host konnte sie nicht auflisten (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "Der Branch wird noch erfasst – versuche es gleich noch einmal.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Worktree wird gesucht …";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "Git kann den Checkout der Aufgabe nicht lesen, ohne das eigene Filterprogramm des Repositorys auszuführen – Bromure kann daher nicht feststellen, ob er sauber ist. Führen Sie den Merge selbst durch und markieren Sie die Aufgabe dann als erledigt.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "git status ist hier fehlgeschlagen – geänderte Dateien sind nicht markiert";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git konnte die Änderungen nicht lesen";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git schlägt in diesem Checkout ohne das eigene Filterprogramm des Repositorys fehl, das Bromure nicht ausführt. Sehen Sie ihn sich in einem Terminal an.";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "%d werden gesendet…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "Wird gesendet…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "Wird noch an den Host gesendet – die Verbindung ist langsam";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ hier)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (Zeit des Hosts)";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Jeder Lauf beginnt hier, auf einem neuen Branch: Wählen Sie den Klon des Repositorys, das der Auslöser beobachtet, im Workspace.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Jeder Lauf beginnt hier, auf einem neuen Branch: Wählen Sie den Klon von %@ im Workspace.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Dieses Fenster kann das GitHub-Token des Workspace nicht lesen — geben Sie das Repository als Besitzer/Repository ein.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Ein gemergter Branch löst einmal aus, für seinen Merge-Commit – nicht für jeden seiner Commits. Vergleiche einen Commit mit seinem ersten Elternteil, um zu sehen, was er gebracht hat: git diff {{commit.key}}^1 {{commit.key}}.";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Änderungen gelten für einen laufenden Workspace, sobald Sie sie vornehmen – ohne Neustart und ohne Sichern; „Abbrechen“ stellt die Regeln wieder her, wie sie waren. Entfernen Sie das Häkchen einer Regel, um sie auszuschalten, ohne sie zu löschen, oder schalten Sie sie über ihr Uhr-Menü für eine begrenzte Zeit ein.";

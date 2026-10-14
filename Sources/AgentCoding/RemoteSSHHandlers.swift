@@ -950,6 +950,10 @@ enum PTYSpawn {
                     var fd = Int32(3)
                     let maxFD = getdtablesize()
                     while fd < maxFD { Darwin.close(fd); fd += 1 }
+                    // The app ignores SIGPIPE (its socket writes want EPIPE);
+                    // an ignored signal survives exec, and a shell leaves it
+                    // ignored for what it runs: `yes | head` never stopped.
+                    signal(SIGPIPE, SIG_DFL)
                     execve(cPath, argvPtr.baseAddress!, envPtr.baseAddress!)
                     _exit(127)
                 }

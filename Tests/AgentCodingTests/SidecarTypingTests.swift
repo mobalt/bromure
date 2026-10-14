@@ -174,12 +174,20 @@ struct SidecarTypingTests {
     @MainActor func sessionPaneTargetAcceptsRename() {
         var s = AgentSession(profileID: UUID(), tool: .claude, title: "v5.0.1 hotfixes", cwd: "/tmp/x")
         s.windowIndex = 1
+        s.windowID = "@7"
         s.launchDisplay = "Create a worktree out of the main branch and call it hotf…"
-        let t = AgentSessionEngine.paneTarget(s)
+        let t = AgentSessionEngine.paneTarget(s, onMachine: true)
         #expect(t?.expectDisplay == s.launchDisplay)
         #expect(t?.expectDisplayAlt == "v5.0.1 hotfixes")
+        #expect(t?.expectWindowID == "@7")                 // only that window, not any wearing the title
+        // On a VM the tab keeps its launch name: the title is no identity.
+        #expect(AgentSessionEngine.paneTarget(s, onMachine: false)?.expectDisplayAlt == nil)
+        // No window id to pin it to: no second name either.
+        s.windowID = nil
+        #expect(AgentSessionEngine.paneTarget(s, onMachine: true)?.expectDisplayAlt == nil)
         // Not renamed: no second name.
+        s.windowID = "@7"
         s.title = s.launchDisplay!
-        #expect(AgentSessionEngine.paneTarget(s)?.expectDisplayAlt == nil)
+        #expect(AgentSessionEngine.paneTarget(s, onMachine: true)?.expectDisplayAlt == nil)
     }
 }

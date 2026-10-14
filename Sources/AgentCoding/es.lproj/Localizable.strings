@@ -2399,7 +2399,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Registra una fuente a la izquierda. Cada agente usa el modelo predeterminado de su proveedor salvo que elijas otro a la derecha.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Inicia sesión en los proveedores que quieras usar o pega claves de API. Cada agente usará el modelo predeterminado de su proveedor; si quieres, elige uno concreto a la derecha, ahora o más tarde en Preferencias → Modelos.";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d modelo(s)";
 "%d need you" = "%d te necesitan";
@@ -3567,6 +3566,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "La última imagen publicada y luego los paquetes recomendados. Unos minutos.";
 "Recommended" = "Recomendado";
 "Rebuild locally" = "Reconstruir localmente";
+"Re-download and reinstall the agents" = "Volver a descargar y reinstalar los agentes";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Si no, mientras la imagen publicada no cambie, se reutiliza la copia guardada: solo se ejecutan los paquetes nuevos y tu script de personalización.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Creada desde cero en este Mac con el instalador completo. Unos 10 minutos.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Tus espacios de trabajo no se modifican: cada uno ofrece restablecerse a la nueva imagen la próxima vez que se inicie.";
 "Download & Update" = "Descargar y actualizar";
@@ -4158,3 +4159,56 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "«%@» no se actualizó";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Se inició con su disco actual mientras la pregunta estaba abierta (lo lanzó una automatización). Apágalo y vuelve a iniciarlo para que se te pregunte de nuevo.";
+
+/* automation editor */
+"This workspace has no github.com token." = "Este espacio de trabajo no tiene token de github.com.";
+
+/* automation editor */
+"This workspace has no Linear key." = "Este espacio de trabajo no tiene clave de Linear.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "El host no pudo listarlos (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "La rama aún se está registrando; vuelve a intentarlo en un momento.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Buscando el worktree…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "Git no puede leer la copia de trabajo de la tarea sin ejecutar el programa de filtro propio del repositorio, así que Bromure no puede saber si está limpia. Fusiónala tú mismo y luego marca la tarea como hecha.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "git status ha fallado aquí: los archivos modificados no están marcados";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git no pudo leer los cambios";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git falla en esta copia de trabajo sin el programa de filtro propio del repositorio, que Bromure no ejecuta. Revísala en una terminal.";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "Enviando %d…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "Enviando…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "Aún enviando al anfitrión: la conexión es lenta";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ aquí)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (hora del anfitrión)";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Cada ejecución empieza aquí, en una rama nueva: elige el clon, en el espacio de trabajo, del repositorio que vigila el disparador.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Cada ejecución empieza aquí, en una rama nueva: elige el clon de %@ en el espacio de trabajo.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Esta ventana no puede leer el token de GitHub del espacio de trabajo: escribe el repositorio como propietario/repositorio.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Una rama fusionada se dispara una vez, por su commit de fusión, no por cada uno de sus commits. Compara un commit con su primer padre para ver lo que aportó: git diff {{commit.key}}^1 {{commit.key}}.";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Los cambios se aplican a un espacio de trabajo en ejecución a medida que los haces, sin reiniciar ni guardar; Cancelar restaura las reglas como estaban. Desmarca una regla para desactivarla sin eliminarla, o usa su menú de reloj para activarla durante un tiempo limitado.";

@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 /// `networkPolicy` replaces `egressRules` at every enforcement point.
 struct FirewallEditor: View {
     @Binding var draft: Profile
+    var onEdited: ((String) -> Void)? = nil
 
     private enum Mode: Hashable { case rules, openShell }
     @State private var mode: Mode = .rules
@@ -25,7 +26,8 @@ struct FirewallEditor: View {
 
             switch mode {
             case .rules:     EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
-                                               logAllowed: $draft.logAllowedConnections)
+                                               logAllowed: $draft.logAllowedConnections,
+                                               onEdited: onEdited)
             case .openShell: OpenShellPolicyEditor(draft: $draft)
             }
         }

@@ -445,6 +445,500 @@ struct TaskLandingTests {
         #expect(!v.awaitsRelocation)
     }
 
+    /// Board request: re-order Backlog cards by dragging; the order is the
+    /// queue's — top runs first.
+    @Test("a dragged Backlog card takes its place, and its assignee's queue follows the board")
+    func backlogReorder() {
+        let s = store()
+        let a = TaskAssignment(kind: .session, id: UUID(), label: "@s")
+        let t0 = Date(timeIntervalSince1970: 1000)
+        var cards: [CodingTask] = []
+        for i in 0..<3 {
+            var t = CodingTask(title: "T\(i)", profileID: UUID(), tool: .claude)
+            t.createdAt = t0.addingTimeInterval(Double(i))
+            t.assignment = a
+            s.upsert(t)
+            cards.append(t)
+        }
+        // Untouched: oldest first (the order they were queued in).
+        #expect(s.backlogTasks().map(\.title) == ["T0", "T1", "T2"])
+        #expect(TaskAssignment.queuePosition(of: cards[2], in: s.tasks) == 3)
+        // T2 dragged onto T0: above it — first in the column and the queue.
+        let top = CodingTask.rank(dropping: cards[2].id, before: cards[0].id, in: s.backlogTasks())
+        s.mutate(cards[2].id) { $0.queueRank = top }
+        #expect(s.backlogTasks().map(\.title) == ["T2", "T0", "T1"])
+        #expect(TaskAssignment.queuePosition(of: s.task(cards[2].id)!, in: s.tasks) == 1)
+        // T1 dragged onto T0: between T2 and T0.
+        let mid = CodingTask.rank(dropping: cards[1].id, before: cards[0].id, in: s.backlogTasks())
+        s.mutate(cards[1].id) { $0.queueRank = mid }
+        #expect(s.backlogTasks().map(\.title) == ["T2", "T1", "T0"])
+        // T2 dropped below the cards: to the bottom.
+        let end = CodingTask.rank(dropping: cards[2].id, before: nil, in: s.backlogTasks())
+        s.mutate(cards[2].id) { $0.queueRank = end }
+        #expect(s.backlogTasks().map(\.title) == ["T1", "T0", "T2"])
+
+        // Review: cards created the same second leave no room in between —
+        // the midpoint equals a neighbour and the card would snap back. The
+        // column is respaced instead.
+        let s2 = store()
+        var same: [CodingTask] = []
+        for i in 0..<3 {
+            var t = CodingTask(title: "S\(i)", profileID: UUID(), tool: .claude)
+            t.createdAt = t0
+            s2.upsert(t)
+            same.append(t)
+        }
+        let column = s2.backlogTasks()
+        let moving = column[2].id, target = column[1].id
+        let r = CodingTask.rank(dropping: moving, before: target, in: column)
+        #expect(!CodingTask.fits(r, dropping: moving, in: column))
+        for (id, rank) in CodingTask.respaced(dropping: moving, before: target, in: column, all: s2.tasks) {
+            s2.mutate(id) { $0.queueRank = rank }
+        }
+        #expect(s2.backlogTasks().map(\.id) == [column[0].id, moving, column[1].id])
+    }
+
+    /// Finding (CWE-670): a tight-gap respace renumbered the visible column
+    /// from floor(min) and left every other ranked task where it was — a
+    /// card in progress (back to the Backlog on Stop) or a hidden brief that
+    /// sat between two cards jumped to the end of the queue, or ahead of it.
+    @Test("a respace renumbers only the exhausted gap, every other task keeping its place")
+    func respaceIsLocal() {
+        func card(_ title: String, _ rank: Double, stage: CodingTask.Stage = .backlog) -> CodingTask {
+            var t = CodingTask(title: title, profileID: UUID(), tool: .claude)
+            t.queueRank = rank
+            t.stage = stage
+            return t
+        }
+        let a = card("A", 1000), c = card("C", 2000)
+        let running = card("running", 1500, stage: .inProgress)          // between A and C, off the column
+        let d = card("D", 3000), e = card("E", 3000), f = card("F", 4000)
+        let hidden = card("hidden brief", 3000)                           // same rank as D and E, not shown
+        let column = [a, c, d, e, f].sorted(by: CodingTask.backlogOrder)
+        let all = column + [running, hidden]
+        // F dropped onto E: D and E share a rank — no midpoint.
+        let mid = CodingTask.rank(dropping: f.id, before: e.id, in: column)
+        #expect(!CodingTask.fits(mid, dropping: f.id, in: column))
+        let changes = Dictionary(uniqueKeysWithValues: CodingTask.respaced(dropping: f.id, before: e.id,
+                                                                           in: column, all: all))
+        func rank(_ t: CodingTask) -> Double { changes[t.id] ?? t.backlogRank }
+        // Nothing outside the gap moved; the running card still sits between A and C.
+        #expect(changes[a.id] == nil && changes[c.id] == nil && changes[running.id] == nil)
+        #expect(rank(a) < rank(running) && rank(running) < rank(c))
+        // Inside: F just above E, the tasks there in their order, all above C.
+        #expect(rank(c) < rank(d) && rank(d) < rank(f) && rank(f) < rank(e))
+        let gap = [d, hidden, e, f].map(rank)
+        #expect(Set(gap).count == 4 && gap.allSatisfy { $0 > rank(c) })
+    }
+
+    /// Finding (CWE-670): a delegated batch's landing steer that failed
+    /// after the assignee had asked — its question already on every card —
+    /// replaced that question everywhere with "Couldn't reach the session",
+    /// and Retry then sent another brief to an agent waiting on an answer.
+    @Test("a failed hand-over says so only while the lead is still landing")
+    func failedHandOverKeepsQuestion() {
+        let s = store()
+        let lead = reviewTask(s)
+        s.mutate(lead.id) {
+            $0.delegationID = UUID()
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+        }
+        #expect(CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        // The assignee asked during the steer: Needs you, with its question.
+        s.mutate(lead.id) { $0.landing?.phase = .needsYou; $0.landing?.detail = "Which branch?" }
+        #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        // What the failed steer then does to it: the question stays, the
+        // steer's error goes, and it's watchable again (not handing over).
+        var asked = s.task(lead.id)!
+        asked.landing?.handingOver = true
+        asked.lastError = "steer failed"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.landing?.phase == .needsYou && asked.landing?.detail == "Which branch?")
+        #expect(asked.lastError == nil && asked.landing?.handingOver == nil)
+        // Someone else's error isn't the steer's to clear.
+        asked.lastError = "something else"
+        CodingTaskEngine.settleFailedSteer(&asked, steerError: "steer failed")
+        #expect(asked.lastError == "something else")
+        s.mutate(lead.id) { $0.landing?.phase = .landed }
+        #expect(!CodingTaskEngine.stillHandingOver(s.task(lead.id)))
+        #expect(!CodingTaskEngine.stillHandingOver(nil))
+    }
+
+    /// Finding (CWE-670): that early return left the lead unwatched — the
+    /// sweep skips a card still "handing over", and only `watchLanding`
+    /// finishes a landing git shows — so a merge after the user's answer
+    /// kept it on Needs you with Retry for good.
+    @Test("a failed hand-over the agent answered with a question is watched, its question kept")
+    @MainActor func failedHandOverIsWatched() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        let lead = reviewTask(s)
+        s.mutate(lead.id) {
+            $0.delegationID = UUID()
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .needsYou, startedAt: Date())
+            $0.landing?.detail = "Which branch?"
+            $0.landing?.handingOver = true
+            $0.lastError = "steer failed"
+        }
+        engine.settleFailedHandOver(lead.id, steerError: "steer failed")
+        let t = s.task(lead.id)
+        #expect(t?.landing?.phase == .needsYou && t?.landing?.detail == "Which branch?")
+        #expect(t?.landing?.handingOver == nil && t?.lastError == nil)
+        #expect(engine.landingWatches.contains(lead.id))
+        // A pull request isn't watched (the agent reports it), nor a lead
+        // that landed meanwhile.
+        var pr = s.task(lead.id)!
+        pr.landing?.mode = .pr
+        #expect(!CodingTaskEngine.settleFailedSteer(&pr, steerError: nil))
+        var landed = s.task(lead.id)!
+        landed.landing?.phase = .landed
+        #expect(!CodingTaskEngine.settleFailedSteer(&landed, steerError: nil))
+    }
+
+    /// Finding (CWE-362): a re-delivery whose look failed stamped "no
+    /// worktree … the diff can't be shown" on a card whose checkout the
+    /// review window's look had just found.
+    @Test("a delivery that finds no worktree leaves a card that has one without the error")
+    func missKeepsFoundCheckout() {
+        var found = CodingTask(title: "x", profileID: UUID(), tool: .claude)
+        found.stage = .testing
+        found.worktreeDir = "/w"
+        TaskDispatcher.deliveredWithoutFind(&found, branch: "wt/x")
+        #expect(found.lastError == nil && found.worktreeDir == "/w" && found.stage == .testing)
+        // No checkout: the card says why there's no diff.
+        var none = CodingTask(title: "y", profileID: UUID(), tool: .claude)
+        none.stage = .inProgress
+        TaskDispatcher.deliveredWithoutFind(&none, branch: "wt/y")
+        #expect(none.stage == .testing && none.branch == "wt/y")
+        #expect(none.lastError == TaskDispatcher.noWorktreeText("wt/y"))
+    }
+
+    /// Finding (CWE-362): a card moved to Review while a finished agent's
+    /// worktree lookup awaited got neither branch nor checkout — the
+    /// lookup's write bailed on the stage — so Merge marked it done unmerged
+    /// and Send Back did nothing.
+    @Test("a card moved to Review mid-lookup still gets its branch, and Merge lands it")
+    func reviewMidLookupKeepsBranch() {
+        let s = store()
+        let engine = CodingTaskEngine(store: s, delegate: nil)
+        var t = reviewTask(s, branch: nil)
+        t.branchSlug = "fix"
+        t.parentBranch = nil; t.rootRepo = nil
+        #expect(CodingTaskEngine.fillsReview(t))
+        // The lookup's find fills in what it lacks, nothing else.
+        t.lastError = TaskDispatcher.noWorktreeText("wt/fix")
+        #expect(CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/w", parent: "main", root: "/r"))
+        #expect(t.branch == "wt/fix" && t.worktreeDir == "/w" && t.parentBranch == "main" && t.rootRepo == "/r")
+        #expect(t.stage == .testing && t.lastError == nil)
+        // Never over what it has.
+        #expect(!CodingTaskEngine.fillWorktree(&t, branch: "wt/fix", dir: "/other", parent: "dev", root: "/x"))
+        #expect(t.worktreeDir == "/w" && t.parentBranch == "main")
+        var other = t; other.branch = "wt/else"
+        #expect(!CodingTaskEngine.fillWorktree(&other, branch: "wt/fix", dir: "/w2", parent: nil, root: nil))
+        // Landed or closed: left alone.
+        var landed = t
+        landed.landing = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
+        #expect(!CodingTaskEngine.fillsReview(landed))
+        var done = t; done.stage = .done
+        #expect(!CodingTaskEngine.fillsReview(done))
+
+        // A parent the guest read that isn't a plain branch name is left out.
+        var unsafe = reviewTask(s, branch: nil)
+        unsafe.branchSlug = "u"; unsafe.parentBranch = nil
+        CodingTaskEngine.fillWorktree(&unsafe, branch: "wt/u", dir: "/u", parent: "--upload-pack=x", root: "/r")
+        #expect(unsafe.parentBranch == nil && unsafe.worktreeDir == "/u")
+
+        // No branch recorded yet (and no live tab to read it from): Merge
+        // neither marks it done nor guesses the slug's name (the guest may
+        // have suffixed it) — it waits, saying why.
+        let bare = reviewTask(s, branch: nil)
+        s.mutate(bare.id) { $0.branchSlug = "bare" }
+        engine.land(bare.id, mode: .merge)
+        #expect(s.task(bare.id)?.stage == .testing)
+        #expect(s.task(bare.id)?.landing == nil)
+        #expect(s.task(bare.id)?.lastError == CodingTaskEngine.branchPendingText)
+        // A live tab names it only when exactly one is the slug's: an old
+        // wt/bare beside the guest's wt/bare-2 is ambiguous.
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare-2", nil, "wt/other"], slug: "bare") == "wt/bare-2")
+        #expect(CodingTaskEngine.onlyBranch(["wt/bare", "wt/bare-2"], slug: "bare") == nil)
+        #expect(CodingTaskEngine.onlyBranch(["wt/barely"], slug: "bare") == nil)
+        // The lookup then records it: the note goes.
+        s.mutate(bare.id) { CodingTaskEngine.fillWorktree(&$0, branch: "wt/bare-2", dir: "/b", parent: "main", root: "/r") }
+        #expect(s.task(bare.id)?.branch == "wt/bare-2" && s.task(bare.id)?.lastError == nil)
+    }
+
+    /// Review follow-up: Send Back (or Back to In Progress) while the
+    /// finish waited for the session to settle put the card back to work —
+    /// and the finish then moved it to Review again, under the agent working
+    /// on the feedback.
+    @Test("a card moved by hand while its finish waited is only filled in, not moved")
+    func armedFinishSeesHandMoves() {
+        var t = CodingTask(title: "x", profileID: UUID(), tool: .claude)
+        t.stage = .inProgress
+        t.startedAt = Date(timeIntervalSince1970: 100)
+        let armed = TaskFinishArmed(startedAt: t.startedAt, testingAt: t.testingAt)
+        #expect(!armed.moved(t))
+        // Move to Review, then Back to In Progress: testingAt moved.
+        var back = t; back.testingAt = Date()
+        #expect(armed.moved(back))
+        // Send Back: the session-gone clock restarted.
+        var sent = t; sent.startedAt = Date()
+        #expect(armed.moved(sent))
+    }
+
+    /// Finding (CWE-682): "to the bottom" ranked a card a whole second past
+    /// the last one — a card created in that second (ranked by when it was
+    /// created) sorted above it, and could be what its assignee ran next.
+    /// And a gap bisected until its midpoint equals a neighbour is caught.
+    @Test("a card sent to the bottom stays below cards created after the drop; a collapsed gap doesn't fit")
+    func bottomStaysBottom() {
+        let s = store()
+        let now = Date()
+        var last = CodingTask(title: "last", profileID: UUID(), tool: .claude)
+        last.createdAt = now.addingTimeInterval(-0.3)
+        var moved = CodingTask(title: "moved", profileID: UUID(), tool: .claude)
+        moved.createdAt = now.addingTimeInterval(-60)
+        s.upsert(last); s.upsert(moved)
+        let r = CodingTask.rank(dropping: moved.id, before: nil, in: s.backlogTasks(), now: now)
+        s.mutate(moved.id) { $0.queueRank = r }
+        var fresh = CodingTask(title: "fresh", profileID: UUID(), tool: .claude)
+        fresh.createdAt = now.addingTimeInterval(0.5)
+        s.upsert(fresh)
+        #expect(s.backlogTasks().map(\.title) == ["last", "moved", "fresh"])
+        // Bisecting one gap: once the midpoint lands on a neighbour, it no
+        // longer fits (the drag then respaces instead of saving it).
+        func ranked(_ title: String, _ rank: Double) -> CodingTask {
+            var t = CodingTask(title: title, profileID: UUID(), tool: .claude)
+            t.queueRank = rank
+            return t
+        }
+        let a = ranked("a", 1_760_000_000)
+        var b = ranked("b", 1_760_000_001)
+        let m = CodingTask(title: "m", profileID: UUID(), tool: .claude)
+        var exhausted = false
+        for _ in 0..<64 {
+            let col = [a, b, m].sorted(by: CodingTask.backlogOrder)
+            let mid = CodingTask.rank(dropping: m.id, before: b.id, in: col)
+            if !CodingTask.fits(mid, dropping: m.id, in: col) { exhausted = true; break }
+            b.queueRank = mid    // the next drop lands in the shrinking gap
+        }
+        #expect(exhausted)
+    }
+
+    /// Finding (CWE-682): the bottom rank is a millisecond past now, but
+    /// tasks.json and the /state snapshot write `createdAt` in whole
+    /// seconds — after a relaunch (or on a fat client) a task created later
+    /// that second came back above the card just sent to the bottom.
+    @Test("a card sent to the bottom stays below a task created later that second, saved and loaded")
+    func bottomSurvivesReload() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tasks-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let s = CodingTaskStore(fileURL: url)
+        let n = Date().timeIntervalSince1970.rounded(.down) - 10
+        let drop = Date(timeIntervalSince1970: n + 0.4)
+        var moved = CodingTask(title: "moved", profileID: UUID(), tool: .claude)
+        moved.createdAt = drop.addingTimeInterval(-60)
+        s.upsert(moved)
+        let r = CodingTask.rank(dropping: moved.id, before: nil, in: s.backlogTasks(), now: drop)
+        s.mutate(moved.id) { $0.queueRank = r }
+        var fresh = CodingTask(title: "fresh", profileID: UUID(), tool: .claude)
+        fresh.createdAt = Date(timeIntervalSince1970: n + 0.9)
+        s.upsert(fresh)
+        #expect(s.backlogTasks().map(\.title) == ["moved", "fresh"])
+
+        // Relaunch: read back from tasks.json.
+        #expect(CodingTaskStore(fileURL: url).backlogTasks().map(\.title) == ["moved", "fresh"])
+
+        // The fat client: the /state snapshot's encoding, decoded as
+        // applyTasks does.
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let mirrored = try s.tasks.map { t -> CodingTask in
+            let dict = try #require(ACAppDelegate.codableToDict(t))
+            return try dec.decode(CodingTask.self, from: JSONSerialization.data(withJSONObject: dict))
+        }
+        #expect(mirrored.filter { $0.stage == .backlog }.sorted(by: CodingTask.backlogOrder)
+            .map(\.title) == ["moved", "fresh"])
+
+        // An older build's file (no exact time) loads as before; a date set
+        // without it keeps its own second.
+        var legacy = fresh
+        legacy.createdAtExact = nil
+        #expect(legacy.createdTime == n + 0.9)
+        let old = try dec.decode(CodingTask.self, from: JSONSerialization.data(withJSONObject:
+            try #require(ACAppDelegate.codableToDict(legacy))))
+        #expect(old.createdTime == n)
+        var moved2 = fresh
+        moved2.createdAtExact = n + 0.9 - 5
+        #expect(moved2.createdTime == moved2.createdAt.timeIntervalSince1970)
+    }
+
+    /// Finding (CWE-670): while Review looked for a delivered card's
+    /// worktree, the card read as "no code" — the window said there was no
+    /// diff and offered Mark Done in one click (⌘⏎), which closed the card
+    /// and made the look drop the checkout it found.
+    @Test("a delivered card is not 'no code' while its worktree is being looked for")
+    func locatingIsNotNoCode() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        #expect(t.awaitsRelocation && t.isNoCode && !t.isLocating)
+        t.locatingSince = Date()
+        #expect(t.isLocating && !t.isNoCode)
+        // The look ended without a find: no code (Mark Done, the report).
+        t.locatingSince = nil
+        #expect(t.isNoCode)
+        // A look that never ended (the app quit mid-way) stops counting.
+        t.locatingSince = Date().addingTimeInterval(-CodingTask.locateWindow - 1)
+        #expect(!t.isLocating && t.isNoCode)
+        // Found: neither.
+        t.locatingSince = Date()
+        t.worktreeDir = "/w"
+        #expect(!t.isLocating && !t.isNoCode)
+    }
+
+    /// Finding (CWE-670): until the host's `locatingSince` reached the
+    /// window (a fat client's round trip), Review on a delivered card with
+    /// no worktree showed "No code changes" and a one-click Mark Done (⌘⏎):
+    /// a Done card drops the checkout the look then finds.
+    @Test("Review's own look counts as locating before the host's stamp arrives")
+    func windowLookIsLocating() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        #expect(t.awaitsRelocation && !t.isLocating && t.isNoCode)
+        // The window's look under way, no stamp yet: locating, never no-code.
+        #expect(TaskReviewBanner.showsLocating(t, looking: true))
+        #expect(!TaskReviewBanner.offersNoCode(t, looking: true, summaryNoCode: true))
+        // The look settled with no find: no code again.
+        #expect(!TaskReviewBanner.showsLocating(t, looking: false))
+        #expect(TaskReviewBanner.offersNoCode(t, looking: false, summaryNoCode: false))
+        // A card that isn't awaiting relocation isn't "locating" for a stale flag.
+        t.worktreeDir = "/w"
+        #expect(!TaskReviewBanner.showsLocating(t, looking: true))
+    }
+
+    /// Review: a refresh during the first look ran a second fetch that
+    /// skipped the look and ended "looking" while the first still waited.
+    @Test("the window looks until every fetch's look has settled")
+    @MainActor func windowLookCountsFetches() {
+        let r = ReviewLandingRequest()
+        r.openedLooking = true                       // first paint
+        #expect(r.looking)
+        r.lookers += 1; r.openedLooking = false      // the first fetch starts
+        r.lookers += 1                               // ⌘R: a second one
+        r.lookers -= 1                               // the second settles first
+        #expect(r.looking)
+        r.lookers -= 1
+        #expect(!r.looking)
+    }
+
+    /// Finding (CWE-670): on a fat client, ⌘R while the first fetch was
+    /// still asking the host to look ran a second fetch that saw nothing
+    /// locating yet (the stamp comes a round trip later), skipped the look,
+    /// and settled "Can't reach the machine" under "Looking for the worktree…".
+    @Test("a refresh waits for a fetch still asking for the look, then for the stamp")
+    @MainActor func refreshWaitsForAnotherFetchsLook() {
+        let r = ReviewLandingRequest()
+        r.lookers += 1; r.relocating += 1            // the first fetch asks the host
+        r.lookers += 1                               // ⌘R: a second fetch, past its own look
+        #expect(r.othersLooking(isLocating: false))  // the stamp isn't here yet: it waits
+        r.relocating -= 1                            // the host answered…
+        #expect(r.othersLooking(isLocating: true))   // …and is looking: still waits
+        #expect(!r.othersLooking(isLocating: false)) // the look is over: it loads
+    }
+
+    /// Review: re-opening Review cancels the load inside the look; a fat
+    /// client's wait for the host's stamp returns at once when cancelled — the
+    /// count must hold until the look itself is over, not until its caller
+    /// gives up.
+    @Test("a cancelled load's look stays counted until the look ends")
+    @MainActor func cancelledLoadKeepsItsLook() async throws {
+        let r = ReviewLandingRequest()
+        let task = CodingTask(title: "t", profileID: UUID(), tool: .claude)
+        let hostDone = Flag()
+        // Like `awaitLocate`: waits for the host, gives up when cancelled.
+        let relocate: (CodingTask) async -> Bool = { _ in
+            while !hostDone.isSet {
+                if Task.isCancelled { return false }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return true
+        }
+        let load = Task { await TaskReviewWindowManager.look(for: task, request: r, relocate: relocate) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(r.relocating == 1)
+        load.cancel()                                // the window re-opened
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(r.relocating == 1)                   // the look goes on, counted
+        #expect(r.othersLooking(isLocating: false))  // a newer load waits for it
+        hostDone.set()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(r.relocating == 0)
+    }
+
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// Finding (CWE-670): a fat client gave up on the host's look after a
+    /// fixed 20 s, while the host was still trying sessions one after
+    /// another (up to 15 s each) — and never showed the worktree found.
+    @Test("a fat client keeps waiting while the host is looking, and stops when it ends")
+    func fatClientWaitsForTheLook() {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        t.locatingSince = Date()
+        // Still looking at 2 min: wait.
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 240) == nil)
+        // The look ended with no find: over.
+        t.locatingSince = nil
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 241) == false)
+        // An older host never shows the stamp: 20 s.
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 39) == nil)
+        #expect(CodingTask.locateOutcome(t, sawLocating: false, polls: 40) == false)
+        // Found.
+        t.worktreeDir = "/w"
+        #expect(CodingTask.locateOutcome(t, sawLocating: true, polls: 3) == true)
+        #expect(CodingTask.locateOutcome(nil, sawLocating: true, polls: 3) == false)
+    }
+
+    /// Finding (CWE-400): closing Review cancelled the fat client's wait on
+    /// the host's look; its sleep then threw at once and the loop spun the
+    /// main actor flat out for the rest of the look (up to 10 min).
+    @Test("a cancelled locate wait stops at once instead of spinning")
+    @MainActor func locateWaitStopsWhenCancelled() async {
+        let s = store()
+        var t = reviewTask(s)
+        t.delegationID = UUID()
+        t.worktreeDir = nil
+        t.locatingSince = Date()   // the host keeps looking the whole time
+        let card = t
+        var polls = 0
+        let wait = Task { @MainActor in
+            await CodingTask.awaitLocate(task: { polls += 1; return card }, kick: {})
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        wait.cancel()
+        let started = Date()
+        let found = await wait.value
+        #expect(!found)
+        #expect(Date().timeIntervalSince(started) < 1)
+        #expect(polls < 10)    // ~2 a second until cancelled, not thousands after
+        // Not cancelled, the look's end still settles it.
+        var later = t
+        later.worktreeDir = "/w"
+        let laterCard = later
+        #expect(await CodingTask.awaitLocate(interval: 10_000_000, task: { laterCard }, kick: {}))
+    }
+
     /// Board report: a bulk review gave the designated agent one message
     /// per card. Delegated cards given to one session now go as one batch.
     @Test("delegated cards for one session batch together; a room's or a fresh agent's land alone")

@@ -148,6 +148,18 @@ struct Delegation: Identifiable, Codable, Equatable, Sendable {
     /// "accepted" / "rejected" once the parent closed it.
     var verdict: String?
     var failure: String?
+    /// Failed only because its other session was out of view too long (its
+    /// Mac rebooting, the Sidecar restarting): the status it had then. The
+    /// session coming back — seen again, or speaking — picks it up there.
+    var goneFrom: Status?
+    /// Over (cancelled, closed) while its delegate's session was out of
+    /// view: that session is put away when it comes back — else it showed
+    /// up active again, its agent still at work on a cancelled task.
+    var retireWhenBack: Bool?
+    /// Where the child session lives, as last seen: "local", or the attached
+    /// machine's id. Tells "gone because its machine is away" (wait) from
+    /// "gone from a machine that's back" (deleted: the end).
+    var childHost: String?
     /// The parent was told the delegate's agent ended without delivering
     /// (once per ending — the delegation stays open, a steer resumes it).
     var childEndedNotedAt: Date?

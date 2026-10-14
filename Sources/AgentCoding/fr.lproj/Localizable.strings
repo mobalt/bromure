@@ -2397,7 +2397,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Enregistrez une source à gauche. Chaque agent utilise le modèle par défaut de son fournisseur, sauf si vous en choisissez un à droite.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Connectez-vous aux fournisseurs que vous voulez utiliser, ou collez des clés d’API. Chaque agent utilise alors le modèle par défaut de son fournisseur — choisissez-en un précis à droite si vous le souhaitez, maintenant ou plus tard dans Préférences → Modèles.";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d modèle(s)";
 "%d need you" = "%d vous attendent";
@@ -3565,6 +3564,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "La dernière image publiée, puis les paquets recommandés. Quelques minutes.";
 "Recommended" = "Recommandé";
 "Rebuild locally" = "Reconstruire localement";
+"Re-download and reinstall the agents" = "Retélécharger et réinstaller les agents";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Sinon, tant que l'image publiée n'a pas changé, la copie enregistrée est réutilisée : seuls les nouveaux paquets et votre script de personnalisation s'exécutent.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Construite de zéro sur ce Mac avec l’installateur complet. Environ 10 minutes.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Vos espaces de travail ne sont pas modifiés — chacun propose de se réinitialiser sur la nouvelle image à son prochain démarrage.";
 "Download & Update" = "Télécharger et mettre à jour";
@@ -4156,3 +4157,56 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "« %@ » n’a pas été mis à niveau";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Il a démarré sur son disque actuel pendant que la question était affichée (une automatisation l’a lancé). Arrêtez-le puis redémarrez-le pour que la question vous soit reposée.";
+
+/* automation editor */
+"This workspace has no github.com token." = "Cet espace de travail n’a pas de jeton github.com.";
+
+/* automation editor */
+"This workspace has no Linear key." = "Cet espace de travail n’a pas de clé Linear.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "L’hôte n’a pas pu les lister (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "La branche est en cours d’enregistrement — réessayez dans un instant.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Recherche du worktree…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "Git ne peut pas lire l’extraction de la tâche sans exécuter le programme de filtre propre au dépôt : Bromure ne peut donc pas savoir si elle est propre. Fusionnez-la vous-même, puis marquez la tâche comme terminée.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "Échec de git status ici — les fichiers modifiés ne sont pas signalés";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git n’a pas pu lire les modifications";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git échoue dans cette extraction sans le programme de filtre propre au dépôt, que Bromure n’exécute pas. Examinez-la dans un terminal.";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "Envoi de %d…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "Envoi…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "Envoi à l’hôte en cours — la liaison est lente";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ ici)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (l’heure de l’hôte)";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Chaque exécution démarre ici, sur une nouvelle branche : choisissez le clone, dans l’espace de travail, du dépôt que surveille le déclencheur.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Chaque exécution démarre ici, sur une nouvelle branche : choisissez le clone de %@ dans l’espace de travail.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Cette fenêtre ne peut pas lire le jeton GitHub de l’espace de travail — saisissez le dépôt sous la forme propriétaire/dépôt.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Une branche fusionnée déclenche une seule fois, pour son commit de fusion — pas pour chacun de ses commits. Comparez un commit à son premier parent pour voir ce qu’il apporte : git diff {{commit.key}}^1 {{commit.key}}.";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Les modifications s’appliquent à un espace de travail en cours d’exécution au fur et à mesure, sans redémarrage ni enregistrement ; Annuler remet les règles telles qu’elles étaient. Décochez une règle pour la désactiver sans la supprimer, ou utilisez son menu horloge pour l’activer pour une durée limitée.";

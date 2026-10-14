@@ -253,6 +253,9 @@ public final class TokenSwapper: @unchecked Sendable {
             }
 
             let inHeader = (headerStr.range(of: entry.fake) != nil)
+            // `curl -u user:$SECRET` (any HTTP Basic client) sends the fake
+            // base64-encoded: look inside the Basic credentials too.
+            let inBasic = !inHeader && Self.basicCredentialsContain(headerStr, entry.fake)
             // Body sweep is only attempted for entries that opted in
             // (refresh tokens, etc.). Cheap pre-check on raw bytes so
             // we don't run the consent broker for non-matching entries.
@@ -264,7 +267,7 @@ public final class TokenSwapper: @unchecked Sendable {
             let inBody: Bool = bodySweep
                 ? (newBody.range(of: fakeData) != nil)
                 : false
-            guard inHeader || inBody else { continue }
+            guard inHeader || inBasic || inBody else { continue }
 
             // Gate on consent if the entry is flagged. An entry is flagged
             // (consentCredentialID set) exactly when the user opted into
@@ -299,6 +302,14 @@ public final class TokenSwapper: @unchecked Sendable {
                 ))
             }
 
+            for _ in 0..<Self.swapBasicCredentials(&headerStr, fake: entry.fake, real: entry.real) {
+                swaps.append(SwapRecord(
+                    fakePreview: Self.preview(entry.fake),
+                    realPreview: Self.preview(entry.real),
+                    host: host
+                ))
+            }
+
             if inBody {
                 let realData = Data(entry.real.utf8)
                 while let r = newBody.range(of: fakeData) {
@@ -322,9 +333,8 @@ public final class TokenSwapper: @unchecked Sendable {
         // header was present; a stale length truncates the upstream's
         // view of the body and breaks JSON parsing on the OAuth
         // endpoint. We re-derive the length unconditionally when the
-        // body changed; otherwise the original request bytes are
-        // shipped verbatim (header-only swaps preserve length because
-        // fake and real are length-matched).
+        // body changed. A header-only swap (one inside Basic credentials
+        // included) may change the header's length, never the body's.
         if bodyDirty {
             headerStr = Self.replaceContentLength(headerStr, newLength: newBody.count)
         }
@@ -334,6 +344,75 @@ public final class TokenSwapper: @unchecked Sendable {
         out.append(headerBytes)
         out.append(newBody)
         return SwapResult(modified: out, swaps: swaps)
+    }
+
+    /// The `Authorization` / `Proxy-Authorization` header lines carrying
+    /// HTTP Basic credentials: (line range, decoded `user:password` bytes).
+    private static func basicCredentialLines(_ headerStr: String) -> [(Range<String.Index>, Data)] {
+        var out: [(Range<String.Index>, Data)] = []
+        var lineStart = headerStr.startIndex
+        while lineStart < headerStr.endIndex {
+            // ("\r\n" is ONE Character in Swift: step past its range.)
+            let crlf = headerStr.range(of: "\r\n", range: lineStart..<headerStr.endIndex)
+            let lineEnd = crlf?.lowerBound ?? headerStr.endIndex
+            let line = headerStr[lineStart..<lineEnd]
+            if let colon = line.firstIndex(of: ":") {
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                let parts = value.split(separator: " ", maxSplits: 1)
+                if name == "authorization" || name == "proxy-authorization",
+                   parts.count == 2, parts[0].lowercased() == "basic",
+                   let decoded = decodeBase64(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    out.append((lineStart..<lineEnd, decoded))
+                }
+            }
+            lineStart = crlf?.upperBound ?? headerStr.endIndex
+        }
+        return out
+    }
+
+    /// Decoded Basic credentials of a header block (compromise scan).
+    static func basicCredentials(in headerStr: String) -> [Data] {
+        basicCredentialLines(headerStr).map(\.1)
+    }
+
+    static func basicCredentialsContain(_ headerStr: String, _ fake: String) -> Bool {
+        let f = Data(fake.utf8)
+        return basicCredentialLines(headerStr).contains { $0.1.range(of: f) != nil }
+    }
+
+    /// Swap `fake` for `real` inside every Basic credential that holds
+    /// it, re-encoded; the header keeps its name and scheme. Returns the
+    /// number of substitutions.
+    static func swapBasicCredentials(_ headerStr: inout String, fake: String, real: String) -> Int {
+        let f = Data(fake.utf8), r = Data(real.utf8)
+        var count = 0
+        // Last line first: earlier ranges stay valid while later ones change.
+        for (range, decoded) in basicCredentialLines(headerStr).reversed() {
+            var creds = decoded
+            var n = 0
+            var from = creds.startIndex
+            while let hit = creds.range(of: f, in: from..<creds.endIndex) {
+                creds.replaceSubrange(hit, with: r)
+                from = hit.lowerBound + r.count
+                n += 1
+            }
+            guard n > 0 else { continue }
+            let line = headerStr[range]
+            let name = line[..<line.firstIndex(of: ":")!]
+            let scheme = line[line.index(after: line.firstIndex(of: ":")!)...]
+                .trimmingCharacters(in: .whitespaces).split(separator: " ").first ?? "Basic"
+            headerStr.replaceSubrange(range, with: "\(name): \(scheme) \(creds.base64EncodedString())")
+            count += n
+        }
+        return count
+    }
+
+    /// Standard base64, padding optional (some clients drop it).
+    private static func decodeBase64(_ s: String) -> Data? {
+        guard !s.isEmpty else { return nil }
+        let padded = s + String(repeating: "=", count: (4 - s.count % 4) % 4)
+        return Data(base64Encoded: padded)
     }
 
     /// Patch the `Content-Length` header in a CRLF-delimited HTTP
@@ -471,7 +550,16 @@ public final class TokenSwapper: @unchecked Sendable {
             return []
         }
 
-        let matches = scanner.scan(rawRequest)
+        // A fake inside Basic credentials is base64 on the wire: scan the
+        // decoded credentials as well.
+        var scanned = rawRequest
+        if let end = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
+           let head = String(data: rawRequest.subdata(in: 0..<end), encoding: .isoLatin1) {
+            for decoded in Self.basicCredentials(in: head) {
+                scanned.append(Data("\n".utf8)); scanned.append(decoded)
+            }
+        }
+        let matches = scanner.scan(scanned)
         if matches.isEmpty { return [] }
 
         // The user authorized this host for the session via the alert's

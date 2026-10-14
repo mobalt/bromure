@@ -732,6 +732,11 @@ final class AgentSessionStore {
     /// machine is back, decides again.
     func clearLiveness(outside attached: Set<UUID>) {
         var changed = false
+        // An index the probe never stamped, its machine gone meanwhile: it
+        // may be anyone's tab when the machine is back.
+        for s in sessions where !attached.contains(s.profileID) && s.windowID == nil {
+            if let w = s.windowIndex { inheritedIndex[s.id] = w }
+        }
         for i in sessions.indices where sessions[i].agentAlive != nil
             && !attached.contains(sessions[i].profileID) {
             sessions[i].agentAlive = nil
@@ -1196,6 +1201,20 @@ final class AgentSessionStore {
     private var deadSince: [UUID: Date] = [:]
     private var missingSince: [UUID: Date] = [:]
 
+    /// Unstamped bindings this run can't vouch for: read from disk (the
+    /// guest may have rebooted since), or held while their machine was
+    /// away. Anything else unstamped was bound from the live roster in this
+    /// run — reconcile just saw that tab at that index.
+    private var inheritedIndex: [UUID: Int] = [:]
+
+    /// A binding reconcile made from the live roster in this run and the
+    /// probe hasn't stamped yet (no window id, so `reapArchived` could never
+    /// prove it): its index is this session's tab, closable now.
+    func boundThisRun(_ s: AgentSession) -> Bool {
+        guard let w = s.windowIndex, s.windowID == nil else { return false }
+        return inheritedIndex[s.id] != w
+    }
+
     /// The session bound to a workspace's tmux window, if any.
     /// A live (not archived, not deleted) one first: an archived session can
     /// still hold the index a newcomer just took, until the probe lets go.
@@ -1573,6 +1592,9 @@ final class AgentSessionStore {
                 }
             }
             return s
+        }
+        for s in sessions where s.windowID == nil {
+            if let w = s.windowIndex { inheritedIndex[s.id] = w }
         }
         // Twins an earlier build left behind go now, before anything shows;
         // so does anything deleted whose tab is gone.

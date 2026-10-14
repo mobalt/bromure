@@ -109,4 +109,64 @@ struct ConsentPromptTests {
         _ = await ask("POST", "/", sql: "DROP TABLE orders")
         #expect(prompts == 4)
     }
+
+    /// Finding (CWE-285): a Guardrails deny made while the agent's prompt was
+    /// up was undone by that prompt — "Don't allow" shrank a session deny to
+    /// 5 minutes, "Allow" (Return) let the in-flight request through.
+    /// Finding (CWE-670): the overtaken panel stayed up holding the key —
+    /// after a revoke ("ask next time") its Allow was ignored, and every new
+    /// request parked on it and was refused until it timed out.
+    @Test("A Guardrails decision overtakes an open prompt: withdrawn, its waiters get the decision, the key is free")
+    func guardrailsOvertakesOpenPrompt() async throws {
+        install()
+        let p = ConsentPanelPresenter.shared
+        let broker = ConsentBroker()
+        let profile = UUID()
+        async let first = broker.consent(profileID: profile, credentialID: "aws",
+                                         credentialDisplayName: "AWS", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        async let waiter = broker.consent(profileID: profile, credentialID: "aws",
+                                          credentialDisplayName: "AWS", scopeHint: "")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await broker.deny(profileID: profile, credentialID: "aws", for: nil, credentialDisplayName: "AWS")
+        #expect(await waiter == false)          // answered by the deny, not the prompt
+        #expect(await first == false)           // the prompt withdrawn: the deny stands
+        #expect(!p.answer(profileID: profile, choice: 0))   // nothing left on screen to Allow
+        let deny = await broker.snapshot().first { $0.profileID == profile }
+        #expect(deny?.kind == .deny && deny?.isSessionScoped == true)
+
+        // Revoked — "ask next time": the next request asks, and its Allow counts.
+        await broker.revoke(profileID: profile, credentialID: "aws")
+        async let again = broker.consent(profileID: profile, credentialID: "aws",
+                                         credentialDisplayName: "AWS", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(p.answer(profileID: profile, choice: 0))   // a fresh prompt, Allow for 1 hour
+        #expect(await again == true)
+        #expect(await broker.snapshot().first { $0.profileID == profile }?.kind == .allow)
+
+        // A grant made while the prompt is up stands; the prompt goes.
+        let other = UUID()
+        async let asked = broker.consent(profileID: other, credentialID: "gh",
+                                         credentialDisplayName: "GitHub", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await broker.grant(profileID: other, credentialID: "gh", .allowSession, credentialDisplayName: "GitHub")
+        #expect(await asked == true)
+        #expect(!p.answer(profileID: other, choice: 3))
+        #expect(await broker.snapshot().first { $0.profileID == other }?.kind == .allow)
+
+        // Session teardown with a prompt up: withdrawn and refused; the next
+        // session's request asks afresh instead of parking on it.
+        let torn = UUID()
+        async let pending = broker.consent(profileID: torn, credentialID: "ssh",
+                                           credentialDisplayName: "SSH", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await broker.revokeAll(profileID: torn)
+        #expect(await pending == false)
+        async let next = broker.consent(profileID: torn, credentialID: "ssh",
+                                        credentialDisplayName: "SSH", scopeHint: "")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(p.answer(profileID: torn, choice: 1))       // Allow for 5 minutes
+        #expect(await next == true)
+        #expect(p.openCount == 0)
+    }
 }

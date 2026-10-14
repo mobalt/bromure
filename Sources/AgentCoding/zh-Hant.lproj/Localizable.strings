@@ -2400,7 +2400,6 @@
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "在左側註冊一個來源。除非你在右側另選，每個代理程式都使用其供應商的預設模型。";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "登入你要使用的供應商，或貼上 API 金鑰。每個代理程式隨後使用其供應商的預設模型——如有需要，可在右側選擇特定模型，現在或之後在「偏好設定 → 模型」中設定。";
 
-
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d 個模型";
 "%d need you" = "%d 個需要你處理";
@@ -3568,6 +3567,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "取得最新發布的映像檔，然後安裝建議的套件。需要幾分鐘。";
 "Recommended" = "建議";
 "Rebuild locally" = "在本機重建";
+"Re-download and reinstall the agents" = "重新下載並重新安裝代理程式";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "否則，只要發布的映像檔沒有變更，就會重複使用已儲存的副本：只會執行新的套件和你的自訂指令碼。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "在這台 Mac 上用完整安裝程式從頭建立。大約 10 分鐘。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作區不會被更動——每個工作區下次啟動時都會提示重設到新映像檔。";
 "Download & Update" = "下載並更新";
@@ -4159,3 +4160,56 @@
 /* Base image upgrade skipped (a boot started during the prompt) */
 "“%@” wasn't upgraded" = "「%@」未升級";
 "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "在顯示此問題時，它已使用目前的磁碟啟動（由自動化啟動）。請將其關閉後重新啟動，以再次詢問。";
+
+/* automation editor */
+"This workspace has no github.com token." = "此工作區沒有 github.com 權杖。";
+
+/* automation editor */
+"This workspace has no Linear key." = "此工作區沒有 Linear 金鑰。";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "主機無法列出它們（HTTP %d）。";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "分支仍在記錄中——請稍後再試。";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "正在尋找工作樹…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "不執行儲存庫自帶的過濾程式，Git 就無法讀取該任務的檢出，因此 Bromure 無法判斷它是否乾淨。請自行合併，然後將任務標記為完成。";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "此處 git status 失敗 — 未標出已變更的檔案";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git 無法讀取變更";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "在此檢出中，沒有儲存庫自帶的過濾程式（Bromure 不會執行它）Git 就會失敗。請在終端機中查看。";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "正在傳送 %d 項…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "正在傳送…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "仍在傳送到主機——連線較慢";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@（本地 %3$@ %4$@）";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@（主機時間）";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "每次執行都從這裡開始，在新分支上：請選擇工作區中該觸發條件所監看儲存庫的複製。";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "每次執行都從這裡開始，在新分支上：請選擇工作區中 %@ 的複製。";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此視窗無法讀取工作區的 GitHub 權杖——請以 擁有者/儲存庫 的形式輸入儲存庫。";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合併的分支只觸發一次，針對其合併提交，而不是其中的每個提交。將提交與其第一個父提交比較，即可看到它帶來的變更：git diff {{commit.key}}^1 {{commit.key}}。";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "變更會在你修改時立即套用到執行中的工作區，無需重新啟動或儲存；按「取消」會將規則還原。取消勾選某條規則即可關閉它而不刪除，或使用其時鐘選單限時開啟。";
