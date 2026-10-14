@@ -3215,6 +3215,10 @@ final class RemoteHostWindow: NSWindow {
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// A settings save still resolving, by workspace (its window may be
+    /// closed already): a reopen waits for it, so the new editor reads what
+    /// the save left in force and the old save can't touch the new window.
+    private var settingsSaves: [Profile.ID: Task<String?, Error>] = [:]
     /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
     /// local window opens, backed by a `RemoteTraceStore` that fetches the
     /// remote's records + decrypted bodies over the tunnel. One per host window.
@@ -3941,6 +3945,7 @@ final class RemoteHostWindow: NSWindow {
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if let pending = self.settingsSaves[id] { _ = await pending.result }
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
             let remoteGlobalModels: ModelSettings
@@ -4063,17 +4068,30 @@ final class RemoteHostWindow: NSWindow {
         // stream: nothing more goes live, the ones sent land first, then the
         // document — the editor as it was at the click, every field alike —
         // and a close meanwhile only reverts if the save fails.
-        let live = settingsSessions[id]?.live
+        // This window's session, not whichever is open when the save lands.
+        let session = settingsSessions[id]
+        let live = session?.live
         // One save at a time: a second document could land before the first.
-        guard live?.isSaving != true else { return }
+        guard live?.isSaving != true, settingsSaves[id] == nil else { return }
         live?.beginSave()
-        Task { @MainActor [weak self] in
+        let save = Task { @MainActor () throws -> String? in
             do {
                 await c.firewallCommitsSent()
                 let resp = try await c.saveProfileDoc(id, doc)
                 live?.keep()
-                self?.closeSettingsWindow(id)
-                if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
+                session?.close()
+                return resp["sshPublicKey"] as? String
+            } catch {
+                live?.saveFailed()
+                throw error
+            }
+        }
+        settingsSaves[id] = save
+        Task { @MainActor [weak self] in
+            defer { if self?.settingsSaves[id] == save { self?.settingsSaves[id] = nil } }
+            do {
+                let pub = try await save.value
+                if generateSSH, let pub, !pub.isEmpty {
                     let a = NSAlert()
                     a.messageText = NSLocalizedString("New SSH key generated", comment: "")
                     a.informativeText = String(format: NSLocalizedString(
@@ -4091,7 +4109,6 @@ final class RemoteHostWindow: NSWindow {
                     self.promptRestartToApply(id)
                 }
             } catch {
-                live?.saveFailed()
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't save the workspace", comment: ""), error)
             }
