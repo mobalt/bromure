@@ -745,7 +745,7 @@ struct MobileSessionsSection: View {
 /// One collapsible "Sessions" section for a `List(selection:)`: the
 /// new-session row, then every session in sidebar order (gone ones dimmed,
 /// last), each row tagged with its `PadSelection`.
-struct PadSessionSections: View {
+struct PadSessionSections<Boards: View>: View {
     let controller: RemoteHostController
     /// A session a row spawned (a worktree off its folder): select it.
     var onOpen: (UUID) -> Void = { _ in }
@@ -763,6 +763,22 @@ struct PadSessionSections: View {
     /// A right-click / long-press "New worktree…": the session to branch off.
     @State private var pendingWorktree: AgentSession?
 
+    /// The board rows, between New session and the sessions — as on the
+    /// desktop sidebar.
+    private let boards: Boards
+
+    init(controller: RemoteHostController,
+         onOpen: @escaping (UUID) -> Void = { _ in },
+         onOpenRoom: @escaping (UUID) -> Void = { _ in },
+         onNewInRoom: @escaping (UUID) -> Void = { _ in },
+         @ViewBuilder boards: () -> Boards) {
+        self.controller = controller
+        self.onOpen = onOpen
+        self.onOpenRoom = onOpenRoom
+        self.onNewInRoom = onNewInRoom
+        self.boards = boards()
+    }
+
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
@@ -770,6 +786,10 @@ struct PadSessionSections: View {
         let needsYou = all.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
         let put = MobileRooms.looseArchived(controller)
         let putRooms = controller.roomStore.archivedRooms
+        Section {
+            newSessionRow
+            boards
+        }
         sessionsSection(MobileRooms.loose(all, controller), needsYou: needsYou)
         if !put.isEmpty || !putRooms.isEmpty {
             // Put away, not gone: folded by default.
@@ -799,35 +819,41 @@ struct PadSessionSections: View {
         }
     }
 
-    private func sessionsSection(_ list: [AgentSession], needsYou: Int) -> some View {
-        Section(isExpanded: $expanded) {
-            Label("New Session…", systemImage: "plus")
-                .foregroundStyle(.tint)
-                .tag(PadSelection.newSession)
-                // The rows' "New worktree…" presents its sheet here too.
-                .sheet(item: $pendingWorktree) { s in
-                    NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
-                        Task {
-                            if let id = await controller.startWorktreeSession(
-                                from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
-                                onOpen(id)
-                            }
+    /// Above the boards, so it's there with the sessions folded too. It
+    /// also hosts the rows' worktree sheet and delete question (a row inside
+    /// the list can present; a Section can't).
+    private var newSessionRow: some View {
+        Label("New Session…", systemImage: "plus")
+            .foregroundStyle(.tint)
+            .tag(PadSelection.newSession)
+            // The rows' "New worktree…" presents its sheet here too.
+            .sheet(item: $pendingWorktree) { s in
+                NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
+                    Task {
+                        if let id = await controller.startWorktreeSession(
+                            from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
+                            onOpen(id)
                         }
                     }
-                    .presentationDetents([.medium, .large])
                 }
-                // The rows' Delete asks here when the agent is running (a
-                // row inside the list can present; the Section can't).
-                .confirmationDialog("Delete this session?", isPresented: Binding(
-                    get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-                    titleVisibility: .visible) {
-                    Button("Delete session", role: .destructive) {
-                        if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
-                        pendingDelete = nil
-                    }
-                } message: {
-                    Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+                .presentationDetents([.medium, .large])
+            }
+            // The rows' Delete asks here when the agent is running (a
+            // row inside the list can present; the Section can't).
+            .confirmationDialog("Delete this session?", isPresented: Binding(
+                get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                titleVisibility: .visible) {
+                Button("Delete session", role: .destructive) {
+                    if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
+                    pendingDelete = nil
                 }
+            } message: {
+                Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+            }
+    }
+
+    private func sessionsSection(_ list: [AgentSession], needsYou: Int) -> some View {
+        Section(isExpanded: $expanded) {
             if list.isEmpty && controller.roomStore.activeRooms.isEmpty {
                 Text(controller.hasSnapshot ? "No sessions yet." : "Loading sessions…")
                     .font(.callout).foregroundStyle(.secondary)
