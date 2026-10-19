@@ -4210,3 +4210,31 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "このウィンドウではワークスペースの GitHub トークンを読み取れません。リポジトリを owner/repo の形式で入力してください。";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "マージされたブランチは、そのマージコミットに対して 1 回だけ実行されます（ブランチ内の各コミットごとではありません）。コミットがもたらした変更は、最初の親との差分で確認できます: git diff {{commit.key}}^1 {{commit.key}}。";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "変更は行ったその場で実行中のワークスペースに適用されます。再起動も保存も不要で、「キャンセル」でルールを元に戻せます。ルールのチェックを外すと削除せずにオフにでき、時計メニューから期間限定でオンにすることもできます。";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "モデルが読む前にコマンド出力からノイズを取り除く";
+"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "マシンに何もインストールせずに、すべてのエージェントで機能します。Bromure はこの Mac 上で、各リクエストに含まれるコマンド結果を切り詰めます。オン／オフはエージェントの次のリクエストから適用され、再起動は不要です。";
+"What it trims" = "取り除くもの";
+"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "テスト（pytest、jest、vitest、go、cargo、swift、xcodebuild…）：合格したテストを省き、失敗と概要は残します";
+"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "インストール（npm、pip、uv、apt、brew、cargo、docker pull…）：ダウンロードや展開のメッセージ、非推奨の通知";
+"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "ビルド（cargo、swift、xcodebuild、make、cmake、gradle、docker build…）：ファイルごとの進行状況と繰り返される警告。エラーは残します";
+"git push, pull, fetch, clone: transfer counters and hints" = "git push、pull、fetch、clone：転送カウンタとヒント";
+"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "ログ：数字だけが異なる行の連続。検索結果：圧縮（minify）された長い行を短縮";
+"Everywhere: terminal escapes, progress bars, the same line repeated" = "共通：ターミナルのエスケープシーケンス、プログレスバー、繰り返される同じ行";
+"Saved so far" = "これまでの節約";
+"%@ saved" = "%@ 節約";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch はモデルが読む前にコマンド出力からノイズを取り除きます — クリックすると節約量を表示します";
+"Squelch is off on this machine — click to trim the noise out of command output" = "このマシンでは Squelch はオフです — クリックするとコマンド出力のノイズを取り除きます";
+"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "Squelch は、コマンドが出力するノイズ（合格したテスト、ダウンロードやビルドの進行状況、転送カウンタ、繰り返されるログ行）を、エージェントのモデルが読む前に取り除きます。エラー、失敗、警告は常に残り、ファイルの内容や diff には一切手を加えません。コマンドの出力をすべて見るには、エージェントは先頭に BROMURE_FULL_OUTPUT=1 を付けて再実行します。";
+"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "rtk（rtk-ai.app）に着想を得ています。トークン数は文字数 ÷ 4 で概算しています。";
+"Trim command output on “%@”" = "「%@」でコマンド出力を切り詰める";
+"Off on “%@”: its agents' models read every command's output as printed." = "「%@」ではオフ：エージェントのモデルは各コマンドの出力を表示されたとおりに読みます。";
+"This conversation" = "この会話";
+"All of “%@”" = "「%@」全体";
+"Where it came from" = "内訳";
+"%@ tokens · %@" = "%@ トークン · %@";
+"~%@ tokens saved" = "約 %@ トークン節約";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "コマンド出力 %2$@ トークンのうち %1$@ · 出力 %3$d 件、切り詰め %4$d 件";
+"Last two weeks" = "過去 2 週間";
+"%@: %@ tokens saved" = "%@：%@ トークン節約";

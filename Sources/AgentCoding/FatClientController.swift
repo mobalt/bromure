@@ -962,7 +962,12 @@ final class RemoteHostController {
             }
             rows.append(SessionListModel.ProfileRow(
                 id: id, name: name, accentHex: accentHex, state: state,
-                compromised: (w["compromised"] as? Bool) ?? false))
+                compromised: (w["compromised"] as? Bool) ?? false,
+                squelch: (w["squelch"] as? Bool) ?? false,
+                squelchSummary: (w["squelchSummary"] as? [String: Any]).flatMap {
+                    (try? JSONSerialization.data(withJSONObject: $0))
+                        .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
+                }))
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
@@ -976,6 +981,7 @@ final class RemoteHostController {
                 tool: Profile.Tool(rawValue: w["tool"] as? String ?? "") ?? .claude,
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
+            p.squelch.enabled = (w["squelch"] as? Bool) ?? false
             p.memoryGB = spec.memoryGB
             p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
@@ -2076,6 +2082,16 @@ final class RemoteHostController {
         let path = "/profiles/\(seg(id))/firewall"
         firewallQueue.async {
             _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["rules": rules])
+        }
+    }
+
+    /// Squelch on or off for one of the host's workspaces.
+    func setSquelch(_ id: Profile.ID, _ on: Bool) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))/squelch"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["enabled": on])
+            DispatchQueue.main.async { [weak self] in self?.pollOnce() }
         }
     }
 
@@ -5378,6 +5394,7 @@ final class RemoteHostWindow: NSWindow {
                 }
             },
             editMachine: { [weak self] pid in self?.openWorkspaceSettings(pid) },
+            setSquelch: { [weak self] pid, on in self?.controller.setSquelch(pid, on) },
             openLinux: { [weak self] sid in self?.showLinux(for: sid) },
             openRoom: { [weak self] id in self?.showRoom(id) },
             newRoom: { [weak self] name, sid in

@@ -1757,6 +1757,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.selectSession(id)
             },
             editMachine: { [weak self] pid in self?.acDelegate?.sidebarEditProfile(pid) },
+            setSquelch: { [weak self] pid, on in self?.acDelegate?.setSquelch(pid, on) },
             openLinux: { [weak self] sid in self?.showLinux(for: sid) },
             openRoom: { [weak self] id in self?.showRoom(id) },
             newRoom: { [weak self] name, sid in

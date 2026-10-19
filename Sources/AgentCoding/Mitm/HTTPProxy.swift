@@ -60,6 +60,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Per-profile PII protection (swap personal data for stand-ins on the
     /// way to the model, restore it on the way back). Same static rationale.
     nonisolated(unsafe) static var piiPolicyProvider: (@Sendable (UUID) -> PIIPolicy?)?
+    /// Per-profile Squelch (command-output noise cut from AI requests).
+    /// Reads the workspaces' settings as last saved (`SquelchSettings`).
+    nonisolated(unsafe) static var squelchPolicyProvider: (@Sendable (UUID) -> SquelchPolicy?)? = {
+        SquelchSettings.policy(for: $0)
+    }
     /// Reads whether Fusion is currently engaged for a profile's session.
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
@@ -1067,7 +1072,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // provider's socket (Codex's Responses WebSocket): frame-level
             // relay instead of the opaque pump. nil → opaque pump.
             let contentGuard = insecure ? nil
-                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID)
+                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID,
+                                      conversation: SquelchRewriter.sessionKey(
+                                        headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self)))
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
                 rawRequest: swap.modified,
@@ -1714,9 +1721,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // The trace copy is decoded too, so the log-mode injection scan (run
         // from emitTrace) and the inspector read the text, not the coding.
         var traceRequest = request
+        // Squelch reads the body too, but never blocks: a body it can't read
+        // goes out as the agent sent it.
+        let squelchOn = Self.isAIHost(host) && (Self.squelchPolicyProvider?(profileID)?.enabled ?? false)
         if Self.isAIHost(host) {
             let piOn = Self.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
             let piiOn = Self.piiPolicyProvider?(profileID)?.isActive ?? false
+            if squelchOn, !piOn, !piiOn, bodyFile == nil,
+               case .decoded(let plain) = Self.decodeRequestContentEncoding(toForward) {
+                toForward = plain
+                if case .decoded(let plainTrace) = Self.decodeRequestContentEncoding(request) {
+                    traceRequest = plainTrace
+                }
+            }
             if piOn || piiOn {
                 let engines = [piOn ? "prompt_injection" : nil, piiOn ? "pii" : nil].compactMap { $0 }
                 if bodyFile != nil {
@@ -1834,6 +1851,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
             upstreamPort = target.port
             routedBackend = target.backend
             servedByMarker = target.servedBy
+        }
+
+        // Squelch: the noise in command output the conversation carries is
+        // cut before the model reads it (and before PII scans it). Every
+        // backend, the on-device engine included: its context is finite too.
+        if squelchOn, bodyFile == nil, let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
+            let head = toForward.subdata(in: 0..<split.upperBound)
+            let body = toForward.subdata(in: split.upperBound..<toForward.count)
+            let headText = String(decoding: head, as: UTF8.self)
+            if reqMethod.uppercased() == "POST", Self.headerValue("Content-Encoding", inHeaderSection: headText) == nil,
+               SquelchRewriter.mayCarryToolOutput(body) {
+                let outcome = SquelchRewriter.rewrite(body)
+                if outcome.body != body {
+                    toForward = head + outcome.body   // the relay re-frames (Content-Length)
+                }
+                SquelchLedger.shared.record(outcome, profileID: profileID,
+                                            conversation: SquelchRewriter.sessionKey(headers: headText) ?? outcome.conversation)
+            }
         }
 
         // PII protection: swap personal data in the conversation for

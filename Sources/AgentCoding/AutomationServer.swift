@@ -215,6 +215,12 @@ final class ACAutomationServer {
     /// puts its rules in force as they're edited (saved and applied live).
     /// nil: not found or the rules don't parse.
     var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
+    /// POST /profiles/{id}/squelch {enabled}: Squelch on or off for a
+    /// workspace (saved, applies to its next model request). false: no such
+    /// workspace.
+    var onSetSquelch: ((_ id: String, _ enabled: Bool) -> Bool)?
+    /// GET /squelch: every workspace's savings (`SquelchSummary` by id).
+    var onSquelchStats: (() -> [String: Any])?
     /// Reboot a running workspace in place (`soft` | `hard`). Async — a fresh
     /// VM has to boot before it returns.
     var onRebootVM: ((_ idOrName: String, _ mode: String) async -> [String: Any])?
@@ -800,6 +806,10 @@ final class ACAutomationServer {
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             handleStateSubscribe(fd: fd)
 
+        case ("GET", "/squelch"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            sendResponse(fd: fd, status: 200, body: DispatchQueue.main.sync { self.onSquelchStats?() } ?? ["workspaces": [:]])
+            return
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
@@ -1794,6 +1804,20 @@ final class ACAutomationServer {
         let noQuery = parts.first ?? path
         let query = parts.count > 1 ? parts[1] : ""
         let raw = String(noQuery.dropFirst("/profiles/".count))
+        if method == "POST", raw.hasSuffix("/squelch") {
+            let key = String(raw.dropLast("/squelch".count))
+            guard let enabled = bodyJSON["enabled"] as? Bool else {
+                sendResponse(fd: fd, status: 400, body: ["error": "enabled required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            if DispatchQueue.main.sync(execute: { self.onSetSquelch?(id, enabled) ?? false }) {
+                sendResponse(fd: fd, status: 200, body: ["ok": true, "enabled": enabled])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
+            }
+            return
+        }
         if method == "POST", raw.hasSuffix("/firewall") {
             let key = String(raw.dropLast("/firewall".count))
             guard let rules = bodyJSON["rules"] as? String else {

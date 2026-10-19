@@ -4210,3 +4210,31 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Esta janela não consegue ler o token do GitHub do espaço de trabalho — digite o repositório como proprietário/repositório.";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Um branch mesclado dispara uma vez, pelo seu commit de merge — não por cada um dos seus commits. Compare um commit com o primeiro pai para ver o que ele trouxe: git diff {{commit.key}}^1 {{commit.key}}.";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "As alterações se aplicam a um workspace em execução à medida que você as faz — sem reiniciar nem salvar; Cancelar restaura as regras como estavam. Desmarque uma regra para desativá-la sem excluí-la, ou use o menu de relógio dela para ativá-la por tempo limitado.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Tirar o ruído da saída dos comandos antes que o modelo a leia";
+"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "Funciona com todos os agentes, sem instalar nada na máquina: o Bromure enxuga, neste Mac, os resultados de comandos que cada requisição carrega. Ligar ou desligar vale a partir da próxima requisição dos agentes — sem reiniciar.";
+"What it trims" = "O que ele tira";
+"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "Testes (pytest, jest, vitest, go, cargo, swift, xcodebuild…): os testes aprovados saem; as falhas e o resumo ficam";
+"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "Instalações (npm, pip, uv, apt, brew, cargo, docker pull…): mensagens de download e descompactação, avisos de descontinuação";
+"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): progresso por arquivo e avisos repetidos; os erros ficam";
+"git push, pull, fetch, clone: transfer counters and hints" = "git push, pull, fetch, clone: contadores de transferência e dicas";
+"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "Logs: sequências de linhas que só diferem nos números; resultados de busca: linhas minificadas cortadas";
+"Everywhere: terminal escapes, progress bars, the same line repeated" = "Em toda parte: sequências de escape do terminal, barras de progresso, a mesma linha repetida";
+"Saved so far" = "Economizado até agora";
+"%@ saved" = "%@ economizados";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "O Squelch tira o ruído da saída dos comandos antes que o modelo a leia — clique para ver o que ele economizou";
+"Squelch is off on this machine — click to trim the noise out of command output" = "O Squelch está desligado nesta máquina — clique para tirar o ruído da saída dos comandos";
+"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "O Squelch tira o ruído do que os comandos imprimem — testes aprovados, progresso de downloads e builds, contadores de transferência, linhas de log repetidas — antes que o modelo do agente leia. Erros, falhas e avisos sempre ficam, e o conteúdo de arquivos e os diffs nunca são tocados. Para ver a saída completa de um comando, o agente o executa de novo precedido de BROMURE_FULL_OUTPUT=1.";
+"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "Inspirado no rtk (rtk-ai.app). Os tokens são estimados como caracteres ÷ 4.";
+"Trim command output on “%@”" = "Enxugar a saída dos comandos em “%@”";
+"Off on “%@”: its agents' models read every command's output as printed." = "Desligado em “%@”: os modelos dos agentes leem a saída de cada comando como foi impressa.";
+"This conversation" = "Esta conversa";
+"All of “%@”" = "Todo o “%@”";
+"Where it came from" = "De onde veio";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens economizados";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ de %@ tokens de saída de comandos · %d saídas, %d enxugadas";
+"Last two weeks" = "Últimas duas semanas";
+"%@: %@ tokens saved" = "%@: %@ tokens economizados";
