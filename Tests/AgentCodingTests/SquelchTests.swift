@@ -308,6 +308,18 @@ struct SquelchRewriterTests {
         let z = try #require(input[0]["output"] as? String)
         #expect(!z.contains("--- PASS: TestThing3") && z.contains("--- FAIL: TestBroken") && z.contains("want 3, got 2"))
         #expect(input[1]["output"] as? String == goOut)   // a read: untouched
+
+        // Codex code mode: `exec` runs a script, not a command line — its
+        // output (here, a script that cats a test log) is never trimmed.
+        let script: [String: Any] = ["type": "response.output_item.done",
+                                     "item": ["type": "custom_tool_call", "call_id": "call_js", "name": "exec",
+                                              "input": #"const r = await tools.exec_command({cmd: "cat go-test.log"});"#]]
+        reg.learn(fromServerEvent: json(script), profileID: ws)
+        let codeMode = json(["type": "response.create", "previous_response_id": "resp_2", "input": [
+            ["type": "custom_tool_call_output", "call_id": "call_js", "output": [["type": "input_text", "text": goOut]]],
+        ]])
+        let c = SquelchRewriter.rewrite(codeMode, priorCall: { reg.call(ws, $0) })
+        #expect(c.trims.isEmpty && c.body == codeMode)
     }
 
     @Test("string paths are exact through nesting and escapes")

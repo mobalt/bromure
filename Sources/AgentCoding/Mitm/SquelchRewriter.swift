@@ -23,7 +23,7 @@ enum SquelchRewriter {
     /// One trimmed tool result.
     struct Trim: Equatable {
         var callID: String
-        var command: String?
+        var command: String
         var family: Squelch.Family
         var rawBytes: Int
         var keptBytes: Int
@@ -181,14 +181,17 @@ enum SquelchRewriter {
         var replacements: [[JSONPath.Elem]: String] = [:]
         var trimsByCall: [String: Trim] = [:]
         for t in targets {
-            // Only a shell call's result, and only when the call is known:
-            // in this request, or announced by an earlier reply.
-            guard let call = calls[t.callID] ?? priorCall(t.callID), isCommandTool(call.name) else { continue }
+            // Only a shell call's result, and only when its command line is
+            // known — from this request or an earlier reply. A call whose
+            // input isn't a command (Codex code mode's `exec` takes a script)
+            // is left alone: its output's text can't say what printed it.
+            guard let call = calls[t.callID] ?? priorCall(t.callID), isCommandTool(call.name),
+                  let command = call.command else { continue }
             guard let text = JSONPath.value(at: t.path, in: root) as? String else { continue }
             outcome.seen[t.callID, default: 0] += text.utf8.count
-            guard let r = trimResult(text, command: call.command, unwrapCodex: t.wrapped) else { continue }
+            guard let r = trimResult(text, command: command, unwrapCodex: t.wrapped) else { continue }
             replacements[t.path] = r.text
-            var trim = trimsByCall[t.callID] ?? Trim(callID: t.callID, command: call.command, family: r.family,
+            var trim = trimsByCall[t.callID] ?? Trim(callID: t.callID, command: command, family: r.family,
                                                      rawBytes: 0, keptBytes: 0)
             trim.rawBytes += r.rawBytes
             trim.keptBytes += r.keptBytes
@@ -217,7 +220,7 @@ enum SquelchRewriter {
     /// once, then read back from here.
     private static let cache = TrimCache()
 
-    static func trimResult(_ text: String, command: String?, unwrapCodex: Bool) -> Trimmed? {
+    static func trimResult(_ text: String, command: String, unwrapCodex: Bool) -> Trimmed? {
         let key = TrimCache.key(text, command: command, unwrapCodex: unwrapCodex)
         if let hit = cache.get(key) { return hit }
         let r = computeTrim(text, command: command, unwrapCodex: unwrapCodex)
@@ -225,7 +228,7 @@ enum SquelchRewriter {
         return r
     }
 
-    private static func computeTrim(_ text: String, command: String?, unwrapCodex: Bool) -> Trimmed? {
+    private static func computeTrim(_ text: String, command: String, unwrapCodex: Bool) -> Trimmed? {
         if unwrapCodex, text.hasPrefix("{"), let d = text.data(using: .utf8),
            let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
            let inner = obj["output"] as? String,
@@ -459,9 +462,9 @@ final class TrimCache: @unchecked Sendable {
 
     init(limit: Int = 4000) { self.limit = limit }
 
-    static func key(_ text: String, command: String?, unwrapCodex: Bool) -> String {
+    static func key(_ text: String, command: String, unwrapCodex: Bool) -> String {
         var h = SHA256()
-        h.update(data: Data((command ?? "\u{1}").utf8))
+        h.update(data: Data(command.utf8))
         h.update(data: Data([0, unwrapCodex ? 1 : 0]))
         h.update(data: Data(text.utf8))
         return h.finalize().map { String(format: "%02x", $0) }.joined()

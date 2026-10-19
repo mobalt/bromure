@@ -248,8 +248,9 @@ enum Squelch {
         }
     }
 
-    /// The family an output reads as when the command isn't known (a reply
-    /// whose call came in an earlier request).
+    /// The family an output reads as when the command isn't known — for the
+    /// hidden `__squelch` CLI only: the proxy never trims an output whose
+    /// command it doesn't know (`SquelchRewriter`).
     static func sniff(_ s: String) -> Family {
         let head = String(s.prefix(4000))
         if head.contains("test session starts") || head.contains("=== RUN ") || head.contains("Test Suite '")
