@@ -67,6 +67,14 @@ struct AgentDetectionTests {
         let bin = try fakeBin(["claude": "true"])
         let disk = AgentDetection.onDisk(["claude", "codex"], dirs: ["$HOME/nowhere", bin.path], home: NSHomeDirectory())
         #expect(disk == ["claude": bin.appendingPathComponent("claude").path])
+        // A folder named like an agent is searchable, not an agent; a symlink
+        // to a real binary (the installers' layout) is one.
+        let other = try fakeBin([:])
+        try FileManager.default.createDirectory(at: other.appendingPathComponent("codex"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: other.appendingPathComponent("kimi"),
+                                                   withDestinationURL: bin.appendingPathComponent("claude"))
+        #expect(AgentDetection.onDisk(["codex", "kimi"], dirs: [other.path], home: NSHomeDirectory())
+                == ["kimi": other.appendingPathComponent("kimi").path])
         var scan = AgentDetection.parse("Welcome!\n@@P@@ broken\n\(AgentDetection.endMarker)\n")
         #expect(scan.complete && scan.found.isEmpty)
         #expect(AgentDetection.missing(["claude", "codex"], scan: scan, onDisk: disk) == ["codex"])

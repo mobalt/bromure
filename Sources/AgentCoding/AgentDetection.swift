@@ -58,8 +58,7 @@ enum AgentDetection {
     /// The agents among `ids` with an executable in one of `dirs` ("$HOME"
     /// expanded) — no shell, so nothing to hang.
     static func onDisk(_ ids: [String], dirs: [String], home: String,
-                       isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) })
-        -> [String: String] {
+                       isExecutable: (String) -> Bool = isExecutableFile) -> [String: String] {
         var out: [String: String] = [:]
         for id in ids {
             for dir in dirs {
@@ -70,6 +69,15 @@ enum AgentDetection {
             }
         }
         return out
+    }
+
+    /// An executable file, as `command -v` would take it: a directory is
+    /// searchable (X_OK) but never an agent. Symlinks followed (an
+    /// installer's `bin/claude` points into its versions folder).
+    static func isExecutableFile(_ path: String) -> Bool {
+        var dir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && !dir.boolValue
+            && FileManager.default.isExecutableFile(atPath: path)
     }
 
     /// What a scan may call missing: only from a complete one, and only
