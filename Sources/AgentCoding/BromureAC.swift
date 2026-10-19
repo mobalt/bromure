@@ -346,6 +346,10 @@ struct BromureAC: ParsableCommand {
                 var p = Profile(name: which == "prefs" ? "Defaults" : "Workspace 2", tool: .claude,
                                 authMode: .subscription)
                 if which == "prefs" { p.id = ProfileStore.templateID } else { p.agentReach = [] }
+                // BROMURE_SHOT_OPENSHELL=1: the Firewall pane on its OpenShell side.
+                if ProcessInfo.processInfo.environment["BROMURE_SHOT_OPENSHELL"] == "1" {
+                    p.networkPolicy = OpenShellPolicyEditor.starterPolicy
+                }
                 view = AnyView(ProfileEditorView(profile: p, isNew: which != "prefs", terminalDefaults: .fallback,
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {}))
                 size = NSSize(width: 820, height: 680)
@@ -387,6 +391,17 @@ struct BromureAC: ParsableCommand {
             let end = Date().addingTimeInterval(1.5)
             while Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
             let bounds = host.bounds
+            // BROMURE_SHOT_WINDOW=1: capture the window as the window server
+            // drew it. cacheDisplay leaves a split view's detail blank (the
+            // settings editor's panes).
+            if ProcessInfo.processInfo.environment["BROMURE_SHOT_WINDOW"] == "1",
+               let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                [.boundsIgnoreFraming, .bestResolution]),
+               let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: path))
+                FileHandle.standardError.write(Data("[shot] wrote \(data.count) bytes → \(path)\n".utf8))
+                Darwin.exit(0)
+            }
             if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width * 2),
                                           pixelsHigh: Int(bounds.height * 2), bitsPerSample: 8, samplesPerPixel: 4,
                                           hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,

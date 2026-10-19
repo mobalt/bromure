@@ -4332,17 +4332,18 @@ struct ProfileEditorView: View {
         // scrolling and clips the trailing toggles.
         guardrailsScrollWrapper {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    Text("How this workspace's credentials may be used.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    InfoTip("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.\n\nA write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.")
+                }
 
                 let refs = remoteCredentialRefs ?? draft.configuredCredentials()
                 if refs.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: "shield.slash").font(.title2).foregroundStyle(.secondary)
                         Text("No credentials to guard").font(.subheadline.weight(.medium))
-                        Text("Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy.")
+                        Text("Add credentials in the Credentials pane.")
                             .font(.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
@@ -4353,20 +4354,13 @@ struct ProfileEditorView: View {
                         guardrailCredentialRow(ref)
                         Divider()
                     }
-                    Text("A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .padding(.top, 2)
                 }
 
                 Divider().padding(.vertical, 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Don't alert on credential exfiltration",
-                           isOn: $draft.disableExfiltrationAlerts)
-                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                settingRow(caption: "A leaked credential is still blocked and logged; only the pop-up goes away.",
+                           info: "By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.") {
+                    Toggle("Don't alert on credential exfiltration", isOn: $draft.disableExfiltrationAlerts)
                 }
-                .padding(.top, 2)
             }
             .padding(.bottom, 8)
         }
@@ -4399,49 +4393,61 @@ struct ProfileEditorView: View {
                 #endif
 
                 Divider().padding(.vertical, 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Picker("Agent watchdog", selection: $draft.watchdogMode) {
-                        Text("Off").tag("off")
-                        Text("Alert").tag("alert")
-                        Text("Quarantine").tag("quarantine")
+                Text("Protections").font(.headline)
+                VStack(alignment: .leading, spacing: 10) {
+                    settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
+                               info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {
+                        Picker("Agent watchdog", selection: $draft.watchdogMode) {
+                            Text("Off").tag("off")
+                            Text("Alert").tag("alert")
+                            Text("Quarantine").tag("quarantine")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 360)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 360)
-                    Text("Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.bottom, 8)
 
-                    Toggle("Only allow credentials Bromure injects (strict mode)", isOn: $draft.strictCredentials)
-                        .disabled(Profile.organizationRequiresStrictCredentials)
-                    Text("Blocks any request that carries a credential Bromure didn't put there — an API key or token the agent found in a file, an environment dump or a git config, or guessed. Bromure's own credentials still flow to the hosts they're bound to, and tokens a site issues inside the VM (a login, an OAuth flow) can be sent back to that site. A blocked request raises the compromise alert; Allow approves that one credential for the session. Strict mode inspects every HTTP(S) request, so transparent interception stays on and the no-MITM list is ignored. Raw TCP (SSH, databases) can't be inspected: deny it with the firewall. Applies live.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.bottom, draft.strictCredentials && !draft.unboundCredentialNames.isEmpty ? 2 : 8)
+                    settingRow(caption: "Blocks any credential Bromure didn't put there itself.",
+                               info: "Blocks any request that carries a credential Bromure didn't put there — an API key or token the agent found in a file, an environment dump or a git config, or guessed. Bromure's own credentials still flow to the hosts they're bound to, and tokens a site issues inside the VM (a login, an OAuth flow) can be sent back to that site. A blocked request raises the compromise alert; Allow approves that one credential for the session. Strict mode inspects every HTTP(S) request, so transparent interception stays on and the no-MITM list is ignored. Raw TCP (SSH, databases) can't be inspected: deny it with the firewall. Applies live.") {
+                        Toggle("Only allow credentials Bromure injects (strict mode)", isOn: $draft.strictCredentials)
+                            .disabled(Profile.organizationRequiresStrictCredentials)
+                    }
                     if draft.strictCredentials, !draft.unboundCredentialNames.isEmpty {
                         Label("Give these credentials a host filter before saving (strict mode doesn't allow credentials usable on any host): "
                               + draft.unboundCredentialNames.joined(separator: ", "),
                               systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2).foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(.bottom, 8)
                     }
 
-                    Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
-                        .disabled(draft.strictCredentials)
-                    Text("Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    settingRow(caption: "For clients that break when Bromure intercepts them; proxy-aware tools still go through Bromure.",
+                               info: "Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.") {
+                        Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
+                            .disabled(draft.strictCredentials)
+                    }
 
-                    Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
-                           isOn: $draft.guardrails.allowInsecureBypass)
-                        .padding(.top, 8)
-                    Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    settingRow(caption: "Lets the agent skip one host's certificate check with a header.",
+                               info: "A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.") {
+                        Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
+                               isOn: $draft.guardrails.allowInsecureBypass)
+                    }
                 }
             }
             .padding(.bottom, 8)
+        }
+    }
+
+    /// A setting with one line of caption under it and its full explanation
+    /// behind an ⓘ.
+    @ViewBuilder
+    private func settingRow<C: View>(caption: LocalizedStringKey, info: LocalizedStringKey,
+                                     @ViewBuilder _ control: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                control()
+                InfoTip(info)
+            }
+            Text(caption).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -7322,5 +7328,30 @@ struct HostListField: View {
                 // Changed elsewhere (not by typing here): show it.
                 if Self.parse(text) != new { text = new.joined(separator: ", ") }
             }
+    }
+}
+
+/// An ⓘ beside a setting that shows its full explanation in a popover, so a
+/// settings pane reads as one short line per setting.
+struct InfoTip: View {
+    private let text: Text
+    @State private var shown = false
+
+    init(_ key: LocalizedStringKey) { text = Text(key) }
+    init(verbatim s: String) { text = Text(verbatim: s) }
+
+    var body: some View {
+        Button { shown.toggle() } label: {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(Text("More about this setting"))
+        .accessibilityLabel(Text("More about this setting"))
+        .popover(isPresented: $shown, arrowEdge: .trailing) {
+            text.font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 340, alignment: .leading)
+                .padding(14)
+        }
     }
 }
