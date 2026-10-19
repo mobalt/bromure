@@ -447,7 +447,8 @@ final class WSContentGuard: @unchecked Sendable {
         var redacted = false
         // Squelch, before the scans: they read what the model will.
         if squelchOn, SquelchRewriter.mayCarryToolOutput(payload) {
-            let o = SquelchRewriter.rewrite(payload)
+            let pid = profileID
+            let o = SquelchRewriter.rewrite(payload, priorCall: { SquelchCallRegistry.shared.call(pid, $0) })
             squelchLedger.record(o, profileID: profileID,
                                         conversation: conversation ?? o.conversation)
             if o.body != payload { payload = o.body; redacted = true }
@@ -528,6 +529,11 @@ final class WSContentGuard: @unchecked Sendable {
     /// split across deltas — which may turn one message into none (held) or
     /// several (a released tail ahead of the closing event).
     func server(_ payload: Data) -> [Data]? {
+        // The calls the model makes: what a chained turn's bare results are
+        // matched with (Squelch).
+        if squelch()?.enabled == true {
+            SquelchCallRegistry.shared.learn(fromServerEvent: payload, profileID: profileID)
+        }
         guard !vault.isEmpty,
               payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return nil }
         var compact = payload

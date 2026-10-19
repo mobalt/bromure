@@ -225,11 +225,14 @@ struct SquelchRewriterTests {
             ["type": "function_call", "call_id": "call_b", "name": "shell",
              "arguments": #"{"command":["bash","-lc","pytest -v"]}"#],
             ["type": "function_call_output", "call_id": "call_b", "output": shellJSON],
-            // Its call came in an earlier turn: classified from the text.
+            // Their calls came in earlier turns: call_c's the model announced
+            // (a shell call), call_d's nobody saw — it may be a `cat` of a log.
             ["type": "function_call_output", "call_id": "call_c", "output": "============ test session starts ============\n" + noisy()],
+            ["type": "function_call_output", "call_id": "call_d", "output": "============ test session starts ============\n" + noisy()],
         ]])
-        let r = SquelchRewriter.rewrite(responses)
+        let r = SquelchRewriter.rewrite(responses, priorCall: { $0 == "call_c" ? ("exec_command", "pytest -v") : nil })
         #expect(r.trims.map(\.callID) == ["call_a", "call_b", "call_c"])
+        #expect(r.seen["call_d"] == nil)
         let root = try #require(try JSONSerialization.jsonObject(with: r.body) as? [String: Any])
         let input = try #require(root["input"] as? [[String: Any]])
         let a = try #require(input[1]["output"] as? String)
@@ -276,6 +279,35 @@ struct SquelchRewriterTests {
             let text = String(decoding: o.body, as: UTF8.self)
             #expect(!text.contains("test_7 PASSED") && text.contains("FAILED tests"), "\(agent)")
         }
+    }
+
+    @Test("a call announced in the model's reply is matched with its bare result later; others are left alone")
+    func registry() throws {
+        let reg = SquelchCallRegistry()
+        let ws = UUID()
+        let done: [String: Any] = ["type": "response.output_item.done", "output_index": 0,
+                                   "item": ["type": "function_call", "call_id": "call_z", "name": "exec_command",
+                                            "arguments": #"{"cmd":"go test ./... -v"}"#]]
+        reg.learn(fromServerEvent: json(done), profileID: ws)
+        let read: [String: Any] = ["type": "response.output_item.done",
+                                   "item": ["type": "function_call", "call_id": "call_r", "name": "read_file",
+                                            "arguments": #"{"path":"log.txt"}"#]]
+        reg.learn(fromServerEvent: json(read), profileID: ws)
+        #expect(reg.call(ws, "call_z")?.command == "go test ./... -v")
+        #expect(reg.call(UUID(), "call_z") == nil)   // per workspace
+
+        let goOut = (0..<80).map { "=== RUN   TestThing\($0)\n--- PASS: TestThing\($0) (0.00s)" }.joined(separator: "\n")
+            + "\n--- FAIL: TestBroken (0.01s)\n    thing_test.go:12: want 3, got 2\nFAIL\n"
+        let chained = json(["type": "response.create", "previous_response_id": "resp_1", "input": [
+            ["type": "function_call_output", "call_id": "call_z", "output": goOut],
+            ["type": "function_call_output", "call_id": "call_r", "output": goOut],
+        ]])
+        let o = SquelchRewriter.rewrite(chained, priorCall: { reg.call(ws, $0) })
+        #expect(o.trims.map(\.callID) == ["call_z"])
+        let input = try #require((try JSONSerialization.jsonObject(with: o.body) as? [String: Any])?["input"] as? [[String: Any]])
+        let z = try #require(input[0]["output"] as? String)
+        #expect(!z.contains("--- PASS: TestThing3") && z.contains("--- FAIL: TestBroken") && z.contains("want 3, got 2"))
+        #expect(input[1]["output"] as? String == goOut)   // a read: untouched
     }
 
     @Test("string paths are exact through nesting and escapes")

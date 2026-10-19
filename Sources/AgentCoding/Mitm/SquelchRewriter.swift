@@ -16,7 +16,9 @@ import Foundation
 ///   `function_call {call_id, name, arguments}` / `local_shell_call` →
 ///   `function_call_output` / `local_shell_call_output {call_id, output}`.
 /// A result whose call isn't in the request (a Responses turn chained by
-/// `previous_response_id`) is classified from its own text (`Squelch.sniff`).
+/// `previous_response_id`, Codex's WebSocket) is matched with the call the
+/// model's reply announced (`SquelchCallRegistry`); one whose call was never
+/// seen is left alone — its text alone can't say it wasn't a `cat` of a log.
 enum SquelchRewriter {
     /// One trimmed tool result.
     struct Trim: Equatable {
@@ -80,7 +82,9 @@ enum SquelchRewriter {
         return false
     }
 
-    static func rewrite(_ body: Data) -> Outcome {
+    /// `priorCall`: a call made in an earlier turn, by id (`SquelchCallRegistry`).
+    static func rewrite(_ body: Data,
+                        priorCall: (String) -> (name: String, command: String?)? = { _ in nil }) -> Outcome {
         var outcome = Outcome(body: body)
         guard mayCarryToolOutput(body),
               let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return outcome }
@@ -177,15 +181,14 @@ enum SquelchRewriter {
         var replacements: [[JSONPath.Elem]: String] = [:]
         var trimsByCall: [String: Trim] = [:]
         for t in targets {
-            let call = calls[t.callID]
-            // A call named here must be a shell call; one that isn't (an earlier
-            // turn's) is judged by its output alone.
-            if let call, !isCommandTool(call.name) { continue }
+            // Only a shell call's result, and only when the call is known:
+            // in this request, or announced by an earlier reply.
+            guard let call = calls[t.callID] ?? priorCall(t.callID), isCommandTool(call.name) else { continue }
             guard let text = JSONPath.value(at: t.path, in: root) as? String else { continue }
             outcome.seen[t.callID, default: 0] += text.utf8.count
-            guard let r = trimResult(text, command: call?.command, unwrapCodex: t.wrapped) else { continue }
+            guard let r = trimResult(text, command: call.command, unwrapCodex: t.wrapped) else { continue }
             replacements[t.path] = r.text
-            var trim = trimsByCall[t.callID] ?? Trim(callID: t.callID, command: call?.command, family: r.family,
+            var trim = trimsByCall[t.callID] ?? Trim(callID: t.callID, command: call.command, family: r.family,
                                                      rawBytes: 0, keptBytes: 0)
             trim.rawBytes += r.rawBytes
             trim.keptBytes += r.keptBytes
@@ -292,6 +295,59 @@ enum SquelchRewriter {
             }
         }
         return nil
+    }
+}
+
+/// Calls the model announced in its replies, by id: what a later request
+/// that carries only the result (a chained Responses turn) is matched with.
+/// Per workspace, the most recent few thousand.
+final class SquelchCallRegistry: @unchecked Sendable {
+    static let shared = SquelchCallRegistry()
+
+    private let lock = NSLock()
+    private var calls: [String: (name: String, command: String?)] = [:]
+    private var order: [String] = []
+    private let limit = 4000
+
+    func learn(_ profileID: UUID, callID: String, name: String, command: String?) {
+        let key = profileID.uuidString + "|" + callID
+        lock.lock(); defer { lock.unlock() }
+        if calls.updateValue((name, command), forKey: key) == nil { order.append(key) }
+        if order.count > limit {
+            let drop = order.count - limit
+            for k in order.prefix(drop) { calls[k] = nil }
+            order.removeFirst(drop)
+        }
+    }
+
+    func call(_ profileID: UUID, _ callID: String) -> (name: String, command: String?)? {
+        lock.lock(); defer { lock.unlock() }
+        return calls[profileID.uuidString + "|" + callID]
+    }
+
+    /// The calls in a Responses server event — an `output_item.done`, or a
+    /// `response.completed` carrying the whole output.
+    func learn(fromServerEvent payload: Data, profileID: UUID) {
+        guard payload.range(of: Data("\"call_id\"".utf8)) != nil,
+              let obj = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] else { return }
+        var items: [Any] = []
+        if let item = obj["item"] { items.append(item) }
+        if let output = (obj["response"] as? [String: Any])?["output"] as? [Any] { items += output }
+        for case let item as [String: Any] in items {
+            guard let id = item["call_id"] as? String, let type = item["type"] as? String else { continue }
+            switch type {
+            case "function_call":
+                learn(profileID, callID: id, name: item["name"] as? String ?? "",
+                      command: SquelchRewriter.command(fromInput: item["arguments"]))
+            case "local_shell_call", "shell_call":
+                learn(profileID, callID: id, name: "local_shell", command: SquelchRewriter.command(fromInput: item["action"]))
+            case "custom_tool_call":
+                learn(profileID, callID: id, name: item["name"] as? String ?? "",
+                      command: SquelchRewriter.command(fromInput: item["input"]))
+            default:
+                break
+            }
+        }
     }
 }
 

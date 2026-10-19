@@ -250,6 +250,26 @@ struct WebSocketTransformTests {
         #expect(rec.events.isEmpty)
     }
 
+    @Test("Squelch on a chained turn: the call the server announced trims its bare result next turn")
+    func squelchChained() throws {
+        let rec = Recorder()
+        let g = makeGuard(pii: false, injection: nil, vault: PIIVault(secret: secret), recorder: rec)
+        g.squelch = { SquelchPolicy(enabled: true) }
+        g.squelchLedger = SquelchLedger(file: nil)
+        let h = WSHarness(guard: g)
+        defer { h.close() }
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_w","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        h.serverSend(frame(0x1, done, masked: false))
+        #expect(h.guestFrames(1).count == 1)
+        let noisy = (0..<120).map { "tests/t.py::test_\($0) PASSED" }.joined(separator: "\n") + "\nFAILED tests/t.py::test_x\n"
+        let create: [String: Any] = ["type": "response.create", "previous_response_id": "resp_1",
+                                     "input": [["type": "function_call_output", "call_id": "call_w", "output": noisy]]]
+        h.guestSend(frame(0x1, String(decoding: try JSONSerialization.data(withJSONObject: create), as: UTF8.self), masked: true))
+        let msg = try #require(h.serverFrames(1).first)
+        let out = try #require((json(msg.payload)["input"] as? [[String: Any]])?.first?["output"] as? String)
+        #expect(!out.contains("test_5 PASSED") && out.contains("FAILED tests/t.py::test_x"))
+    }
+
     @Test("Stand-ins split across delta messages come back whole; full texts restored")
     func restoreIn() {
         let vault = PIIVault(secret: secret)

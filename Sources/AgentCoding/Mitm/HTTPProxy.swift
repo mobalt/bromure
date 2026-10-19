@@ -1862,7 +1862,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let headText = String(decoding: head, as: UTF8.self)
             if reqMethod.uppercased() == "POST", Self.headerValue("Content-Encoding", inHeaderSection: headText) == nil,
                SquelchRewriter.mayCarryToolOutput(body) {
-                let outcome = SquelchRewriter.rewrite(body)
+                let outcome = SquelchRewriter.rewrite(body, priorCall: { SquelchCallRegistry.shared.call(profileID, $0) })
                 if outcome.body != body {
                     toForward = head + outcome.body   // the relay re-frames (Content-Length)
                 }

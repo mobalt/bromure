@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The workspaces' Squelch settings as the proxy reads them, kept current
@@ -44,7 +45,9 @@ final class SquelchLedger: @unchecked Sendable {
         var families: [String: SquelchTally] = [:]
         /// By day ("2026-10-19", the Mac's calendar), the last `keepDays`.
         var days: [String: SquelchTally] = [:]
-        /// Outputs already counted, oldest first (bounded).
+        /// Outputs already counted (a digest of conversation and call id),
+        /// oldest first, the last `keepCounted`: a long session's early
+        /// outputs are still resent every turn.
         var counted: [String] = []
         /// What cloud reports already covered, by day.
         var reportedDays: [String: SquelchTally] = [:]
@@ -55,13 +58,15 @@ final class SquelchLedger: @unchecked Sendable {
     }
 
     static let keepDays = 90
-    static let keepCounted = 4000
+    static let keepCounted = 50_000
     static let keepCommands = 60
     static let keepConversations = 400
 
     private let file: URL?
     private let lock = NSLock()
     private var state = Snapshot()
+    /// `Workspace.counted` as sets, built on first use.
+    private var countedSets: [String: Set<String>] = [:]
     private var dirty = false
     private var saveScheduled = false
     /// Called (off the main thread) when a workspace's numbers change.
@@ -82,11 +87,12 @@ final class SquelchLedger: @unchecked Sendable {
         let trims = Dictionary(o.trims.map { ($0.callID, $0) }, uniquingKeysWith: { a, _ in a })
         let day = Self.dayKey(now)
         lock.lock()
-        var w = state.workspaces[profileID.uuidString] ?? Workspace()
-        var counted = Set(w.counted)
+        let wid = profileID.uuidString
+        var w = state.workspaces[wid] ?? Workspace()
+        var counted = countedSets[wid] ?? Set(w.counted)
         var changed = false
         for (callID, raw) in o.seen.sorted(by: { $0.key < $1.key }) {
-            let key = (conversation ?? "") + "|" + callID
+            let key = Self.countedKey(conversation: conversation, callID: callID)
             guard counted.insert(key).inserted else { continue }
             w.counted.append(key)
             var t = SquelchTally(outputs: 1, trimmed: 0, rawBytes: raw, keptBytes: raw)
@@ -109,9 +115,15 @@ final class SquelchLedger: @unchecked Sendable {
             w.days[day] = (w.days[day] ?? SquelchTally()) + t
             changed = true
         }
-        guard changed else { lock.unlock(); return }
+        guard changed else { countedSets[wid] = counted; lock.unlock(); return }
+        if w.counted.count > Self.keepCounted {
+            let drop = w.counted.count - Self.keepCounted
+            for k in w.counted.prefix(drop) { counted.remove(k) }
+            w.counted.removeFirst(drop)
+        }
+        countedSets[wid] = counted
         Self.prune(&w)
-        state.workspaces[profileID.uuidString] = w
+        state.workspaces[wid] = w
         scheduleSaveLocked()
         let cb = onChange
         lock.unlock()
@@ -155,6 +167,7 @@ final class SquelchLedger: @unchecked Sendable {
     func reset(_ id: UUID) {
         lock.lock()
         state.workspaces[id.uuidString] = nil
+        countedSets[id.uuidString] = nil
         scheduleSaveLocked()
         lock.unlock()
         onChange?(id)
@@ -237,13 +250,17 @@ final class SquelchLedger: @unchecked Sendable {
         return String(first.prefix(40))
     }
 
+    static func countedKey(conversation: String?, callID: String) -> String {
+        let digest = SHA256.hash(data: Data(((conversation ?? "") + "|" + callID).utf8))
+        return digest.prefix(9).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func dayKey(_ d: Date) -> String {
         let c = Calendar(identifier: .gregorian).dateComponents(in: .current, from: d)
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     private static func prune(_ w: inout Workspace) {
-        if w.counted.count > keepCounted { w.counted.removeFirst(w.counted.count - keepCounted) }
         if w.days.count > keepDays {
             for k in w.days.keys.sorted().prefix(w.days.count - keepDays) {
                 w.days[k] = nil; w.reportedDays[k] = nil

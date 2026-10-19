@@ -386,7 +386,9 @@ extension Squelch {
             if family != .verbatim {
                 drop("progress bars", Patterns.progressBar)
                 collapseRepeats(minRun: 6)
-                collapseBlankRuns()
+                // An unknown command's output may be data the agent parses:
+                // its blank lines stay as printed.
+                if family != .other { collapseBlankRuns() }
             }
         }
 
