@@ -1,0 +1,34 @@
+import Foundation
+import Testing
+@testable import bromure_ac
+
+/// 5.2.3 crash (EXC_BAD_ACCESS in swift_task_isMainExecutorImpl, from a
+/// timer's MainActor.assumeIsolated): an Objective-C exception thrown inside
+/// a main-actor task was caught by AppKit's run loop, which left the
+/// concurrency runtime's executor record dangling — reproduced with a tiny
+/// app (raise in `Task { @MainActor in }`, then any assumeIsolated: SIGSEGV).
+/// BromureApplication stops the app at such an exception; one thrown by
+/// plain event handling (no Swift job) is survived, as before. These are
+/// the two stacks as the repro recorded them.
+@Suite("App: an exception that crossed a Swift task is told apart")
+struct BromureApplicationTests {
+    @Test("a main-actor task's exception crossed a Swift job; a plain timer's didn't")
+    func crossedSwiftJob() {
+        let inTask = [
+            "0   CoreFoundation                      0x000000018216f1f0 __exceptionPreprocess + 176",
+            "1   libobjc.A.dylib                     0x0000000181bea91c objc_exception_throw + 88",
+            "3   repro                               0x0000000100121590 $s5reproyyScMYcXEfU_yyYaScMYccfU_TY0_ + 132",
+            "7   libswift_Concurrency.dylib          0x000000028775fec5 _ZL23completeTaskWithClosurePN5swift12AsyncContextEPNS_10SwiftErrorE + 1",
+        ]
+        let inTimer = [
+            "0   CoreFoundation                      0x000000018216f1f0 __exceptionPreprocess + 176",
+            "1   libobjc.A.dylib                     0x0000000181bea91c objc_exception_throw + 88",
+            "3   repro                               0x0000000100121590 closure #1 in closure #1 in main + 60",
+            "4   Foundation                          0x0000000186b7c420 __NSFireTimer + 104",
+            "5   CoreFoundation                      0x00000001854588cc __CFRUNLOOP_IS_CALLING_OUT_TO_A_TIMER_CALLBACK_FUNCTION__ + 32",
+        ]
+        #expect(BromureApplication.crossedSwiftJob(inTask))
+        #expect(!BromureApplication.crossedSwiftJob(inTimer))
+        #expect(BromureApplication.crossedSwiftJob(["2 libswift_Concurrency.dylib 0x1 swift_job_run + 76"]))
+    }
+}

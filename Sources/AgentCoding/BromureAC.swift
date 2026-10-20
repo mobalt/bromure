@@ -815,7 +815,12 @@ struct Run: ParsableCommand {
         MainActor.assumeIsolated {
             FileHandle.standardError.write(Data(
                 "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
-            let app = NSApplication.shared
+            // The first touch makes the app's class ours (an exception that
+            // crossed a Swift job stops the app at once — BromureApplication).
+            let app = BromureApplication.shared
+            if !(app is BromureApplication) {
+                FileHandle.standardError.write(Data("[run] NSApp was created before BromureApplication\n".utf8))
+            }
             app.setActivationPolicy(headless ? .accessory : .regular)
 
             let delegate = ACAppDelegate(imageManager: imageManager, headless: headless)
