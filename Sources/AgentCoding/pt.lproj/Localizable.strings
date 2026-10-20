@@ -4250,3 +4250,6 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "O agente fez uma nova pergunta desde que você escreveu isto. Altere sua resposta para enviá-la.";
 "The agent asked a new question before your answer went. Read it and answer again." = "O agente fez uma nova pergunta antes de sua resposta ser enviada. Leia-a e responda novamente.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "Não foi possível enviar a resposta.";

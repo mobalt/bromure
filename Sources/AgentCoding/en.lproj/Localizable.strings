@@ -4284,3 +4284,6 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "The agent asked a new question since you wrote this. Change your answer to send it.";
 "The agent asked a new question before your answer went. Read it and answer again." = "The agent asked a new question before your answer went. Read it and answer again.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "The answer couldn't be sent.";

@@ -129,6 +129,31 @@ final class ACAutomationServer {
     /// Coding board verbs: start / send-back / merge / to-testing / comment /
     /// delete on one task. Returns a JSON-able result ("error" key on failure).
     var onTaskCommand: ((_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any])?
+    /// `POST /tasks/{id}/answer`, answered once the board has actually
+    /// handed the answer to the agent (`{ok}`), or refused it (`{ok: false,
+    /// error}`) — not before, so the client keeps a refused answer's text.
+    var onTaskAnswer: ((_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
+
+    /// The answer route's reply, on the connection's thread: the handler's
+    /// verdict once it has one (on the main actor), else after `timeout`
+    /// a refusal — never a blind `ok`.
+    nonisolated static func awaitTaskAnswer(_ answer: @escaping (UUID, [String: Any]) async -> [String: Any],
+                                            id: UUID, body: [String: Any],
+                                            timeout: TimeInterval = 60) -> [String: Any] {
+        final class Box: @unchecked Sendable { var r: [String: Any]? }
+        let box = Box()
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) let body = body
+        Task { @MainActor in
+            box.r = await answer(id, body)
+            sem.signal()
+        }
+        guard sem.wait(timeout: .now() + timeout) == .success, let r = box.r else {
+            return ["ok": false, "error": NSLocalizedString("The answer couldn't be sent.",
+                                                             comment: "coding task: answer refused")]
+        }
+        return r
+    }
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.
     var onTaskTranscript: ((_ id: UUID) async -> String?)?
@@ -1070,6 +1095,10 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 400, body: ["error": "Bad task id"]); return
             }
             let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
+            if action == "answer", let answer = onTaskAnswer {
+                sendResponse(fd: fd, status: 200, body: Self.awaitTaskAnswer(answer, id: id, body: bodyJSON))
+                return
+            }
             let r = DispatchQueue.main.sync {
                 self.onTaskCommand?(id, action, bodyJSON) ?? ["error": "no handler"]
             }
