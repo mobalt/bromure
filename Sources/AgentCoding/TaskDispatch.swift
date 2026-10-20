@@ -563,22 +563,41 @@ final class TaskDispatcher {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               task.pendingAskID != nil else { return false }
         guard let ask = Self.answerTarget(task, writtenFor: askID) else {
-            delegate.codingTaskStore.mutate(taskID) {
-                $0.lastError = NSLocalizedString("The agent asked a new question before your answer went. Read it and answer again.", comment: "coding task: an answer for an earlier question")
-            }
+            delegate.codingTaskStore.mutate(taskID) { $0.lastError = Self.staleAnswerText }
             return false
         }
         do {
             try await delegate.delegationEngine.answer(
                 from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)
         } catch {
+            let why = (error as? DelegationRefusal)?.why ?? error.localizedDescription
             delegate.codingTaskStore.mutate(taskID) {
-                $0.lastError = (error as? DelegationRefusal)?.why ?? error.localizedDescription
+                $0.lastError = why
+                $0.answerRefusal = why
             }
             return false
         }
-        delegate.codingTaskStore.mutate(taskID) { Self.clearAnswered(&$0, ask: ask) }
+        delegate.codingTaskStore.mutate(taskID) {
+            Self.clearAnswered(&$0, ask: ask)
+            Self.clearAnswerError(&$0)
+        }
         return true
+    }
+
+    static let staleAnswerText = NSLocalizedString(
+        "The agent asked a new question before your answer went. Read it and answer again.",
+        comment: "coding task: an answer for an earlier question")
+
+    /// An answer went: what an earlier try of `answer` put on the card (the
+    /// stale-question note, a refused delivery's reason — `answerRefusal`,
+    /// saved with the task) is past, and the card would keep saying the
+    /// answer didn't go. Any other error (the assignee's own trouble, or
+    /// one that replaced the refusal since) stays.
+    static func clearAnswerError(_ task: inout CodingTask) {
+        if let e = task.lastError, e == staleAnswerText || e == task.answerRefusal {
+            task.lastError = nil
+        }
+        task.answerRefusal = nil
     }
 
     /// The ask an answer goes to: the one on the card, unless the answer was

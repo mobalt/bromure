@@ -77,6 +77,34 @@ struct TaskAnswerSheetTests {
         #expect(!draft.canSend(to: nil))
     }
 
+    /// Finding (CWE-670): "A successful task answer leaves the stale-ask
+    /// error on the card" — the answer that then went cleared the question
+    /// but not the note, and the card (saved) kept saying it didn't go.
+    @Test("an answer that goes clears what an earlier try put on the card, and nothing else")
+    func answerClearsItsOwnError() {
+        var t = task()
+        t.lastError = TaskDispatcher.staleAnswerText
+        TaskDispatcher.clearAnswerError(&t)
+        #expect(t.lastError == nil)
+        // A refused delivery's reason, saved with the task — after a
+        // relaunch too (the task round-trips through its file).
+        t.lastError = "No question is waiting for an answer."
+        t.answerRefusal = t.lastError
+        var saved = try! JSONDecoder().decode(CodingTask.self, from: JSONEncoder().encode(t))
+        TaskDispatcher.clearAnswerError(&saved)
+        #expect(saved.lastError == nil && saved.answerRefusal == nil)
+        // The assignee's own trouble stays, also when it replaced a refusal.
+        t.lastError = "@importer's session went away."
+        TaskDispatcher.clearAnswerError(&t)
+        #expect(t.lastError == "@importer's session went away.")
+        #expect(t.answerRefusal == nil)
+        // A task file from before the field: decodes, nothing to clear.
+        var legacy = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(task())) as! [String: Any]
+        legacy.removeValue(forKey: "answerRefusal")
+        let old = try! JSONDecoder().decode(CodingTask.self, from: JSONSerialization.data(withJSONObject: legacy))
+        #expect(old.answerRefusal == nil)
+    }
+
     @Test("the board answers only the question the answer was written for, and clears only that one")
     func answerTargetsItsAsk() {
         let first = UUID(), second = UUID()
