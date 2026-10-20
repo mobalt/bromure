@@ -51,7 +51,7 @@ Version 5.0.0 is organized around **sessions**: each conversation with an agent 
 The settings reference has one page per pane, in the editor's order:
 
 - **Workspace:** [General](07-settings/general.mdx), [Appearance](07-settings/appearance.mdx)
-- **Models:** [Models](07-settings/models.mdx), [Fusion](07-settings/fusion.mdx)
+- **Models:** [Models](07-settings/models.mdx), [Fusion](07-settings/fusion.mdx), [Squelch](07-settings/squelch.mdx)
 - **Machine:** [Folders](07-settings/folders.mdx), [Environment](07-settings/environment.mdx), [MCP](07-settings/mcp.mdx), [Browser](07-settings/browser.mdx), [Resources](07-settings/resources.mdx)
 - **Security:** [Credentials](07-settings/credentials.mdx), [Tracing](07-settings/tracing.mdx), [Guardrails](07-settings/guardrails.mdx), [Supply Chain](07-settings/supply-chain.mdx), [Prompt Injection](07-settings/prompt-injection.mdx), [PII Protection](07-settings/pii-protection.mdx)
 - **App** (Preferences only): [Automation](07-settings/automation.mdx)
@@ -72,6 +72,7 @@ The settings reference has one page per pane, in the editor's order:
 | Chapter | What it covers |
 |---|---|
 | [12. Fusion — the Multi-Model Panel](12-fusion.mdx) | Answering each prompt with several models at once, judged and combined into a single reply on the wire. |
+| [12.5 Squelch — Less Noise, Fewer Tokens](12a-squelch.mdx) | Trimming passing tests, progress and other noise out of command output before the model reads it (after rtk), and the tokens it saved per session. |
 | [13. Models & Providers](13-models.mdx) | The global Models board: providers (sign-ins, API keys, Amazon Bedrock, OpenRouter, custom servers, on-device models), per-agent model choices, per-workspace overrides, and live changes. |
 | [13.5 Kubernetes Clusters & Registries](13a-kubernetes.mdx) | Running k3s clusters and a private container registry in their own VMs beside your machines: storage, load balancing, add-ons, access, and the infrastructure MCP server. |
 

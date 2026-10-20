@@ -44,7 +44,8 @@ struct ComposerTextView: NSViewRepresentable {
         coordinator.shown = text
         let scroll = ComposerScrollView()
         scroll.documentView = textView
-        scroll.hasVerticalScroller = true
+        // Only once the text passes `maxLines` (see `remeasure`).
+        scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
@@ -55,6 +56,7 @@ struct ComposerTextView: NSViewRepresentable {
         scroll.onLayout = { [weak coordinator] in coordinator?.remeasure() }
         scroll.onAttach = { [weak coordinator] in coordinator?.focusIfFree() }
         coordinator.textView = textView
+        coordinator.scrollView = scroll
         return scroll
     }
 
@@ -78,6 +80,7 @@ struct ComposerTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
         weak var textView: ComposerNSTextView?
+        weak var scrollView: NSScrollView?
         /// Set while the typed text is pushed to the binding, so the update
         /// pass that follows doesn't write it back into the view.
         var pushingText = false
@@ -140,14 +143,27 @@ struct ComposerTextView: NSViewRepresentable {
         /// The height the text wants at the current width: one line at
         /// least, `maxLines` at most. Pushed to the binding when it moves —
         /// off the current pass, since layout can land mid-update.
+        ///
+        /// The scroller is there only past `maxLines`. A legacy scroller
+        /// (scroll bars shown "Always", or a mouse attached) takes width
+        /// from the text: kept on below the cap, any overflow brought it
+        /// up, the narrower text wanted a line more, the taller frame sent
+        /// it away, the wider text wanted a line less — the box flipped
+        /// between two heights on every layout pass (issue #52). Shown
+        /// only once the frame is capped, a narrower text only wants more
+        /// lines, so it stays capped and the scroller stays.
         func remeasure() {
             guard let textView, let layout = textView.layoutManager,
                   let container = textView.textContainer else { return }
             layout.ensureLayout(for: container)
             let line = layout.defaultLineHeight(for: parent.font) + parent.lineSpacing
             let used = layout.usedRect(for: container).height
-            let wanted = ceil(min(max(used, line), line * CGFloat(parent.maxLines))
-                              + textView.textContainerInset.height * 2)
+            let cap = line * CGFloat(parent.maxLines)
+            let wanted = ceil(min(max(used, line), cap) + textView.textContainerInset.height * 2)
+            let scrolls = used > cap + 0.5
+            if let scrollView, scrollView.hasVerticalScroller != scrolls {
+                DispatchQueue.main.async { [weak scrollView] in scrollView?.hasVerticalScroller = scrolls }
+            }
             guard abs(wanted - parent.height) > 0.5 else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, abs(wanted - self.parent.height) > 0.5 else { return }

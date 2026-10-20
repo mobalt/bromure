@@ -353,6 +353,10 @@ final class SessionListModel {
         var accentHex: String
         var state: RunState
         var compromised: Bool
+        /// Squelch is on for it, and what it saved so far (nil: nothing yet,
+        /// or a machine Squelch doesn't reach).
+        var squelch = false
+        var squelchSummary: SquelchSummary? = nil
     }
 
     /// Running, attached panes — carry live tab models.

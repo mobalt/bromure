@@ -4210,3 +4210,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "このウィンドウではワークスペースの GitHub トークンを読み取れません。リポジトリを owner/repo の形式で入力してください。";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "マージされたブランチは、そのマージコミットに対して 1 回だけ実行されます（ブランチ内の各コミットごとではありません）。コミットがもたらした変更は、最初の親との差分で確認できます: git diff {{commit.key}}^1 {{commit.key}}。";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "変更は行ったその場で実行中のワークスペースに適用されます。再起動も保存も不要で、「キャンセル」でルールを元に戻せます。ルールのチェックを外すと削除せずにオフにでき、時計メニューから期間限定でオンにすることもできます。";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "モデルが読む前にコマンド出力からノイズを取り除く";
+"Saved so far" = "これまでの節約";
+"%@ saved" = "%@ 節約";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch はモデルが読む前にコマンド出力からノイズを取り除きます — クリックすると節約量を表示します";
+"Squelch is off on this machine — click to trim the noise out of command output" = "このマシンでは Squelch はオフです — クリックするとコマンド出力のノイズを取り除きます";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "モデルが読む前に、コマンド出力から成功したテスト・進捗バー・繰り返し行を取り除きます。エラーと警告は残ります。";
+"Inspired by" = "着想元:";
+"Tokens are estimated as characters ÷ 4." = "トークン数は文字数 ÷ 4 で概算しています。";
+"Trim command output on “%@”" = "「%@」でコマンド出力を切り詰める";
+"Off on “%@”: its agents' models read every command's output as printed." = "「%@」ではオフ：エージェントのモデルは各コマンドの出力を表示されたとおりに読みます。";
+"This conversation" = "この会話";
+"All of “%@”" = "「%@」全体";
+"Where it came from" = "内訳";
+"%@ tokens · %@" = "%@ トークン · %@";
+"~%@ tokens saved" = "約 %@ トークン節約";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "コマンド出力 %2$@ トークンのうち %1$@ · 出力 %3$d 件、切り詰め %4$d 件";
+"Last two weeks" = "過去 2 週間";
+"%@: %@ tokens saved" = "%@：%@ トークン節約";

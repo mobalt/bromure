@@ -4213,3 +4213,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此視窗無法讀取工作區的 GitHub 權杖——請以 擁有者/儲存庫 的形式輸入儲存庫。";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合併的分支只觸發一次，針對其合併提交，而不是其中的每個提交。將提交與其第一個父提交比較，即可看到它帶來的變更：git diff {{commit.key}}^1 {{commit.key}}。";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "變更會在你修改時立即套用到執行中的工作區，無需重新啟動或儲存；按「取消」會將規則還原。取消勾選某條規則即可關閉它而不刪除，或使用其時鐘選單限時開啟。";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "在模型讀取之前，去除命令輸出中的雜訊";
+"Saved so far" = "至今節省";
+"%@ saved" = "節省 %@";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch 在模型讀取之前去除命令輸出中的雜訊——按一下查看節省了多少";
+"Squelch is off on this machine — click to trim the noise out of command output" = "此機器上的 Squelch 已關閉——按一下以去除命令輸出中的雜訊";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "在模型讀取之前，從命令輸出中移除通過的測試、進度列和重複行。錯誤和警告會保留。";
+"Inspired by" = "靈感來自";
+"Tokens are estimated as characters ÷ 4." = "token 數以字元數 ÷ 4 估算。";
+"Trim command output on “%@”" = "精簡「%@」上的命令輸出";
+"Off on “%@”: its agents' models read every command's output as printed." = "在「%@」上已關閉：其代理程式的模型會照原樣讀取每個命令的輸出。";
+"This conversation" = "此對話";
+"All of “%@”" = "「%@」全部";
+"Where it came from" = "來源";
+"%@ tokens · %@" = "%@ 個 token · %@";
+"~%@ tokens saved" = "約節省 %@ 個 token";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "命令輸出 %2$@ 個 token 中的 %1$@ · %3$d 個輸出，精簡 %4$d 個";
+"Last two weeks" = "最近兩週";
+"%@: %@ tokens saved" = "%@：節省 %@ 個 token";

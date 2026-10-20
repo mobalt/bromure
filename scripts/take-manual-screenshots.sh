@@ -184,7 +184,7 @@ for entry in "${ALL_LOCALES[@]}"; do
     # 3. Settings: the workspace editor's panes, then Preferences › Models.
     editor open '"profile":"Web app"' >/dev/null; sleep 1.5
     # category key : file name (the manual's historical names)
-    for pair in general:general appearance:appearance models:models fusion:fusion folders:folders \
+    for pair in general:general appearance:appearance models:models fusion:fusion squelch:squelch folders:folders \
                 environment:environment mcp:mcp browser:browser resources:resources \
                 credentials:credentials tracing:tracing guardrails:guardrails \
                 supplychain:supply-chain promptinjection:prompt-injection piiprotection:pii-protection; do

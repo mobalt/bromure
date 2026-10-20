@@ -131,6 +131,12 @@ struct BromureAC: ParsableCommand {
             PIIScanCLI.run(Array(filtered.dropFirst()))
             return
         }
+        // Hidden verification hook: what Squelch makes of a command's output.
+        //   some-command 2>&1 | bromure-ac __squelch "some-command" [--stats]
+        if filtered.first == "__squelch" {
+            SquelchCLI.run(Array(filtered.dropFirst()))
+            return
+        }
         // Hidden docs/screenshot hook: render the reworked "Log in to bromure.io"
         // sheet to a PNG and exit — no servers, no VMs. Sibling of /debug/ui-shot.
         // Hidden verification hook for the UX surfaces (command palette,
@@ -1372,6 +1378,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // session window's streaming indicator stay in lockstep
             // with the latest store state.
             refreshStreamingState()
+            // Squelch is read by the proxy on every model request.
+            SquelchSettings.update(Dictionary(profiles.map { ($0.id, $0.squelch) }, uniquingKeysWith: { a, _ in a }))
             // A workspace's firewall rules changed (any save path: editor,
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
@@ -1876,7 +1884,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 name: p.name,
                 accentHex: p.color.hexInUI,
                 state: runState(for: p),
-                compromised: SessionDisk.isCompromised(profile: p, store: store))
+                compromised: SessionDisk.isCompromised(profile: p, store: store),
+                squelch: p.squelch.enabled,
+                squelchSummary: SquelchLedger.shared.summary(p.id))
         } + machines.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
@@ -1973,6 +1983,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // Id-based wrappers so the sidebar's ⋯ menu can drive the Profile-typed
     // handlers without holding the Profile itself.
+    /// Squelch on or off for a workspace: saved, and in force from its next
+    /// model request (the proxy reads `SquelchSettings`, kept by `profiles`).
+    @discardableResult
+    func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
+        var p = profiles[i]
+        guard p.squelch.enabled != on else { return true }
+        p.squelch.enabled = on
+        do { try store.save(p) } catch {
+            NSLog("[bromure-ac] squelch: couldn't save profile: \(error)")
+            return false
+        }
+        profiles[i] = p
+        runningSessions[id]?.profile = p
+        refreshSidebar()
+        return true
+    }
+
+    /// New savings: the sidebar rows and session headers redraw, and fat
+    /// clients get a fresh snapshot — at most once a second.
+    func observeSquelchLedger() {
+        // The cloud report (a no-op until an uploader is set: SquelchCloud).
+        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { _ in
+            Task.detached(priority: .utility) { await SquelchCloud.sendPending() }
+        }
+        let pending = SquelchRefreshGate()
+        SquelchLedger.shared.onChange = { [weak self] _ in
+            guard pending.claim() else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                pending.release()
+                ACAutomationServer.noteMutation()
+                self?.refreshSidebar()
+            }
+        }
+    }
+
     func sidebarEditProfile(_ id: Profile.ID) {
         if let p = profiles.first(where: { $0.id == id }) { openEditorWindow(editing: p) }
     }
@@ -5249,6 +5295,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return self.commitFirewallRules(rules, profileID: uuid)
             }
         }
+        server.onSetSquelch = { [weak self] id, on in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id) else { return false }
+                return self.setSquelch(uuid, on)
+            }
+        }
+        server.onSquelchStats = { [weak self] in
+            MainActor.assumeIsolated {
+                var out: [String: Any] = [:]
+                for p in self?.profiles ?? [] {
+                    var row: [String: Any] = ["name": p.name, "enabled": p.squelch.enabled]
+                    if let sum = SquelchLedger.shared.summary(p.id, commands: 30, days: 30) {
+                        row["summary"] = Self.codableToDict(sum)
+                    }
+                    out[p.id.uuidString] = row
+                }
+                return ["workspaces": out]
+            }
+        }
+        observeSquelchLedger()
         server.onUpdateProfile = { [weak self] key, doc in
             self?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "unavailable"]
         }
@@ -5367,7 +5433,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // machines and tabs, exactly as the local sidebar does).
         server.onListAgentSessions = { [weak self] in
             MainActor.assumeIsolated {
-                self?.agentSessionStore.sessions.compactMap(Self.codableToDict) ?? []
+                // What Squelch saved in each conversation rides along: a
+                // client has no ledger of the host's.
+                self?.agentSessionStore.sessions.compactMap { s -> [String: Any]? in
+                    var s = s
+                    if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
+                    return Self.codableToDict(s)
+                } ?? []
             }
         }
         server.onListDelegations = { [weak self] in
@@ -6581,7 +6653,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "readyTools": readyToolSpecs(for: p).map {
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
+                "squelch": p.squelch.enabled,
             ]
+            if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
             if let failure = activeBootFailures[p.id] { row["bootFailure"] = failure }
@@ -7586,6 +7660,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
+        SquelchLedger.shared.flush()
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is

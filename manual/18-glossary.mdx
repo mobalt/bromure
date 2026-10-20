@@ -352,6 +352,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Sparkle** — The auto-update system built into the app, behind **Check for Updates…**. See [Installation & First Run](02-installation.mdx).
 
+**Squelch** — An optional per-machine feature (off by default) that cuts the noise out of command output — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it, and counts the tokens it saved per session. Modelled on rtk. See [Squelch — Less Noise, Fewer Tokens](12a-squelch.mdx).
+
 **SSH front door** — Bromure's own optional SSH server (not macOS's). Off by default; when on, it carries remote logins and rich-client connections. See [Remote Access & Clients](14-remote-access.mdx).
 
 **ssh-agent bridge** — The SSH agent Bromure offers the VM. The VM can ask it to sign with a key but can never read the key itself. See [Credentials & the Wire Boundary](08-credentials.mdx).

@@ -359,6 +359,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// Added to the agent's system prompt on every launch, resumes
     /// included (picked on the New session screen). nil = none.
     var instructions: String?
+    /// What Squelch saved in this conversation, as the host counted it.
+    /// Only on the wire: a host fills it in for its fat clients (its own
+    /// numbers live in `SquelchLedger`); nothing local sets or stores it.
+    var squelch: SquelchTally?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,

@@ -4210,3 +4210,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Esta janela não consegue ler o token do GitHub do espaço de trabalho — digite o repositório como proprietário/repositório.";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Um branch mesclado dispara uma vez, pelo seu commit de merge — não por cada um dos seus commits. Compare um commit com o primeiro pai para ver o que ele trouxe: git diff {{commit.key}}^1 {{commit.key}}.";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "As alterações se aplicam a um workspace em execução à medida que você as faz — sem reiniciar nem salvar; Cancelar restaura as regras como estavam. Desmarque uma regra para desativá-la sem excluí-la, ou use o menu de relógio dela para ativá-la por tempo limitado.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Tirar o ruído da saída dos comandos antes que o modelo a leia";
+"Saved so far" = "Economizado até agora";
+"%@ saved" = "%@ economizados";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "O Squelch tira o ruído da saída dos comandos antes que o modelo a leia — clique para ver o que ele economizou";
+"Squelch is off on this machine — click to trim the noise out of command output" = "O Squelch está desligado nesta máquina — clique para tirar o ruído da saída dos comandos";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Retira os testes aprovados, as barras de progresso e as linhas repetidas da saída dos comandos antes que o modelo a leia. Erros e avisos permanecem.";
+"Inspired by" = "Inspirado no";
+"Tokens are estimated as characters ÷ 4." = "Os tokens são estimados como caracteres ÷ 4.";
+"Trim command output on “%@”" = "Enxugar a saída dos comandos em “%@”";
+"Off on “%@”: its agents' models read every command's output as printed." = "Desligado em “%@”: os modelos dos agentes leem a saída de cada comando como foi impressa.";
+"This conversation" = "Esta conversa";
+"All of “%@”" = "Todo o “%@”";
+"Where it came from" = "De onde veio";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens economizados";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ de %@ tokens de saída de comandos · %d saídas, %d enxugadas";
+"Last two weeks" = "Últimas duas semanas";
+"%@: %@ tokens saved" = "%@: %@ tokens economizados";

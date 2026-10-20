@@ -88,6 +88,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case localModels = "Models"
     case fusion      = "Fusion"
+    case squelch     = "Squelch"
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
@@ -116,7 +117,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var group: Group {
         switch self {
         case .general, .appearance: return .workspace
-        case .localModels, .fusion: return .models
+        case .localModels, .fusion, .squelch: return .models
         case .folders, .environment, .resources, .browser, .mcp: return .machine
         case .credentials, .guardrails, .firewall, .supplyChain, .promptInjection, .pii, .tracing: return .security
         case .automation: return .app
@@ -129,6 +130,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo sensitive reach delegation nickname"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
+        case .squelch:         return "tokens noise output trim filter compress savings context cost test logs"
         case .folders:         return "shared folder mount directory"
         case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
         case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
@@ -151,6 +153,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:     "person.text.rectangle.fill"
         case .localModels: "sparkles"
         case .fusion:      "bolt.fill"
+        case .squelch:     "line.3.horizontal.decrease.circle.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
@@ -173,6 +176,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:     .indigo
         case .localModels: .purple
         case .fusion:      .yellow
+        case .squelch:     .mint
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
@@ -1193,6 +1197,7 @@ struct ProfileEditorView: View {
         case .general:     generalSection
         case .localModels: localModelsSection
         case .fusion:      fusionSection
+        case .squelch:     squelchSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
@@ -4680,6 +4685,60 @@ struct ProfileEditorView: View {
         }
     }
 
+
+    // MARK: - Squelch section
+
+    @ViewBuilder
+    private var squelchSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox(label: Label(NSLocalizedString("Squelch", comment: "Squelch: feature name"),
+                                  systemImage: EditorCategory.squelch.symbol)) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(NSLocalizedString("Trim the noise out of command output before the model reads it", comment: "Squelch toggle"),
+                           isOn: $draft.squelch.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            #if os(macOS)
+            if draft.id != ProfileStore.templateID, let summary = SquelchLedger.shared.summary(draft.id) {
+                GroupBox(label: Label(NSLocalizedString("Saved so far", comment: "Squelch: savings"), systemImage: "chart.bar.fill")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        SquelchTallyRow(title: draft.name, tally: summary.total)
+                        if !summary.commands.isEmpty {
+                            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                                ForEach(summary.commands, id: \.name) { e in
+                                    GridRow {
+                                        Text(e.name).font(.system(size: 11.5, design: .monospaced)).lineLimit(1)
+                                        Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
+                                                    SquelchFormat.tokens(e.tally.savedTokens)))
+                                            .monospacedDigit()
+                                        Text(SquelchFormat.percent(e.tally.savedFraction)).monospacedDigit().foregroundStyle(.secondary)
+                                    }
+                                    .font(.system(size: 11.5))
+                                }
+                            }
+                        }
+                        SquelchDaysChart(days: summary.days)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            #endif
+
+            Text(SquelchHome.tokenNote)
+                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text(NSLocalizedString("Inspired by", comment: "Squelch: credit, followed by the project's link"))
+                Link(destination: URL(string: "https://github.com/rtk-ai/rtk")!) {
+                    Text(verbatim: "rtk — Rust Token Killer (rtk-ai), Apache-2.0")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+    }
 
     // MARK: - Supply Chain section
 

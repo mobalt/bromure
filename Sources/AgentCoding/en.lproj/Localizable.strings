@@ -4244,3 +4244,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "This window can't read the workspace's GitHub token — type the repository as owner/repo.";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}.";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Trim the noise out of command output before the model reads it";
+"Saved so far" = "Saved so far";
+"%@ saved" = "%@ saved";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch trims the noise out of command output before the model reads it — click for what it saved";
+"Squelch is off on this machine — click to trim the noise out of command output" = "Squelch is off on this machine — click to trim the noise out of command output";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay.";
+"Inspired by" = "Inspired by";
+"Tokens are estimated as characters ÷ 4." = "Tokens are estimated as characters ÷ 4.";
+"Trim command output on “%@”" = "Trim command output on “%@”";
+"Off on “%@”: its agents' models read every command's output as printed." = "Off on “%@”: its agents' models read every command's output as printed.";
+"This conversation" = "This conversation";
+"All of “%@”" = "All of “%@”";
+"Where it came from" = "Where it came from";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens saved";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ of %@ tokens of command output · %d outputs, %d trimmed";
+"Last two weeks" = "Last two weeks";
+"%@: %@ tokens saved" = "%@: %@ tokens saved";

@@ -374,6 +374,12 @@ final class WSContentGuard: @unchecked Sendable {
     var recordInjection: @Sendable (PromptInjectionFlag, String) -> Void
     var recordSwaps: @Sendable (PIIRewriter.Outcome, Double) -> Void
 
+    /// Squelch for this socket's turns, and the conversation the upgrade
+    /// named (Codex's `session_id` header) — where its savings are counted.
+    var squelch: @Sendable () -> SquelchPolicy? = { nil }
+    var conversation: String?
+    var squelchLedger: SquelchLedger = .shared
+
     private let restorer: PIIResponseRestorer
 
     init(host: String, path: String, profileID: UUID, vault: PIIVault,
@@ -404,7 +410,7 @@ final class WSContentGuard: @unchecked Sendable {
 
     /// The guard for an upgrade, or nil when the socket should stay an
     /// opaque (compressed) pipe: not a model provider, or neither engine on.
-    static func make(host: String, path: String, profileID: UUID) -> WSContentGuard? {
+    static func make(host: String, path: String, profileID: UUID, conversation: String? = nil) -> WSContentGuard? {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this Mac
         // (a custom server elsewhere) — the on-device engine is exempt.
@@ -413,12 +419,16 @@ final class WSContentGuard: @unchecked Sendable {
                 || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil else { return nil }
         let piiOn = HTTPMitmConnection.piiPolicyProvider?(profileID)?.isActive ?? false
         let piOn = HTTPMitmConnection.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
-        guard piiOn || piOn else { return nil }
+        let squelchOn = HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled ?? false
+        guard piiOn || piOn || squelchOn else { return nil }
         let pid = profileID
-        return WSContentGuard(
+        let g = WSContentGuard(
             host: host, path: path, profileID: profileID, vault: PIIVault.forProfile(profileID),
             piiPolicy: { HTTPMitmConnection.piiPolicyProvider?(pid) },
             injectionPolicy: { HTTPMitmConnection.promptInjectionPolicyProvider?(pid) })
+        g.squelch = { HTTPMitmConnection.squelchPolicyProvider?(pid) }
+        g.conversation = conversation
+        return g
     }
 
     // MARK: Client → model
@@ -427,12 +437,23 @@ final class WSContentGuard: @unchecked Sendable {
         guard payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return .forward(nil) }
         let pi = injectionPolicy().flatMap { $0.isActive ? $0 : nil }
         let pii = piiPolicy().flatMap { $0.isActive ? $0 : nil }
-        guard pi != nil || pii != nil else { return .forward(nil) }
+        let squelchOn = squelch()?.enabled ?? false
+        guard pi != nil || pii != nil || squelchOn else { return .forward(nil) }
         let type = Self.messageType(payload)
         // Tool output the user already blocked goes out as a placeholder
         // (the conversation is resent every turn), so the session goes on.
         var payload = payload
+        // "Changed": what goes out isn't what the client sent.
         var redacted = false
+        // Squelch, before the scans: they read what the model will.
+        if squelchOn, SquelchRewriter.mayCarryToolOutput(payload) {
+            let pid = profileID
+            let o = SquelchRewriter.rewrite(payload, priorCall: { SquelchCallRegistry.shared.call(pid, $0) })
+            squelchLedger.record(o, profileID: profileID,
+                                        conversation: conversation ?? o.conversation)
+            if o.body != payload { payload = o.body; redacted = true }
+        }
+        guard pi != nil || pii != nil else { return .forward(redacted ? payload : nil) }
         if pi != nil, pi?.onDetection != .log,
            let r = PromptInjectionRedactions.shared.redact(payload, profileID: profileID) {
             payload = r.body
@@ -508,6 +529,11 @@ final class WSContentGuard: @unchecked Sendable {
     /// split across deltas — which may turn one message into none (held) or
     /// several (a released tail ahead of the closing event).
     func server(_ payload: Data) -> [Data]? {
+        // The calls the model makes: what a chained turn's bare results are
+        // matched with (Squelch).
+        if squelch()?.enabled == true {
+            SquelchCallRegistry.shared.learn(fromServerEvent: payload, profileID: profileID)
+        }
         guard !vault.isEmpty,
               payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return nil }
         var compact = payload

@@ -5925,18 +5925,28 @@ def create_session():
     #   3. Plain shell: scroll tmux history via copy-mode.
     # Bound in both copy-mode tables so vi mode-keys keeps scrolling. Re-run
     # on every daemon start, so a restart refreshes a live session's bindings.
+    #
+    # Every scroll also parks the copy cursor on the view's top line. On a
+    # resize tmux keeps the cursor's line and puts it on row 0
+    # (window_copy_resize); left where scroll-up leaves it — the bottom row —
+    # each resize dropped the view a whole screen. Switching windows moves
+    # size authority between clients of different sizes, so a few switches
+    # landed a scrolled-back terminal at the bottom (issue #51). Anchored on
+    # the top line, a resize keeps the view where it was. The guard: a
+    # scroll-down that reaches the bottom ends copy-mode (-e).
+    top = "if -F '#{pane_in_mode}' 'send-keys -X top-line'"
     _tmux_ok("set-option", "-s", "user-keys[0]", "\x1b[1000001~")
     _tmux_ok("set-option", "-s", "user-keys[1]", "\x1b[1000002~")
     _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{mouse_any_flag}",
              "send-keys -H 1b 5b 3c 36 34 3b 31 3b 31 4d",   # \x1b[<64;1;1M
              "if -F '#{alternate_on}' 'send-keys Up' "
-             "'copy-mode -e ; send-keys -X scroll-up'")
+             "'copy-mode -e ; send-keys -X scroll-up ; send-keys -X top-line'")
     _tmux_ok("bind-key", "-n", "User1", "if", "-F", "#{mouse_any_flag}",
              "send-keys -H 1b 5b 3c 36 35 3b 31 3b 31 4d",   # \x1b[<65;1;1M
              "if -F '#{alternate_on}' 'send-keys Down'")
     for table in ("copy-mode", "copy-mode-vi"):
-        _tmux_ok("bind-key", "-T", table, "User0", "send-keys", "-X", "scroll-up")
-        _tmux_ok("bind-key", "-T", table, "User1", "send-keys", "-X", "scroll-down")
+        _tmux_ok("bind-key", "-T", table, "User0", "send-keys -X scroll-up ; " + top)
+        _tmux_ok("bind-key", "-T", table, "User1", "send-keys -X scroll-down ; " + top)
 
     # The session exists, so agent code is now possible. Tell the supervisor,
     # which tells the sentry to leave its boot phase. Announced from HERE rather

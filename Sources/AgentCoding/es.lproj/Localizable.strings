@@ -4212,3 +4212,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Esta ventana no puede leer el token de GitHub del espacio de trabajo: escribe el repositorio como propietario/repositorio.";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Una rama fusionada se dispara una vez, por su commit de fusión, no por cada uno de sus commits. Compara un commit con su primer padre para ver lo que aportó: git diff {{commit.key}}^1 {{commit.key}}.";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Los cambios se aplican a un espacio de trabajo en ejecución a medida que los haces, sin reiniciar ni guardar; Cancelar restaura las reglas como estaban. Desmarca una regla para desactivarla sin eliminarla, o usa su menú de reloj para activarla durante un tiempo limitado.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Quitar el ruido de la salida de los comandos antes de que el modelo la lea";
+"Saved so far" = "Ahorrado hasta ahora";
+"%@ saved" = "%@ ahorrados";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch quita el ruido de la salida de los comandos antes de que el modelo la lea: haz clic para ver lo que ahorró";
+"Squelch is off on this machine — click to trim the noise out of command output" = "Squelch está desactivado en esta máquina: haz clic para quitar el ruido de la salida de los comandos";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Quita las pruebas superadas, las barras de progreso y las líneas repetidas de la salida de los comandos antes de que el modelo la lea. Los errores y las advertencias se quedan.";
+"Inspired by" = "Inspirado en";
+"Tokens are estimated as characters ÷ 4." = "Los tokens se estiman como caracteres ÷ 4.";
+"Trim command output on “%@”" = "Recortar la salida de los comandos en «%@»";
+"Off on “%@”: its agents' models read every command's output as printed." = "Desactivado en «%@»: los modelos de sus agentes leen la salida de cada comando tal como se imprimió.";
+"This conversation" = "Esta conversación";
+"All of “%@”" = "Todo «%@»";
+"Where it came from" = "De dónde vino";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens ahorrados";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ de %@ tokens de salida de comandos · %d salidas, %d recortadas";
+"Last two weeks" = "Últimas dos semanas";
+"%@: %@ tokens saved" = "%@: %@ tokens ahorrados";

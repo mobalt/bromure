@@ -433,7 +433,7 @@ struct MobileNewSessionScreen: View {
         .alert("Couldn't start the session", isPresented: $failed) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(controller.lastError ?? "The server didn't answer. Check the connection and try again.")
+            Text(controller.lastStartError ?? "The server didn't answer. Check the connection and try again.")
         }
         .sheet(item: $workspaceEdit) { edit in
             WorkspaceEditorSheet(controller: controller, editing: edit.editingID) {

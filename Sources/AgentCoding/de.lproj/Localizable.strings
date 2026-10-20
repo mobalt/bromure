@@ -4210,3 +4210,24 @@
 "This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Dieses Fenster kann das GitHub-Token des Workspace nicht lesen — geben Sie das Repository als Besitzer/Repository ein.";
 "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Ein gemergter Branch löst einmal aus, für seinen Merge-Commit – nicht für jeden seiner Commits. Vergleiche einen Commit mit seinem ersten Elternteil, um zu sehen, was er gebracht hat: git diff {{commit.key}}^1 {{commit.key}}.";
 "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Änderungen gelten für einen laufenden Workspace, sobald Sie sie vornehmen – ohne Neustart und ohne Sichern; „Abbrechen“ stellt die Regeln wieder her, wie sie waren. Entfernen Sie das Häkchen einer Regel, um sie auszuschalten, ohne sie zu löschen, oder schalten Sie sie über ihr Uhr-Menü für eine begrenzte Zeit ein.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Rauschen aus der Befehlsausgabe entfernen, bevor das Modell sie liest";
+"Saved so far" = "Bisher eingespart";
+"%@ saved" = "%@ gespart";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch entfernt das Rauschen aus der Befehlsausgabe, bevor das Modell sie liest – klicken Sie für die Einsparungen";
+"Squelch is off on this machine — click to trim the noise out of command output" = "Squelch ist auf dieser Maschine aus – klicken Sie, um das Rauschen aus der Befehlsausgabe zu entfernen";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Entfernt bestandene Tests, Fortschrittsbalken und wiederholte Zeilen aus der Befehlsausgabe, bevor das Modell sie liest. Fehler und Warnungen bleiben.";
+"Inspired by" = "Inspiriert von";
+"Tokens are estimated as characters ÷ 4." = "Tokens werden als Zeichen ÷ 4 geschätzt.";
+"Trim command output on “%@”" = "Befehlsausgabe auf „%@“ kürzen";
+"Off on “%@”: its agents' models read every command's output as printed." = "Aus auf „%@“: Die Modelle seiner Agenten lesen jede Befehlsausgabe so, wie sie ausgegeben wurde.";
+"This conversation" = "Diese Unterhaltung";
+"All of “%@”" = "Ganz „%@“";
+"Where it came from" = "Woher es kam";
+"%@ tokens · %@" = "%@ Tokens · %@";
+"~%@ tokens saved" = "~%@ Tokens gespart";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ von %@ Tokens Befehlsausgabe · %d Ausgaben, %d gekürzt";
+"Last two weeks" = "Letzte zwei Wochen";
+"%@: %@ tokens saved" = "%@: %@ Tokens gespart";
