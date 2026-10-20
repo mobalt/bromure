@@ -37,6 +37,8 @@ Squelch looks at the command an output came from — the last command of a chain
 
 A line that names an error, a failure, a warning, a panic or a timeout is never left out, whatever pattern it matches.
 
+An uninstall (`pip uninstall`, `uv pip uninstall`, `npm remove`, `brew uninstall`, `apt remove`…) isn't an install: what it prints is the list of what went, so it only gets the generic cleaning of "everything else".
+
 Some output is never touched, because the agent reads it as the thing itself — usually to copy from it into an edit: `cat`, `head`, `tail`, `sed`, `less`, `jq`, `awk`, `diff`, `git diff`, `git show`, `git log`, `git blame`, `curl`, `python -c` and the like. Neither is a pipeline the agent shaped itself (`pytest -v | tail -40`): it already chose what to see. Results of the agents' own file tools (Read, Edit, Grep tools) are never touched either — only shell commands.
 
 Output under about 300 bytes, or that would shrink by less than 10%, goes through unchanged.
