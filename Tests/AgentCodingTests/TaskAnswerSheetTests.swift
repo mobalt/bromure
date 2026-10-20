@@ -125,19 +125,11 @@ struct TaskAnswerSendTests {
         }, id: UUID(), body: ["text": "x"])
         #expect(Date().timeIntervalSince(t0) >= 0.25)
         #expect(refused["ok"] as? Bool == false)
-        #expect(RemoteHostController.answerOutcome(refused) == .refused)
+        #expect(RemoteHostController.answerAccepted(refused) == false)
         let taken = ACAutomationServer.awaitTaskAnswer({ _, _ in ["ok": true] }, id: UUID(), body: [:])
-        #expect(RemoteHostController.answerOutcome(taken) == .taken)
-        // No verdict in time: the delivery is still under way and goes on —
-        // "pending": neither a refusal the client would offer to send again,
-        // nor taken (the sheet would drop text the card may still refuse).
-        let late = ACAutomationServer.awaitTaskAnswer({ _, _ in
-            try? await Task.sleep(nanoseconds: 2_000_000_000); return ["ok": true]
-        }, id: UUID(), body: [:], timeout: 0.2)
-        #expect(late["pending"] as? Bool == true)
-        #expect(RemoteHostController.answerOutcome(late) == .pending)
+        #expect(RemoteHostController.answerAccepted(taken))
         // The link failed: not taken. A server from before the wait: `{ok: true}`, as ever.
-        #expect(RemoteHostController.answerOutcome(nil) == .refused)
-        #expect(RemoteHostController.answerOutcome(["ok": true]) == .taken)
+        #expect(!RemoteHostController.answerAccepted(nil))
+        #expect(RemoteHostController.answerAccepted(["ok": true]))
     }
 }

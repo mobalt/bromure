@@ -135,14 +135,12 @@ final class ACAutomationServer {
     var onTaskAnswer: ((_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
 
     /// The answer route's reply, on the connection's thread: the handler's
-    /// verdict once it has one (on the main actor). Past `timeout` the
-    /// delivery is still under way and can't be called off — never a
-    /// refusal then (the client would offer to send it again): `pending`,
-    /// and the card says how it went.
+    /// verdict, once it has one (on the main actor). No deadline: a reply
+    /// cut short while the delivery goes on (its prompt-injection scan, the
+    /// post) told the client "refused" for an answer that then went.
     nonisolated static func awaitTaskAnswer(_ answer: @escaping (UUID, [String: Any]) async -> [String: Any],
-                                            id: UUID, body: [String: Any],
-                                            timeout: TimeInterval = 60) -> [String: Any] {
-        final class Box: @unchecked Sendable { var r: [String: Any]? }
+                                            id: UUID, body: [String: Any]) -> [String: Any] {
+        final class Box: @unchecked Sendable { var r: [String: Any] = [:] }
         let box = Box()
         let sem = DispatchSemaphore(value: 0)
         nonisolated(unsafe) let body = body
@@ -150,10 +148,8 @@ final class ACAutomationServer {
             box.r = await answer(id, body)
             sem.signal()
         }
-        guard sem.wait(timeout: .now() + timeout) == .success, let r = box.r else {
-            return ["ok": false, "pending": true]
-        }
-        return r
+        sem.wait()
+        return box.r
     }
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.

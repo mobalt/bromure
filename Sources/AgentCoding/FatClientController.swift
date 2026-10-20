@@ -2428,15 +2428,15 @@ final class RemoteHostController {
     }
 
     // Coding-board verbs, over the tunnel; the mirror confirms on poll.
-    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`), still
-    /// being delivered (`pending` — the card says how it went), refused
-    /// (`ok: false`, `error`), or none (the link failed: not taken). A
-    /// server from before the reply waited answers `{ok: true}` at once —
-    /// as it always did.
-    nonisolated static func answerOutcome(_ reply: [String: Any]?) -> TaskAnswerOutcome {
-        guard let reply else { return .refused }
-        if reply["pending"] as? Bool == true { return .pending }
-        return ((reply["ok"] as? Bool) ?? (reply["error"] == nil)) ? .taken : .refused
+    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`), refused
+    /// (`ok: false`, `error`), or none — the link failed: not known to be
+    /// taken, so the text stays; sending it again can't post it twice (the
+    /// board refuses an answer while one is on its way, and once it went,
+    /// the question is gone). A server from before the reply waited answers
+    /// `{ok: true}` at once — as it always did.
+    nonisolated static func answerAccepted(_ reply: [String: Any]?) -> Bool {
+        guard let reply else { return false }
+        return (reply["ok"] as? Bool) ?? (reply["error"] == nil)
     }
 
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
@@ -5004,11 +5004,11 @@ final class RemoteHostWindow: NSWindow {
                         // The server's word on it: refused (the agent asked
                         // again), or not answered — the sheet keeps the text.
                         // The server replies once the answer went (its scan
-                        // included), within 60 s: wait past that.
+                        // included): wait for it.
                         let r = await c.taskCommandReply(
                             id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
-                            recvTimeoutSeconds: 75)
-                        return RemoteHostController.answerOutcome(r)
+                            recvTimeoutSeconds: 180)
+                        return RemoteHostController.answerAccepted(r)
                     },
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),
