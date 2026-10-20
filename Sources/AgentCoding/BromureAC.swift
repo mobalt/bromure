@@ -13949,7 +13949,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationKubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {
@@ -13958,7 +13959,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return ["ok": false, "error": "missing name"]
             }
             var spec = KubeClusterSpec()
-            if let raw = doc["spec"], let data = try? JSONSerialization.data(withJSONObject: raw),
+            if let raw = doc["spec"], JSONSerialization.isValidJSONObject([raw]),
+               let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
                let decoded = try? JSONDecoder().decode(KubeClusterSpec.self, from: data) {
                 spec = decoded
             }
@@ -13999,7 +14001,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationRegistryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {

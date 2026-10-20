@@ -32,3 +32,23 @@ struct BromureApplicationTests {
         #expect(BromureApplication.crossedSwiftJob(["2 libswift_Concurrency.dylib 0x1 swift_job_run + 76"]))
     }
 }
+
+/// The exception behind the 5.2.3 crash: a browser_evaluate whose page
+/// value was a bare number/bool/null. jsonString checked it would be valid
+/// wrapped in an array, then wrote it unwrapped without .fragmentsAllowed —
+/// NSInvalidArgumentException, which `try?` doesn't catch.
+@Suite("Browser MCP: an evaluate's bare value is written, not thrown")
+struct BrowserMCPJSONStringTests {
+    @Test("scalars, null, collections and strings all come back as text")
+    func scalars() {
+        #expect(BrowserMCPServer.jsonString(42) == "42")
+        #expect(BrowserMCPServer.jsonString(3.5) == "3.5")
+        #expect(BrowserMCPServer.jsonString(true) == "true")
+        #expect(BrowserMCPServer.jsonString(NSNull()) == "null")
+        #expect(BrowserMCPServer.jsonString("plain") == "plain")
+        #expect(BrowserMCPServer.jsonString([1, 2]) == "[1,2]")
+        #expect(BrowserMCPServer.jsonString(["a": 1]) == "{\"a\":1}")
+        // Not JSON at all: described, never thrown.
+        #expect(!BrowserMCPServer.jsonString(Double.nan).isEmpty)
+    }
+}

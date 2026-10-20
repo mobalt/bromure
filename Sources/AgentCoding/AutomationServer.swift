@@ -1894,7 +1894,8 @@ final class ACAutomationServer {
     private func handleType(fd: Int32, profileID: String, bodyJSON: [String: Any], gzip: Bool) {
         guard let text = bodyJSON["text"] as? String,
               let raw = bodyJSON["target"],
-              let data = try? JSONSerialization.data(withJSONObject: raw),
+              JSONSerialization.isValidJSONObject([raw]),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
               let target = try? JSONDecoder().decode(PaneTarget.self, from: data) else {
             sendResponse(fd: fd, status: 400, body: ["typeRoute": true, "error": "target and text required"], gzip: gzip)
             return
