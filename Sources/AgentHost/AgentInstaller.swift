@@ -67,7 +67,10 @@ final class AgentInstaller: ObservableObject {
     static let shared = AgentInstaller()
 
     enum Phase: Equatable {
+        /// Before any scan, or while the first one runs.
         case unknown
+        /// The last scan didn't finish (the login shell timed out): no verdict.
+        case unchecked
         case missing
         case installed(version: String, path: String)
         case queued
@@ -77,6 +80,8 @@ final class AgentInstaller: ObservableObject {
 
     @Published private(set) var phases: [String: Phase] = [:]
     @Published private(set) var scanning = false
+    /// The last scan ran to its end (`AgentDetection.Scan.complete`).
+    @Published private(set) var lastScanComplete = false
     @Published private(set) var busy = false
     /// Each agent's installer output, for "Show log".
     @Published private(set) var logs: [String: String] = [:]
@@ -127,7 +132,7 @@ final class AgentInstaller: ObservableObject {
         scanning = true
         let ids = AgentSpec.all.map(\.id)
         Task.detached {
-            let (found, missing) = Self.detect(ids)
+            let (found, missing, complete) = Self.detect(ids)
             await MainActor.run {
                 for id in ids {
                     switch self.phases[id] {
@@ -141,9 +146,10 @@ final class AgentInstaller: ObservableObject {
                     } else if missing.contains(id) {
                         self.phases[id] = .missing
                     } else {
-                        self.phases[id] = .unknown        // the scan didn't finish: no verdict
+                        self.phases[id] = .unchecked      // the scan didn't finish: no verdict
                     }
                 }
+                self.lastScanComplete = complete
                 self.scanning = false
                 self.publishMissing()
             }
@@ -153,7 +159,7 @@ final class AgentInstaller: ObservableObject {
     /// The agents found (path, version) and the ones a complete scan says
     /// aren't there (AgentDetection: a shell killed on its timeout calls
     /// nothing missing; a binary in an installer's folder counts).
-    nonisolated static func detect(_ ids: [String]) -> (found: [String: (String, String)], missing: Set<String>) {
+    nonisolated static func detect(_ ids: [String]) -> (found: [String: (String, String)], missing: Set<String>, complete: Bool) {
         let r = HostProcess.run(executable: Tmux.userShell,
                                 args: ["-l", "-i", "-c", AgentDetection.script(ids, extraBins: extraBins)],
                                 env: ["HOME": NSHomeDirectory(), "USER": NSUserName(), "TERM": "dumb",
@@ -173,7 +179,7 @@ final class AgentInstaller: ObservableObject {
                 out[id] = (path, "installed")
             }
         }
-        return (out, AgentDetection.missing(ids, scan: scan, onDisk: disk))
+        return (out, AgentDetection.missing(ids, scan: scan, onDisk: disk), scan.complete)
     }
 
     /// "2.1.284 (Claude Code)" / "codex-cli 0.9.1" → the first version-looking
