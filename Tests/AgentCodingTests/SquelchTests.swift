@@ -67,12 +67,34 @@ struct SquelchFilterTests {
         #expect(Squelch.family(of: "git push origin main") == .git)
         #expect(Squelch.family(of: "docker compose logs api") == .logs)
         #expect(Squelch.family(of: "rg -n 'func ' Sources") == .search)
-        // A pipeline the agent shaped itself keeps what it chose.
-        #expect(Squelch.family(of: "pytest -v | tail -40") == .other)
+        // A pipeline the agent shaped itself keeps what it chose, untouched.
+        #expect(Squelch.family(of: "pytest -v | tail -40") == .verbatim)
         #expect(Squelch.family(of: "cat a.txt | wc -l") == .verbatim)
         // Separators inside quotes don't split the command.
         #expect(Squelch.family(of: "echo 'a && b' ; pytest") == .tests)
         #expect(Squelch.family(of: "python -c 'import x; print(x)'") == .verbatim)
+    }
+
+    /// Finding (CWE-670): "Squelch rewrites git diffs and shaped pipelines it
+    /// documents as untouched" — `git --no-pager diff`, `git -C repo diff`,
+    /// `git diff | head` were trimmed, so a diff adding a block of identical
+    /// lines reached the model collapsed, and the model could write that back.
+    @Test("a diff stays whole whatever git options or pipe lead to it")
+    func diffsStayWhole() {
+        for cmd in ["git --no-pager diff", "git -C repo diff --stat", "git -c color.ui=never show HEAD",
+                    "git --git-dir .git --work-tree . log -p", "GIT_PAGER=cat git diff", "git -P diff",
+                    "git diff | head -200", "git log -p | grep -A3 foo", "cd repo && git --no-pager diff HEAD~1",
+                    "gh pr diff 12", "gh api repos/o/r/contents/x", "hg diff", "jj diff", "svn log"] {
+            #expect(Squelch.family(of: cmd) == .verbatim, "\(cmd)")
+        }
+        #expect(Squelch.family(of: "git -C repo push origin main") == .git)
+        #expect(Squelch.family(of: "git -c core.x=1 grep -n foo") == .search)
+        // The text that was collapsed: a diff adding the same line 40 times.
+        var diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,0 +1,40 @@\n"
+        for _ in 0..<40 { diff += "+    assert_eq!(x.load(Ordering::SeqCst), 0);\n" }
+        for cmd in ["git --no-pager diff", "git diff | head -100"] {
+            #expect(Squelch.trim(command: cmd, output: diff) == nil, "\(cmd) was trimmed")
+        }
     }
 
     @Test("installs: download chatter and deprecation notices go, errors stay")
