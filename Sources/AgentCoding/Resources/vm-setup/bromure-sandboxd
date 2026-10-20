@@ -155,6 +155,38 @@ ADDITIONS_READ_ONLY = [
 ]
 
 
+# The agent CLIs Bromure installs, by the command the panes run. Most live
+# under /usr (npm), which any sane policy grants; two don't: grok is a
+# downloaded binary under /opt/grok, and omp's `#!/usr/bin/env bun` needs the
+# bun runtime under /opt/bun. A policy written for OpenShell has no reason to
+# know about /opt, and the result was every Bromure agent but two working —
+# `grok: Permission denied`, `omp` exiting 126 — with nothing pointing at the
+# filesystem policy. These are the image's own agents, the same standing as the
+# meta share: granted read-only, shown to the user as additions, and only the
+# install folder of each (never /opt as a whole).
+AGENT_COMMANDS = ("grok", "bun")
+
+
+def agent_cli_additions():
+    """Read-only install folders of Bromure's agent CLIs outside /usr.
+    Returns [(path, why)]."""
+    out = []
+    for name in AGENT_COMMANDS:
+        link = os.path.join("/usr/local/bin", name)
+        try:
+            real = os.path.realpath(link)
+        except OSError:
+            continue
+        parts = real.split("/")
+        # /opt/<package>/… → /opt/<package>
+        if len(parts) > 3 and parts[1] == "opt" and os.path.isdir("/opt/" + parts[2]):
+            path = "/opt/" + parts[2]
+            if path not in [p for p, _ in out]:
+                out.append((path, "install folder of %s, an agent CLI Bromure ships"
+                                  % ("omp's bun runtime" if name == "bun" else name)))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # DNS, and OpenShell's baseline
 # ---------------------------------------------------------------------------
@@ -2434,6 +2466,12 @@ def build_plan(spec, policy, status, group_gid, sandbox_cgroup=None):
         # resolution is broken looks like a network-policy problem and is the
         # hardest kind of bug to attribute.
         for path, why in resolver_additions():
+            if path not in extra_read_only:
+                extra_read_only.append(path)
+                addition_paths.append(path)
+                note_addition(path, why, "ro")
+        # Bromure's own agent CLIs that live outside /usr (grok, omp's bun).
+        for path, why in agent_cli_additions():
             if path not in extra_read_only:
                 extra_read_only.append(path)
                 addition_paths.append(path)
