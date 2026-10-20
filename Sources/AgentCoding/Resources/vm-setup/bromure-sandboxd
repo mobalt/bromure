@@ -1682,11 +1682,48 @@ def is_descendant_of(pid, ancestor):
 # package gets installed, as root, and only by exact name: a name is
 # [a-z0-9][a-z0-9+.-]* (optionally =version or /release), never an option, a
 # path or a .deb, so nothing on the request line can change what apt does.
+#
+# The shape alone isn't enough: apt reads a name that isn't exactly a package
+# as something else. A trailing `-` removes (`python3-` uninstalls python3
+# and everything that needs it), a trailing `+` installs, and failing those
+# the name is tried as a glob, then a regex (`a.+` selects most of the
+# archive). So each name must be an exact binary package in apt's cache
+# before apt-get sees it; one that isn't is refused, never passed on.
 
 _APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$")
 
 
-def apt_install(packages):
+def _apt_package(spec):
+    """The package name in `spec` (before its `=version` or `/release`)."""
+    return re.split(r"[=/]", spec, 1)[0]
+
+
+def _apt_is_package(name, run):
+    """`name` is exactly one binary package's name in the apt cache.
+
+    `apt-cache show` falls back to a glob or regex as well when the name
+    isn't a package, so every record it prints must carry this very name.
+    """
+    code, out = run(["apt-cache", "show", "--no-all-versions", "--", name])
+    if code != 0:
+        return False
+    found = [line[len("Package:"):].strip() for line in out.splitlines()
+             if line.startswith("Package:")]
+    return bool(found) and all(p == name for p in found)
+
+
+def _apt_run(env):
+    def run(argv):
+        try:
+            p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=840)
+            return p.returncode, p.stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, "%s: %s" % (argv[0], exc)
+    return run
+
+
+def apt_install(packages, run=None):
     """Install `packages` with apt-get. Returns (exit code, output tail)."""
     if not isinstance(packages, list) or not packages or len(packages) > 20 \
             or not all(isinstance(p, str) and _APT_NAME.match(p) and not p.endswith(".deb")
@@ -1694,22 +1731,32 @@ def apt_install(packages):
         return 2, "refused: not a list of 1 to 20 package names"
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive",
                APT_LISTCHANGES_FRONTEND="none", NEEDRESTART_MODE="a")
-    cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
+    run = run or _apt_run(env)
     log("apt_install %s" % " ".join(packages))
 
-    def run(argv):
-        try:
-            p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               timeout=840)
-            return p.returncode, p.stdout.decode("utf-8", "replace")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return 1, "apt-get: %s" % exc
+    out = ""
+    updated = False
 
-    code, out = run(cmd)
-    # The image ships without package lists (or with stale ones): refresh
-    # once and retry.
-    if code != 0 and ("Unable to locate package" in out or "has no installation candidate" in out
-                      or "Failed to fetch" in out):
+    def unknown():
+        return [p for p in packages if not _apt_is_package(_apt_package(p), run)]
+
+    # The image ships without package lists (or with stale ones): a name
+    # apt doesn't know yet gets one refresh before it's refused.
+    missing = unknown()
+    if missing:
+        ucode, uout = run(["apt-get", "update"])
+        out += uout
+        updated = ucode == 0
+        if updated:
+            missing = unknown()
+    if missing:
+        log("apt_install %s: refused, not package names: %s" % (" ".join(packages), " ".join(missing)))
+        return 2, (out + "\nrefused: no package is named exactly %s" % ", ".join(missing))[-16000:]
+
+    cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
+    code, out2 = run(cmd)
+    out += ("\n" if out else "") + out2
+    if code != 0 and not updated and "Failed to fetch" in out2:
         ucode, uout = run(["apt-get", "update"])
         out += "\n" + uout
         if ucode == 0:
