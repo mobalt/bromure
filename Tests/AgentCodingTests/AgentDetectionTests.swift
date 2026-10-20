@@ -82,6 +82,21 @@ struct AgentDetectionTests {
         #expect(scan.found.isEmpty)
     }
 
+    /// Finding: "Unfinished Sidecar agent scan leaves Manage Agents spinning
+    /// on Checking" — a scan killed on its timeout latched the window's one
+    /// chance to preselect Claude, with no verdict to go on.
+    @Test("a scan that didn't finish preselects nothing and leaves the choice to the next")
+    func preselection() {
+        let killed = AgentDetection.parse("@@P@@codex|/opt/homebrew/bin/codex@@\n")
+        #expect(!killed.complete)
+        let missing = AgentDetection.missing(["claude", "codex"], scan: killed, onDisk: [:])
+        #expect(AgentDetection.preselection(complete: killed.complete, missing: missing) == nil)
+        let done = AgentDetection.parse("@@P@@codex|/opt/homebrew/bin/codex@@\n\(AgentDetection.endMarker)\n")
+        #expect(AgentDetection.preselection(complete: done.complete,
+                                            missing: AgentDetection.missing(["claude", "codex"], scan: done, onDisk: [:])) == ["claude"])
+        #expect(AgentDetection.preselection(complete: true, missing: ["codex"]) == [])
+    }
+
     @Test("a refused start says why")
     func startFailureWords() {
         let why = "Claude Code isn't installed on this Mac. Install it from Manage Agents… in the Bromure Sidecar menu."
