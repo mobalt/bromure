@@ -419,8 +419,11 @@ struct CodingKanbanView: View {
         /// off its queue). nil closure = queues aren't available here.
         var assign: ((UUID, TaskAssignment?) -> Void)?
         /// Answer the assignee's question: task, the ask the answer was
-        /// written for (`pendingAskID`), text.
-        var answer: (UUID, UUID?, String) -> Void = { _, _, _ in }
+        /// written for (`pendingAskID`), text. True once the board handed it
+        /// to the agent; false when it was refused (the agent asked again,
+        /// the question is gone) or couldn't be sent — the sheet then keeps
+        /// the text.
+        var answer: (UUID, UUID?, String) async -> Bool = { _, _, _ in false }
         /// Take a handed-off task back to the backlog.
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
@@ -1020,7 +1023,7 @@ struct CodingKanbanView: View {
                         accentHex: accentHex(for: task.profileID),
                         workspaceName: workspaceName(for: task.profileID),
                         onOpen: { actions.openAssignee(task) },
-                        onAnswer: { actions.answer(task.id, $0, $1) },
+                        onAnswer: { await actions.answer(task.id, $0, $1) },
                         onRecall: { actions.recall(task.id) })
                 } else {
                 InProgressTaskCard(
@@ -1964,10 +1967,14 @@ private struct AssignedTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void
-    var onAnswer: (UUID?, String) -> Void
+    var onAnswer: (UUID?, String) async -> Bool
     var onRecall: () -> Void
     @State private var answering = false
     @State private var draft = TaskAnswerDraft()
+    @State private var sending = false
+    /// The last Send was refused or didn't go (the sheet says why from the
+    /// task's current `lastError`).
+    @State private var sendFailed = false
 
     var body: some View {
         Button(action: onOpen) {
@@ -2056,9 +2063,26 @@ private struct AssignedTaskCard: View {
             TaskAnswerSheet(task: task,
                             reply: Binding(get: { draft.text }, set: { draft.edit($0, for: task.pendingAskID) }),
                             stale: draft.isStale(for: task.pendingAskID),
+                            sending: sending,
+                            error: sendFailed ? (task.lastError ?? NSLocalizedString(
+                                "The answer couldn't be sent.", comment: "coding task: answer refused")) : nil,
                             onSend: { text in
-                                guard draft.canSend(to: task.pendingAskID) else { return }
-                                onAnswer(draft.askID, text); draft = TaskAnswerDraft(); answering = false
+                                guard !sending, draft.canSend(to: task.pendingAskID) else { return }
+                                sending = true
+                                sendFailed = false
+                                let sent = draft
+                                Task { @MainActor in
+                                    let ok = await onAnswer(sent.askID, text)
+                                    sending = false
+                                    // Gone only once the board took it: a
+                                    // refused answer stays, with why.
+                                    draft = draft.afterSend(sent, accepted: ok)
+                                    if ok {
+                                        answering = false
+                                    } else {
+                                        sendFailed = true
+                                    }
+                                }
                             },
                             onCancel: { answering = false })   // the draft stays for next time
         }
@@ -2088,6 +2112,13 @@ struct TaskAnswerDraft: Equatable {
     func canSend(to ask: UUID?) -> Bool {
         ask != nil && askID == ask && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    /// The draft once a Send of `sent` came back: gone only when the board
+    /// took it and it wasn't edited meanwhile; a refused answer keeps its
+    /// text for the user to send again (or rewrite for the new question).
+    func afterSend(_ sent: TaskAnswerDraft, accepted: Bool) -> TaskAnswerDraft {
+        accepted && self == sent ? TaskAnswerDraft() : self
+    }
 }
 
 /// Answer a task's question: the whole question, readable and selectable,
@@ -2097,6 +2128,10 @@ struct TaskAnswerSheet: View {
     @Binding var reply: String
     /// The draft was written for an earlier question.
     var stale = false
+    /// On its way to the agent: Send waits.
+    var sending = false
+    /// Why the last Send didn't go (the text is still here).
+    var error: String? = nil
     var onSend: (String) -> Void
     var onCancel: () -> Void
     @FocusState private var editorFocused: Bool
@@ -2145,6 +2180,11 @@ struct TaskAnswerSheet: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if let error {
+                    Label(error, systemImage: "exclamationmark.circle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack {
@@ -2152,12 +2192,13 @@ struct TaskAnswerSheet: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer()
+                if sending { ProgressView().controlSize(.small) }
                 Button(NSLocalizedString("Cancel", comment: ""), role: .cancel, action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button(NSLocalizedString("Send", comment: "")) { onSend(trimmed) }
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(trimmed.isEmpty || stale)
+                    .disabled(trimmed.isEmpty || stale || sending)
             }
         }
         .padding(20)

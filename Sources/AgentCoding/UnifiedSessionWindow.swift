@@ -2431,11 +2431,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// terminal) — not started.
     private func makeMachineChatModel(_ machine: AttachedMachine, window w: Int,
                                       session s: AgentSession) -> BeautifiedSessionModel {
-        let provider = MachineTranscriptProvider(machine: machine, window: w,
+        let provider = MachineTranscriptProvider(machine: machine, window: w, sessionID: s.id,
                                                  accent: Color(hex: machine.accentHex))
         let m = BeautifiedSessionModel(provider: provider)
         let mid = machine.id
-        m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.draftKey = "machine:\(mid.uuidString):\(w):\(s.id.uuidString)"
         m.cachedTranscript = SessionTranscriptCache.loadDetached
         m.delegationStore = acDelegate?.delegationStore
         m.sessionStore = acDelegate?.homeSessionStore
@@ -3570,7 +3570,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
                     assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
                     answer: { [weak self] id, ask, text in
-                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) }
+                        await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) ?? false
                     },
                     recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
                     openAssignee: { [weak self] task in

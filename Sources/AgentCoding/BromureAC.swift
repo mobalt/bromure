@@ -889,7 +889,12 @@ struct Run: ParsableCommand {
         MainActor.assumeIsolated {
             FileHandle.standardError.write(Data(
                 "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
-            let app = NSApplication.shared
+            // The first touch makes the app's class ours (an exception that
+            // crossed a Swift job stops the app at once — BromureApplication).
+            let app = BromureApplication.shared
+            if !(app is BromureApplication) {
+                FileHandle.standardError.write(Data("[run] NSApp was created before BromureApplication\n".utf8))
+            }
             app.setActivationPolicy(headless ? .accessory : .regular)
 
             let delegate = ACAppDelegate(imageManager: imageManager, headless: headless)
@@ -5941,6 +5946,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.codingTaskStore.upsert(task)
                 return true
             }
+        }
+        server.onTaskAnswer = { [weak self] id, body in
+            guard let self else { return ["ok": false, "error": "no app"] }
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+            if await self.taskDispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            return ["ok": false, "error": self.codingTaskStore.task(id)?.lastError
+                        ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
         }
         server.onTaskCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
@@ -14319,7 +14332,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationKubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {
@@ -14328,7 +14342,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return ["ok": false, "error": "missing name"]
             }
             var spec = KubeClusterSpec()
-            if let raw = doc["spec"], let data = try? JSONSerialization.data(withJSONObject: raw),
+            if let raw = doc["spec"], JSONSerialization.isValidJSONObject([raw]),
+               let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
                let decoded = try? JSONDecoder().decode(KubeClusterSpec.self, from: data) {
                 spec = decoded
             }
@@ -14369,7 +14384,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationRegistryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {

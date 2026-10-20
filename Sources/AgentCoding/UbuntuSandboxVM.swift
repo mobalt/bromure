@@ -97,6 +97,20 @@ private final class SerialScanState: @unchecked Sendable {
 public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @unchecked Sendable {
     public enum State { case created, starting, running, stopped, error }
     public private(set) var state: State = .created
+
+    /// Every sandbox made in this process (weakly): workspace, Kubernetes
+    /// node, registration VMs alike.
+    private static let all: NSHashTable<UbuntuSandboxVM> = .weakObjects()
+    private static let allLock = NSLock()
+
+    /// A VM of this Mac's own is booting or up — the app is hosting work
+    /// (native mode), not only mirroring a remote. BromureApplication won't
+    /// stop the app on a swallowed exception then: it would take the VMs down.
+    static var anyLive: Bool {
+        allLock.withLock {
+            all.allObjects.contains { $0.state == .starting || $0.state == .running }
+        }
+    }
     public var onStopped: ((Error?) -> Void)?
 
     /// Called when the guest writes a URL request file into the outbox
@@ -281,6 +295,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         self.imageManager = imageManager
         self.sessionDisk = nil
         super.init()
+        Self.allLock.withLock { Self.all.add(self) }
     }
 
     /// Profile-aware init. Boots from the per-profile CoW disk and
@@ -289,6 +304,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         self.imageManager = imageManager
         self.sessionDisk = sessionDisk
         super.init()
+        Self.allLock.withLock { Self.all.add(self) }
     }
 
     deinit {

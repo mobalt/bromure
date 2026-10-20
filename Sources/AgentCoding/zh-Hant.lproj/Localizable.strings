@@ -4254,3 +4254,7 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "你寫下這段內容後，代理又提出了新問題。修改你的回答後才能傳送。";
 "The agent asked a new question before your answer went. Read it and answer again." = "你的回答送出前，代理又提出了新問題。請閱讀後重新回答。";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "無法傳送回答。";
+"Your answer is already on its way." = "你的回答已在傳送中。";

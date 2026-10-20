@@ -19,6 +19,10 @@ import Foundation
 final class TaskDispatcher {
     private weak var delegate: ACAppDelegate?
     private var timer: Timer?
+    /// Asks an answer is being delivered to (`answer`).
+    private var answering: Set<UUID> = []
+    static let alreadyOnItsWay = NSLocalizedString("Your answer is already on its way.",
+                                                   comment: "coding task: a second send of the same answer")
 
     init(delegate: ACAppDelegate?) {
         self.delegate = delegate
@@ -563,22 +567,53 @@ final class TaskDispatcher {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               task.pendingAskID != nil else { return false }
         guard let ask = Self.answerTarget(task, writtenFor: askID) else {
+            delegate.codingTaskStore.mutate(taskID) { $0.lastError = Self.staleAnswerText }
+            return false
+        }
+        // One answer per question in flight: a second Send while the first
+        // is still being delivered (its scan, a slow link that gave up on
+        // the reply) must not post the answer twice.
+        guard answering.insert(ask).inserted else {
             delegate.codingTaskStore.mutate(taskID) {
-                $0.lastError = NSLocalizedString("The agent asked a new question before your answer went. Read it and answer again.", comment: "coding task: an answer for an earlier question")
+                $0.lastError = Self.alreadyOnItsWay
             }
             return false
         }
+        defer { answering.remove(ask) }
         do {
             try await delegate.delegationEngine.answer(
                 from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)
         } catch {
+            let why = (error as? DelegationRefusal)?.why ?? error.localizedDescription
             delegate.codingTaskStore.mutate(taskID) {
-                $0.lastError = (error as? DelegationRefusal)?.why ?? error.localizedDescription
+                $0.lastError = why
+                $0.answerRefusal = why
             }
             return false
         }
-        delegate.codingTaskStore.mutate(taskID) { Self.clearAnswered(&$0, ask: ask) }
+        delegate.codingTaskStore.mutate(taskID) {
+            Self.clearAnswered(&$0, ask: ask)
+            // The answer went: a refusal of a resend meanwhile isn't news.
+            if $0.lastError == Self.alreadyOnItsWay { $0.lastError = nil }
+            Self.clearAnswerError(&$0)
+        }
         return true
+    }
+
+    static let staleAnswerText = NSLocalizedString(
+        "The agent asked a new question before your answer went. Read it and answer again.",
+        comment: "coding task: an answer for an earlier question")
+
+    /// An answer went: what an earlier try of `answer` put on the card (the
+    /// stale-question note, a refused delivery's reason — `answerRefusal`,
+    /// saved with the task) is past, and the card would keep saying the
+    /// answer didn't go. Any other error (the assignee's own trouble, or
+    /// one that replaced the refusal since) stays.
+    static func clearAnswerError(_ task: inout CodingTask) {
+        if let e = task.lastError, e == staleAnswerText || e == task.answerRefusal {
+            task.lastError = nil
+        }
+        task.answerRefusal = nil
     }
 
     /// The ask an answer goes to: the one on the card, unless the answer was

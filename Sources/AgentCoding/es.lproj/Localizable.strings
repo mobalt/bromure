@@ -4253,3 +4253,7 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "El agente hizo una nueva pregunta desde que escribiste esto. Cambia tu respuesta para enviarla.";
 "The agent asked a new question before your answer went. Read it and answer again." = "El agente hizo una nueva pregunta antes de que se enviara tu respuesta. Léela y responde de nuevo.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "No se pudo enviar la respuesta.";
+"Your answer is already on its way." = "Tu respuesta ya está en camino.";
