@@ -77,6 +77,11 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var validationRequestedAt: Date?
     /// Why the last start attempt failed, shown on the backlog card.
     var lastError: String?
+    /// The refusal `TaskDispatcher.answer` put in `lastError` (a delivery
+    /// it couldn't make): an answer that then goes clears it — saved, so
+    /// that holds after a relaunch — and only while it's still what the
+    /// card shows.
+    var answerRefusal: String?
     /// A start is being checked (workspace up, folder present, a repo of
     /// its own) — the card stays where it is with a "Starting…" spinner and
     /// moves to In Progress only once the launch can actually happen.
