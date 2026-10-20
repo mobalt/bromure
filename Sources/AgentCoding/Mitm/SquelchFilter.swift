@@ -116,8 +116,9 @@ enum Squelch {
         let first = words(of: stages.first ?? work)
         if let w = first.first, verbatimCommands.contains(w) { return .verbatim }
         if stages.count > 1, let last = words(of: stages.last!).first, shapingCommands.contains(last) {
-            // `cmd | grep x`, `cmd | tail -20`: what's left was chosen.
-            return .other
+            // `cmd | grep x`, `cmd | tail -20`: what's left was chosen — and
+            // may be what the model copies from (`git diff | head`).
+            return .verbatim
         }
         return family(words: first)
     }
@@ -240,12 +241,24 @@ enum Squelch {
         case "journalctl", "dmesg", "log":
             return cmd == "log" && a1 != "show" && a1 != "stream" ? .other : .logs
         case "git":
-            switch a1 {
-            case "diff", "show", "blame", "cat-file", "format-patch", "apply", "log", "reflog", "ls-files", "ls-tree", "rev-parse":
+            switch gitSubcommand(w) {
+            case "diff", "show", "blame", "cat-file", "format-patch", "apply", "log", "reflog", "ls-files", "ls-tree",
+                 "rev-parse", "range-diff", "annotate", "whatchanged", "shortlog", "stash", "notes":
                 return .verbatim
             case "grep": return .search
             default: return .git
             }
+        case "hg", "svn", "jj", "fossil":
+            // Other VCSs: diffs and file contents, as git's.
+            let sub = positionals(w, valued: ["-R", "--repository", "--cwd", "--config", "--at-op", "--at-operation",
+                                              "--color", "--pager", "--encoding", "--encodingmode", "--username", "--password",
+                                              "--config-dir", "--config-option"]).first
+            return ["diff", "log", "show", "cat", "annotate", "blame", "export", "file"].contains(sub ?? "") ? .verbatim : .other
+        case "gh", "glab":
+            // `gh pr diff`, `gh api …`: the content itself.
+            let p = positionals(w, valued: ["-R", "--repo", "--hostname"])
+            let p0 = p.first ?? "", p1 = p.count > 1 ? p[1] : ""
+            return p0 == "api" || p1 == "diff" || (p0 == "gist" && p1 == "view") ? .verbatim : .other
         case "grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "find", "fd":
             return cmd == "find" || cmd == "fd" ? .other : .search
         case "terraform", "tofu", "pulumi", "helm", "ansible-playbook":
@@ -253,6 +266,28 @@ enum Squelch {
         default:
             return .other
         }
+    }
+
+    /// git's subcommand, past its global options (`git --no-pager diff`,
+    /// `git -C repo log`, `git -c color.ui=never show`).
+    static func gitSubcommand(_ w: [String]) -> String {
+        positionals(w, valued: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                                "--super-prefix", "--attr-source"]).first ?? ""
+    }
+
+    /// A command's words after its name that aren't options: `valued`
+    /// options take the next word (`-R repo`); `--opt=value` and the rest
+    /// are flags.
+    static func positionals(_ w: [String], valued: Set<String>) -> [String] {
+        var out: [String] = []
+        var i = 1
+        while i < w.count {
+            let a = w[i]
+            if valued.contains(a) { i += 2; continue }
+            if !a.hasPrefix("-") { out.append(a) }
+            i += 1
+        }
+        return out
     }
 
     /// The family an output reads as when the command isn't known — for the
