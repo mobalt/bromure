@@ -40,6 +40,9 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '60'))
     }
 
+    // A blank string parameter (or any parameter on the run that first
+    // registers them) isn't set in the environment at all, and the steps run
+    // under `set -u`: each one is read with its default.
     parameters {
         booleanParam(name: 'DRY_RUN', defaultValue: false,
             description: 'Build and sign, but upload nothing.')
@@ -135,7 +138,7 @@ pipeline {
                     add_source HEAD head
                     n=0
                     for t in $(git tag -l 'agentic-coding-v*' --sort=-v:refname); do
-                        [ "$n" -ge "$RELEASES" ] && break
+                        [ "$n" -ge "${RELEASES:-3}" ] && break
                         n=$((n + 1))
                         add_source "$t" "$(printf '%s' "$t" | tr -c 'A-Za-z0-9.' '-')"
                     done
@@ -158,8 +161,8 @@ pipeline {
                         # only an infrastructure failure stops the run.
                         docker run --platform linux/arm64 --name "sentry-$label" \
                             -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
-                            -e MAX_BUILDS="$MAX_BUILDS" -e FORCE_KERNELS="$FORCE_KERNELS" \
-                            -e KERNEL_PATTERN="$KERNEL_PATTERN" \
+                            -e MAX_BUILDS="${MAX_BUILDS:-12}" -e FORCE_KERNELS="${FORCE_KERNELS:-}" \
+                            -e KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\\.8\\.0-[0-9]+-generic$}" \
                             "bromure-sentry-builder:$label"
                         docker cp "sentry-$label:/out" "sentry-ci/out-$label"
                         docker rm "sentry-$label"
@@ -209,7 +212,7 @@ EOF
                             docker run --rm \
                                 -e DO_SPACES_KEY -e DO_SPACES_SECRET -e SPARKLE_PRIVATE_KEY \
                                 -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET \
-                                -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="$DRY_RUN" \
+                                -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="${DRY_RUN:-false}" \
                                 bromure-sentry-publisher ./scripts/publish-sentry-modules.sh "out-$label"
                         done < sentry-ci/sources
                     '''
