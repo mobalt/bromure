@@ -449,6 +449,31 @@ struct SquelchLedgerTests {
         #expect(ledger.pendingCloudReport().rows.first?.outputs == 1)
     }
 
+    @Test("a ledger from before the digest keys doesn't count its outputs again")
+    func plainKeysMigrate() throws {
+        // Finding: "Squelch savings are counted twice after the ledger key
+        // change" — the first ledgers saved "conversation|callID" itself.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("squelch-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("ledger.json")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ws = UUID()
+        var old = SquelchLedger.Workspace()
+        old.total = SquelchTally(outputs: 3, trimmed: 0, rawBytes: 30, keptBytes: 30)
+        old.counted = ["019a0000-aaaa-7bbb-8ccc-dddddddddddd|c1", "|c2",
+                       SquelchLedger.countedKey(conversation: "019a0000-aaaa-7bbb-8ccc-dddddddddddd", callID: "c3")]
+        try JSONEncoder().encode(SquelchLedger.Snapshot(workspaces: [ws.uuidString: old])).write(to: file)
+
+        let ledger = SquelchLedger(file: file)
+        var o = SquelchRewriter.Outcome(body: Data())
+        o.seen = ["c1": 10, "c3": 10]
+        ledger.record(o, profileID: ws, conversation: "019a0000-aaaa-7bbb-8ccc-dddddddddddd")
+        o.seen = ["c2": 10]
+        ledger.record(o, profileID: ws, conversation: nil)
+        #expect(ledger.workspace(ws)?.total.outputs == 3)
+        #expect(ledger.workspace(ws)?.counted.count == 3)
+    }
+
     @Test("command labels name the work")
     func labels() {
         #expect(SquelchLedger.commandLabel("cd app && npm run test -- --ci") == "npm run test")
