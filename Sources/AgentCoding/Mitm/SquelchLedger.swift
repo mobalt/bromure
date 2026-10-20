@@ -75,7 +75,8 @@ final class SquelchLedger: @unchecked Sendable {
     init(file: URL?) {
         self.file = file
         if let file, let d = try? Data(contentsOf: file),
-           let s = try? JSONDecoder().decode(Snapshot.self, from: d) {
+           var s = try? JSONDecoder().decode(Snapshot.self, from: d) {
+            for (id, w) in s.workspaces { s.workspaces[id]?.counted = Self.migratedCounted(w.counted) }
             state = s
         }
     }
@@ -251,8 +252,22 @@ final class SquelchLedger: @unchecked Sendable {
     }
 
     static func countedKey(conversation: String?, callID: String) -> String {
-        let digest = SHA256.hash(data: Data(((conversation ?? "") + "|" + callID).utf8))
-        return digest.prefix(9).map { String(format: "%02x", $0) }.joined()
+        countedDigest((conversation ?? "") + "|" + callID)
+    }
+
+    private static func countedDigest(_ preimage: String) -> String {
+        SHA256.hash(data: Data(preimage.utf8)).prefix(9).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The first ledgers kept `counted` as the plain "conversation|callID"
+    /// (a call id always follows the bar): digest those, so the outputs they
+    /// name aren't counted again when the next turn resends them.
+    static func migratedCounted(_ keys: [String]) -> [String] {
+        var seen = Set<String>()
+        return keys.compactMap { k in
+            let key = k.contains("|") ? countedDigest(k) : k
+            return seen.insert(key).inserted ? key : nil
+        }
     }
 
     static func dayKey(_ d: Date) -> String {
