@@ -1517,7 +1517,24 @@ final class RemoteHostController {
     /// session was still being made, and the user's next click raced it.
     nonisolated static let sessionStartTimeout = 150
 
-    /// POST /sessions/start — the new session's id once the server has it.
+    /// Why the last Start made no session — the server's own words (a
+    /// Sidecar's "Claude Code isn't installed on this Mac", say), or that it
+    /// didn't answer; nil after one that worked. The new-session screen
+    /// says it: a refused Start used to look like a dead button.
+    private(set) var lastStartError: String?
+
+    /// The words for a Start that made no session.
+    nonisolated static func startFailure(status: Int?, json: [String: Any]) -> String {
+        if let why = json["error"] as? String, !why.isEmpty { return why }
+        guard let status else {
+            return NSLocalizedString("The server didn't answer. Check the connection and try again.",
+                                     comment: "session start failure")
+        }
+        return String(format: NSLocalizedString("The server answered HTTP %d.", comment: "session start failure"), status)
+    }
+
+    /// POST /sessions/start — the new session's id once the server has it;
+    /// nil with `lastStartError` saying why.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
                       attachments: [DroppedFile] = [], room: UUID? = nil,
@@ -1558,8 +1575,12 @@ final class RemoteHostController {
                 extraHeaders: [("X-Bromure-Console-Idle-Ms", idle)])
         }.value
         pollOnce()
-        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
-        return UUID(uuidString: idStr)
+        guard let resp, resp.status == 200, let id = (resp.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+            lastStartError = Self.startFailure(status: resp?.status, json: resp?.json ?? [:])
+            return nil
+        }
+        lastStartError = nil
+        return id
     }
 
     /// POST /sessions/{id}/{resume|close|rename|forget|archive|unarchive|delete}.
@@ -5476,11 +5497,21 @@ final class RemoteHostWindow: NSWindow {
             },
             onStart: { [weak self] req in
                 Task { @MainActor in
-                    guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
-                                                        cloneURL: req.cloneURL, message: req.openingMessage,
-                                                        attachments: req.attachments, room: room,
-                                                        instructions: req.instructions),
-                          let self else { return }
+                    let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
+                                                  cloneURL: req.cloneURL, message: req.openingMessage,
+                                                  attachments: req.attachments, room: room,
+                                                  instructions: req.instructions)
+                    guard let self else { return }
+                    guard let id else {
+                        // Refused (a Sidecar without the agent, a folder that
+                        // isn't there) or unanswered: say why, on this window.
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = NSLocalizedString("Couldn't start the session", comment: "session start failure")
+                        alert.informativeText = c.lastStartError ?? ""
+                        alert.beginSheetModal(for: self, completionHandler: nil)
+                        return
+                    }
                     // Started from a room: back to its grid, where it launches.
                     if let room, c.roomStore.room(room) != nil { self.showRoom(room); return }
                     // The mirror gets it with the next poll; select it then.
