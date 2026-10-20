@@ -322,6 +322,29 @@ struct SquelchRewriterTests {
         #expect(c.trims.isEmpty && c.body == codeMode)
     }
 
+    /// Finding (CWE-670): "Codex code-mode exec output is trimmed without
+    /// knowing the command" — with the `exec` call in the same request, its
+    /// script parsed to no command, and the output went through the text
+    /// sniff: a script that cats a source file or prints a diff lost its
+    /// runs of identical lines.
+    @Test("a code-mode exec script's output is untouched, its call in the same request")
+    func codeModeSameRequest() throws {
+        let source = "let table = [\n" + String(repeating: "    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n", count: 40)
+            + "]\n\n\n\n\n\n\n\nfn main() {}\n"
+        for script in [#"const r = await tools.exec_command({cmd: "cat src/table.rs"}); text(r.output);"#,
+                       #"text((await tools.exec_command({cmd: "git --no-pager diff"})).output)"#] {
+            let body = json(["model": "gpt-5-codex", "input": [
+                ["type": "custom_tool_call", "call_id": "call_js", "name": "exec", "input": script],
+                ["type": "custom_tool_call_output", "call_id": "call_js", "output": source],
+            ]])
+            let o = SquelchRewriter.rewrite(body, priorCall: { _ in nil })
+            #expect(o.trims.isEmpty && o.body == body, "\(script)")
+        }
+        // The same tool name with a real command line is a shell call.
+        #expect(SquelchRewriter.command(fromInput: #"{"cmd":"pytest -q"}"#) == "pytest -q")
+        #expect(SquelchRewriter.command(fromInput: #"const r = await tools.exec_command({cmd: "pytest -q"});"#) == nil)
+    }
+
     @Test("string paths are exact through nesting and escapes")
     func paths() throws {
         let b = Array(#"{"a":[1,{"k":"v\"x","n":[true,"s"]}],"b":"t","c":{}}"#.utf8)
