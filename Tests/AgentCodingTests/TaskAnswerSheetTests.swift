@@ -124,3 +124,40 @@ struct TaskAnswerSheetTests {
         ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews(in:))
     }
 }
+
+/// Finding (CWE-362): "Sending a task answer drops the draft before the
+/// dispatcher accepts it" — Send cleared the draft and closed the sheet,
+/// then the answer was handed over (a scheduled Task here, a POST answered
+/// `ok` before its Task ran over the fat client); a refusal (the agent asked
+/// again in the gap, the question was gone) lost the text.
+@Suite("Coding tasks: an answer is gone only once the board took it")
+struct TaskAnswerSendTests {
+    @Test("a refused answer keeps its text; a taken one clears, unless edited meanwhile")
+    func draftAfterSend() {
+        let ask = UUID()
+        var draft = TaskAnswerDraft()
+        draft.edit("Only 5xx.", for: ask)
+        let sent = draft
+        #expect(draft.afterSend(sent, accepted: false) == sent)
+        #expect(draft.afterSend(sent, accepted: true) == TaskAnswerDraft())
+        draft.edit("Only 5xx. And keep 30 s.", for: ask)          // typed on while it went
+        #expect(draft.afterSend(sent, accepted: true) == draft)
+    }
+
+    @Test("the answer route replies with the board's verdict, after it has one")
+    func routeWaitsForTheVerdict() {
+        let t0 = Date()
+        let refused = ACAutomationServer.awaitTaskAnswer({ _, body in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return ["ok": false, "error": "The agent asked a new question before your answer went."]
+        }, id: UUID(), body: ["text": "x"])
+        #expect(Date().timeIntervalSince(t0) >= 0.25)
+        #expect(refused["ok"] as? Bool == false)
+        #expect(RemoteHostController.answerAccepted(refused) == false)
+        let taken = ACAutomationServer.awaitTaskAnswer({ _, _ in ["ok": true] }, id: UUID(), body: [:])
+        #expect(RemoteHostController.answerAccepted(taken))
+        // The link failed: not taken. A server from before the wait: `{ok: true}`, as ever.
+        #expect(!RemoteHostController.answerAccepted(nil))
+        #expect(RemoteHostController.answerAccepted(["ok": true]))
+    }
+}

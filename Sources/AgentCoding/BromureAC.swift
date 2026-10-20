@@ -5782,6 +5782,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return true
             }
         }
+        server.onTaskAnswer = { [weak self] id, body in
+            guard let self else { return ["ok": false, "error": "no app"] }
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+            if await self.taskDispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            return ["ok": false, "error": self.codingTaskStore.task(id)?.lastError
+                        ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
+        }
         server.onTaskCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }

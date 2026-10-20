@@ -2428,17 +2428,29 @@ final class RemoteHostController {
     }
 
     // Coding-board verbs, over the tunnel; the mirror confirms on poll.
+    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`), refused
+    /// (`ok: false`, `error`), or none — the link failed: not known to be
+    /// taken, so the text stays; sending it again can't post it twice (the
+    /// board refuses an answer while one is on its way, and once it went,
+    /// the question is gone). A server from before the reply waited answers
+    /// `{ok: true}` at once — as it always did.
+    nonisolated static func answerAccepted(_ reply: [String: Any]?) -> Bool {
+        guard let reply else { return false }
+        return (reply["ok"] as? Bool) ?? (reply["error"] == nil)
+    }
+
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
     /// A coding-board verb that needs the HOST'S reply (the plan-stream
     /// relay: event pages, structured answers). nil = transport failure.
     func taskCommandReply(_ id: UUID, _ action: String,
-                          body: [String: Any]) async -> [String: Any]? {
+                          body: [String: Any], recvTimeoutSeconds: Int = 12) async -> [String: Any]? {
         let host = self.host
         let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)"
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("POST", path, body: body)
+            try RemoteTransport.client(for: host).request("POST", path, body: body,
+                                                          recvTimeoutSeconds: recvTimeoutSeconds)
         }.value
         guard let resp, resp.status == 200 else { return nil }
         return resp.json
@@ -4989,7 +5001,14 @@ final class RemoteHostWindow: NSWindow {
                         }
                     },
                     answer: { id, ask, text in
-                        c.taskCommand(id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a })
+                        // The server's word on it: refused (the agent asked
+                        // again), or not answered — the sheet keeps the text.
+                        // The server replies once the answer went (its scan
+                        // included): wait for it.
+                        let r = await c.taskCommandReply(
+                            id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
+                            recvTimeoutSeconds: 180)
+                        return RemoteHostController.answerAccepted(r)
                     },
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),

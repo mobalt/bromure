@@ -4250,3 +4250,7 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "これを書いた後、エージェントが新しい質問をしました。送信するには回答を編集してください。";
 "The agent asked a new question before your answer went. Read it and answer again." = "回答が届く前にエージェントが新しい質問をしました。読んでからもう一度回答してください。";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "回答を送信できませんでした。";
+"Your answer is already on its way." = "回答はすでに送信中です。";

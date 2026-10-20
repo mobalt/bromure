@@ -4250,3 +4250,7 @@
 /* Coding tasks: an answer for an earlier question */
 "The agent asked a new question since you wrote this. Change your answer to send it." = "Der Agent hat inzwischen eine neue Frage gestellt. Ändern Sie Ihre Antwort, um sie zu senden.";
 "The agent asked a new question before your answer went. Read it and answer again." = "Der Agent hat eine neue Frage gestellt, bevor Ihre Antwort ankam. Lesen Sie sie und antworten Sie erneut.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "Die Antwort konnte nicht gesendet werden.";
+"Your answer is already on its way." = "Ihre Antwort ist bereits unterwegs.";
