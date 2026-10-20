@@ -130,7 +130,10 @@ enum Squelch {
         func isTestScript(_ s: String) -> Bool { s == "test" || s.hasPrefix("test:") || s.hasPrefix("test-") }
         // An uninstall's output is its result — what went — not install
         // chatter (pip's "Uninstalling x" / "Successfully uninstalled x").
-        let removals: Set<String> = ["uninstall", "remove", "rm", "purge", "autoremove", "erase", "un"]
+        let removals: Set<String> = ["uninstall", "remove", "rm", "purge", "autoremove", "erase", "un", "del"]
+        /// The first word after index `i` that isn't a flag (`apt-get -y
+        /// remove`, `python -m pip -q uninstall`).
+        func verb(after i: Int) -> String { w.dropFirst(i + 1).first { !$0.hasPrefix("-") } ?? "" }
         switch cmd {
         case "pytest", "py.test", "jest", "vitest", "mocha", "rspec", "phpunit", "tox", "nox",
              "ctest", "karma", "ava", "tap", "nextest", "bats", "behave", "playwright", "cypress":
@@ -177,7 +180,7 @@ enum Squelch {
             return a1 == "install" || a1 == "download" ? .install : .other
         case "uv":
             if a1 == "run" { return family(words: Array(w.dropFirst(2))) }
-            if (a1 == "pip" || a1 == "tool") && removals.contains(a2) { return .other }
+            if (a1 == "pip" || a1 == "tool") && removals.contains(verb(after: 1)) { return .other }
             return a1 == "pip" || ["sync", "add", "lock", "install", "venv", "tool"].contains(a1) ? .install : .other
         case "poetry", "pdm", "hatch", "rye", "pipenv":
             if a1 == "run" { return family(words: Array(w.dropFirst(2))) }
@@ -185,13 +188,13 @@ enum Squelch {
         case "python", "python3":
             if a1 == "-m" {
                 if a2 == "pytest" || a2 == "unittest" || a2 == "nose2" || a2 == "tox" { return .tests }
-                if a2 == "pip" { return w.count > 3 && removals.contains(w[3]) ? .other : .install }
+                if a2 == "pip" { return removals.contains(verb(after: 2)) ? .other : .install }
                 if a2 == "build" { return .build }
             }
             return .other
         case "apt", "apt-get", "aptitude", "dnf", "yum", "apk", "pacman", "zypper", "brew", "port",
              "gem", "conda", "mamba", "micromamba", "composer", "pod", "dotnet-restore":
-            if removals.contains(a1) { return .other }
+            if removals.contains(verb(after: 0)) || cmd == "pacman" && a1.hasPrefix("-R") { return .other }
             if cmd == "brew" && ["list", "info", "search", "doctor", "config", "leaves", "deps"].contains(a1) { return .other }
             if cmd == "gem" && a1 != "install" && a1 != "update" { return .other }
             if cmd == "apt" || cmd == "apt-get" {

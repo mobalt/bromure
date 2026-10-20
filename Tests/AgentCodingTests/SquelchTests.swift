@@ -84,12 +84,16 @@ struct SquelchFilterTests {
         for cmd in ["pip uninstall -y -r requirements.txt", "pip3 uninstall -y a b", "uv pip uninstall a b",
                     "python3 -m pip uninstall -y a", "pipx uninstall black", "npm uninstall left-pad", "npm rm x",
                     "pnpm remove x", "brew uninstall wget", "apt-get remove -y curl", "apt purge curl",
-                    "uv tool uninstall ruff"] {
+                    "uv tool uninstall ruff", "apt-get -y remove curl", "python3 -m pip -q uninstall a",
+                    "uv pip -q uninstall a", "brew --cask uninstall x", "dnf -y remove x", "apk del curl",
+                    "pacman -Rns x"] {
             #expect(Squelch.family(of: cmd) != .install, "\(cmd)")
         }
         #expect(Squelch.family(of: "pip install -r requirements.txt") == .install)
         #expect(Squelch.family(of: "python -m pip install x") == .install)
         #expect(Squelch.family(of: "uv pip install x") == .install)
+        #expect(Squelch.family(of: "apt-get -y install curl") == .install)
+        #expect(Squelch.family(of: "pacman -Syu") == .install)
 
         var out = ""
         for i in 0..<20 {
