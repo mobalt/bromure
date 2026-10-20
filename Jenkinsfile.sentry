@@ -62,6 +62,40 @@ pipeline {
     }
 
     stages {
+        stage('Docker client') {
+            steps {
+                // The pod's docker CLI (API 1.42) is older than the DinD daemon
+                // accepts (1.44+): "client version 1.42 is too old". Fetch the
+                // latest stable static client instead of pinning one; every
+                // docker step below puts it first on PATH.
+                sh '''
+                    set -eu
+                    case "$(uname -m)" in
+                        aarch64|arm64) arch=aarch64 ;;
+                        x86_64|amd64)  arch=x86_64 ;;
+                        *) echo "unsupported arch $(uname -m)"; exit 1 ;;
+                    esac
+                    base="https://download.docker.com/linux/static/stable/$arch"
+                    ver=$(curl -fsSL "$base/" | grep -o 'docker-[0-9][0-9.]*\\.tgz' \
+                          | sed 's/^docker-//; s/\\.tgz$//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+                    [ -n "$ver" ] || { echo "no docker release found at $base"; exit 1; }
+                    rm -rf .docker-cli && mkdir -p .docker-cli
+                    curl -fsSL "$base/docker-$ver.tgz" | tar -xz -C .docker-cli --strip-components=1 docker/docker
+                    # BuildKit for `docker build` (the static tarball has no plugins);
+                    # without it the client falls back to the legacy builder.
+                    bx=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/docker/buildx/releases/latest | sed 's#.*/tag/##') || bx=""
+                    if [ -n "$bx" ]; then
+                        mkdir -p .docker-cli/config/cli-plugins
+                        bxarch=$([ "$arch" = aarch64 ] && echo arm64 || echo amd64)
+                        curl -fsSL -o .docker-cli/config/cli-plugins/docker-buildx \
+                            "https://github.com/docker/buildx/releases/download/$bx/buildx-$bx.linux-$bxarch" \
+                            && chmod +x .docker-cli/config/cli-plugins/docker-buildx || echo "buildx not installed; legacy builder"
+                    fi
+                    PATH="$PWD/.docker-cli:$PATH" DOCKER_CONFIG="$PWD/.docker-cli/config" docker version --format 'client {{.Client.Version}} (API {{.Client.APIVersion}}) · daemon {{.Server.Version}} (API {{.Server.APIVersion}})'
+                '''
+            }
+        }
+
         stage('Pick sources') {
             steps {
                 // Release tags pick the older sources to build for. The SCM
@@ -114,6 +148,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+                    export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
                     while read -r label epoch hash; do
                         echo "=== building for source $label ($hash) ==="
                         docker rm -f "sentry-$label" 2>/dev/null || true
@@ -144,6 +179,7 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
+                        export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
                         # Most days no new kernel has shipped and every source's
                         # catalog is complete: nothing to sign or upload, so skip
                         # building the publisher image (and its npm install).
@@ -204,6 +240,7 @@ EOF
     post {
         always {
             sh '''
+                export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
                 for c in $(docker ps -aq --filter name=sentry-); do docker rm -f "$c"; done 2>/dev/null || true
                 docker image ls -q 'bromure-sentry-*' | xargs -r docker rmi -f 2>/dev/null || true
             '''
