@@ -2376,7 +2376,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                                                  accent: Color(hex: machine.accentHex))
         let m = BeautifiedSessionModel(provider: provider)
         let mid = machine.id
-        m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.draftKey = "machine:\(mid.uuidString):\(w):\(s.id.uuidString)"
         m.cachedTranscript = SessionTranscriptCache.loadDetached
         m.delegationStore = acDelegate?.delegationStore
         m.sessionStore = acDelegate?.homeSessionStore

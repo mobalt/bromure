@@ -7711,7 +7711,9 @@ final class RemoteHostWindow: NSWindow {
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
                                                 windowIndex: idx, sessionID: sid, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
-        m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)"
+        // Per session too: the next session in a reused window must not
+        // open on the previous one's unsent draft.
+        m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)" + (sid.map { ":\($0.uuidString)" } ?? "")
         m.cachedTranscript = { [weak controller] sid in controller?.cachedTranscript(sid) }
         // Delegations this session is part of (read-only here: answering
         // for the agent is done on the server's own window), and the jump

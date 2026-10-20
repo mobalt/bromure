@@ -610,7 +610,10 @@ final class SessionPane {
     /// provider pinned to that session's window.
     func makeBeautifiedModel(windowIndex: Int, provider: BeautifiedTranscriptProvider) -> BeautifiedSessionModel {
         let m = BeautifiedSessionModel(provider: provider)
-        m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)"
+        // Per session: the next session in a reused window must not open on
+        // the previous one's unsent draft.
+        let sid = acDelegate?.agentSessionStore.session(profileID: profile.id, windowIndex: windowIndex)?.id
+        m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)" + (sid.map { ":\($0.uuidString)" } ?? "")
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
         m.cachedTranscript = SessionTranscriptCache.loadDetached
