@@ -2049,18 +2049,81 @@ private struct AssignedTaskCard: View {
                 + [.divider,
                    .init(title: NSLocalizedString("Stop & Return to Backlog", comment: "task card"),
                          role: .destructive, action: onRecall)])))
-        .alert(String(format: NSLocalizedString("Answer %@", comment: "task card"), task.assignment?.label ?? ""),
-               isPresented: $answering) {
-            TextField(NSLocalizedString("Your answer", comment: "task card"), text: $reply)
-            Button(NSLocalizedString("Send", comment: "")) {
-                let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { onAnswer(text) }
-                reply = ""
-            }
-            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) { reply = "" }
-        } message: {
-            Text(task.pendingQuestion ?? "")
+        // A sheet, not an alert: a question runs to paragraphs (lists, code)
+        // and an answer to a few lines — the alert showed both in a sliver.
+        .sheet(isPresented: $answering) {
+            TaskAnswerSheet(task: task, reply: $reply,
+                            onSend: { text in onAnswer(text); reply = ""; answering = false },
+                            onCancel: { answering = false })   // the draft stays for next time
         }
+    }
+}
+
+/// Answer a task's question: the whole question, readable and selectable,
+/// above room to write the reply. ⌘↩ sends, Esc closes (the draft is kept).
+struct TaskAnswerSheet: View {
+    let task: CodingTask
+    @Binding var reply: String
+    var onSend: (String) -> Void
+    var onCancel: () -> Void
+    @FocusState private var editorFocused: Bool
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    private var trimmed: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(String(format: NSLocalizedString("%@ asks", comment: "task answer sheet"),
+                             task.assignment?.label ?? NSLocalizedString("The agent", comment: "task answer sheet")),
+                      systemImage: "questionmark.bubble.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(task.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            ScrollView {
+                MarkdownBlocks(text: task.pendingQuestion ?? "")
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(minHeight: 120, maxHeight: .infinity)
+            .layoutPriority(1)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.06)))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(NSLocalizedString("Your answer", comment: "task card"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $reply)
+                    .font(.system(size: 13.5))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 140)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.5)))
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(editorFocused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.5))
+                    .focused($editorFocused)
+            }
+            HStack {
+                Text(NSLocalizedString("⌘↩ to send", comment: "task answer sheet"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button(NSLocalizedString("Cancel", comment: ""), role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(NSLocalizedString("Send", comment: "")) { onSend(trimmed) }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: hSize == .compact ? nil : 560, idealWidth: 640,
+               minHeight: hSize == .compact ? nil : 480, idealHeight: 560)
+        .onAppear { editorFocused = true }
     }
 }
 
