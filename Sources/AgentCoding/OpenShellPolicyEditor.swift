@@ -25,22 +25,26 @@ struct FirewallEditor: View {
             .frame(maxWidth: 360)
 
             switch mode {
-            case .rules:     EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
-                                               logAllowed: $draft.logAllowedConnections,
-                                               onEdited: onEdited)
+            case .rules:
+                EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
+                                  logAllowed: $draft.logAllowedConnections,
+                                  onEdited: onEdited)
+                Divider().padding(.vertical, 4)
+                KernelSentrySection(draft: $draft)
             case .openShell: OpenShellPolicyEditor(draft: $draft)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
                 RuleCheckbox(isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }),
                              label: NSLocalizedString("Tell the agent when policy blocks it", comment: "firewall pane toggle"),
                              help: NSLocalizedString("Explain each blocked action to the agent that tried it", comment: "firewall pane: Tell the agent tooltip"),
                              title: NSLocalizedString("Tell the agent when policy blocks it", comment: "firewall pane toggle"))
                     .fixedSize()
-                Text(NSLocalizedString("When the firewall or the sandbox blocks something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or “permission denied” and may keep trying. Claude Code reads it right after the command that hit the block; other agents get it when their turn ends. Until you choose, it's on while the workspace uses an OpenShell policy.",
-                                       comment: "firewall pane: Tell the agent explanation"))
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                InfoTip(verbatim: NSLocalizedString("When the firewall or the sandbox blocks something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or “permission denied” and may keep trying. Claude Code reads it right after the command that hit the block; other agents get it when their turn ends. Until you choose, it's on while the workspace uses an OpenShell policy.",
+                                                    comment: "firewall pane: Tell the agent explanation"))
             }
+            Text("The agent asks you instead of retrying or finding a way round.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear {
             guard !loaded else { return }
@@ -76,23 +80,12 @@ struct FirewallEditor: View {
 struct OpenShellPolicyEditor: View {
     @Binding var draft: Profile
     @State private var showProviders = false
-    @State private var pendingProvider: PendingProvider?
     @State private var importError: String?
     @State private var proposals: [OpenShellAdvisor.Proposal] = []
     @State private var rejectReasons: [String: String] = [:]
     @State private var showHistory = false
     @State private var showSandbox = false
-    @State private var showCredentials = false
     @State private var boundaryTick = 0
-
-    /// A provider profile picked for import, waiting for its secrets.
-    struct PendingProvider: Identifiable {
-        let id = UUID()
-        let yaml: String
-        let profile: OpenShellProviderProfile
-        var instanceName: String
-        var values: [String: String] = [:]
-    }
 
     private var parsed: Result<OpenShellPolicy, Error> {
         Result { try OpenShellPolicy.parse(draft.networkPolicy) }
@@ -160,22 +153,6 @@ struct OpenShellPolicyEditor: View {
                     .font(.subheadline.weight(.semibold))
             }
 
-            DisclosureGroup(isExpanded: $showCredentials) {
-                VStack(alignment: .leading, spacing: 14) {
-                    providersSection
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 4) {
-                            Toggle("Use OpenShell credential placeholders", isOn: $draft.openShellCredentialPlaceholders)
-                            InfoTip("The agent sees `openshell:resolve:env:NAME` in its environment instead of Bromure's look-alike tokens, for the credentials this workspace passes as environment variables. The proxy swaps in the real value in request headers, and in request bodies or WebSocket messages only where an endpoint sets `request_body_credential_rewrite` or `websocket_credential_rewrite`. Each credential still works only on its own hosts. Some tools check a token's format and may reject a placeholder. Takes effect at the next VM start.")
-                        }
-                        Text("Takes effect at the next VM start.").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.top, 6)
-            } label: {
-                Label("Credentials", systemImage: "key.horizontal").font(.subheadline.weight(.semibold))
-            }
-
             boundarySection
 
             historySection
@@ -237,6 +214,10 @@ struct OpenShellPolicyEditor: View {
                 }
                 .buttonStyle(.borderless)
             }
+            if let importError {
+                Label(importError, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .id(boundaryTick)
     }
@@ -286,7 +267,6 @@ struct OpenShellPolicyEditor: View {
     /// OpenShell's filesystem_policy / landlock / process, enforced in the
     /// VM, and the kernel sentry that watches it from kernel space.
     @ViewBuilder private var guestSandboxSection: some View {
-        let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
         let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
@@ -330,43 +310,8 @@ struct OpenShellPolicyEditor: View {
                 }
             }
 
-            HStack(spacing: 4) {
-                Picker("Kernel sentry", selection: $draft.kernelSentry) {
-                    Text("Off").tag(KernelSentryMode.off).disabled(floor.rank > KernelSentryMode.off.rank)
-                    Text("Best effort").tag(KernelSentryMode.bestEffort).disabled(floor.rank > KernelSentryMode.bestEffort.rank)
-                    Text("Required").tag(KernelSentryMode.hard)
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 420)
-                InfoTip("Streams security events (process launches, privilege changes, module and BPF loads, sandbox denials) from the VM's kernel to Bromure, outside anything the agent can stop; after it starts, the kernel is locked so not even root in the VM can load code to interfere. Silence or a gap in the stream is treated as tampering by the watchdog. “Required” won't start agent sessions without it. Takes effect at the next VM start.")
-            }
-            Text(draft.effectiveKernelSentry == .off && (sections.filesystemPolicy != nil || sections.process != nil)
-                 ? "Turn it on to see sandbox denials on the Security Timeline."
-                 : "Reports what happens in the VM's kernel, where the agent can't stop it.")
-                .font(.caption)
-                .foregroundStyle(draft.effectiveKernelSentry == .off && (sections.filesystemPolicy != nil || sections.process != nil)
-                                 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-            if floor != .off {
-                Text("Your organization requires at least “\(floor == .hard ? "Required" : "Best effort")”.").font(.caption2.weight(.medium))
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 4) {
-                    Toggle("Don't intercept container traffic", isOn: $draft.containerTrafficDirect)
-                        .disabled(draft.effectiveKernelSentry == .off)
-                    InfoTip("Traffic from containers in this VM (Docker, pods) goes out directly instead of through Bromure's proxy. The firewall still applies, and image pulls are still checked. Inside containers you lose credential brokering (Bromure's stand-in tokens aren't swapped for real ones), package checks, prompt-injection and PII scanning, and per-request logs. The kernel sentry marks container traffic in a way processes in the VM can't fake, so this needs the sentry on; without it, container traffic is intercepted as usual. Takes effect at the next VM start.")
-                }
-                Text("The firewall still applies; needs the kernel sentry.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if draft.containerTrafficDirect, draft.effectiveKernelSentry != .off, !draft.effectiveContainerTrafficDirect {
-                    Text("Not applied: this policy has request-level (L7) rules, which only the proxy can enforce, so container traffic stays intercepted.")
-                        .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if draft.effectiveKernelSentry != .off, let snap = KernelSentryService.shared.snapshot(draft.id) {
-                Text("Sentry: " + (snap.connected ? "connected" + (snap.kernel.map { " · kernel \($0)" } ?? "") : "not connected")
-                     + (snap.dropped > 0 ? " · \(snap.dropped) event(s) dropped under load" : ""))
-                    .font(.caption2.weight(.medium))
-            }
+            KernelSentrySection(draft: $draft,
+                                sandboxed: sections.filesystemPolicy != nil || sections.process != nil)
         }
     }
 
@@ -505,13 +450,142 @@ struct OpenShellPolicyEditor: View {
         }
     }
 
+    private func importPolicy() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "yaml"), UTType(filenameExtension: "yml"), .plainText]
+            .compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        draft.networkPolicy = text
+    }
+
+    private func exportPolicy() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(draft.name.isEmpty ? "workspace" : draft.name)-policy.yaml"
+        panel.allowedContentTypes = [UTType(filenameExtension: "yaml") ?? .plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? draft.networkPolicy.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// A working default for a coding agent: source hosting and the package
+    /// registries, read-only where uploads are the risk. The agent's own
+    /// services and credentialed hosts come from the provider layer.
+    static let starterPolicy = """
+    version: 1
+
+    # OpenShell sandbox policy — https://github.com/NVIDIA/OpenShell
+    # Everything not listed is denied. Bromure also allows the workspace's
+    # agents and every host it injects a credential for (_provider_* rules).
+    network_policies:
+      github:
+        endpoints:
+          - { host: github.com, port: 443 }
+          - { host: api.github.com, port: 443 }
+          - { host: "**.githubusercontent.com", port: 443 }
+
+      npm:
+        endpoints:
+          - host: registry.npmjs.org
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only          # installs work; publish is blocked
+            allow_encoded_slash: true  # scoped packages (@types%2Fnode)
+
+      pypi:
+        endpoints:
+          - { host: pypi.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+          - { host: files.pythonhosted.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+
+      ubuntu_apt:
+        endpoints:
+          - { host: ports.ubuntu.com, ports: [80, 443] }
+          - { host: security.ubuntu.com, ports: [80, 443] }
+
+    """
+}
+
+/// The kernel sentry and what depends on it (container traffic). Shown under
+/// either firewall: the sentry doesn't need an OpenShell policy, and network
+/// lineage (a flow's process chain and the reasoning behind it) needs the
+/// sentry.
+struct KernelSentrySection: View {
+    @Binding var draft: Profile
+    /// The policy confines files or processes: the sentry is what reports
+    /// those denials.
+    var sandboxed = false
+
+    var body: some View {
+        let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Picker("Kernel sentry", selection: $draft.kernelSentry) {
+                    Text("Off").tag(KernelSentryMode.off).disabled(floor.rank > KernelSentryMode.off.rank)
+                    Text("Best effort").tag(KernelSentryMode.bestEffort).disabled(floor.rank > KernelSentryMode.bestEffort.rank)
+                    Text("Required").tag(KernelSentryMode.hard)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 420)
+                InfoTip("Streams security events (process launches, privilege changes, module and BPF loads, sandbox denials) from the VM's kernel to Bromure, outside anything the agent can stop; after it starts, the kernel is locked so not even root in the VM can load code to interfere. Silence or a gap in the stream is treated as tampering by the watchdog. “Required” won't start agent sessions without it. Takes effect at the next VM start.")
+            }
+            Text(draft.effectiveKernelSentry == .off && sandboxed
+                 ? "Turn it on to see sandbox denials on the Security Timeline."
+                 : "Reports which process made each connection, and why, from where the agent can't stop it.")
+                .font(.caption)
+                .foregroundStyle(draft.effectiveKernelSentry == .off && sandboxed
+                                 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+            if floor != .off {
+                Text("Your organization requires at least “\(floor == .hard ? "Required" : "Best effort")”.").font(.caption2.weight(.medium))
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Toggle("Don't intercept container traffic", isOn: $draft.containerTrafficDirect)
+                        .disabled(draft.effectiveKernelSentry == .off)
+                    InfoTip("Traffic from containers in this VM (Docker, pods) goes out directly instead of through Bromure's proxy. The firewall still applies, and image pulls are still checked. Inside containers you lose credential brokering (Bromure's stand-in tokens aren't swapped for real ones), package checks, prompt-injection and PII scanning, and per-request logs. The kernel sentry marks container traffic in a way processes in the VM can't fake, so this needs the sentry on; without it, container traffic is intercepted as usual. Takes effect at the next VM start.")
+                }
+                Text("The firewall still applies; needs the kernel sentry.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if draft.containerTrafficDirect, draft.effectiveKernelSentry != .off, !draft.effectiveContainerTrafficDirect {
+                    Text("Not applied: this policy has request-level (L7) rules, which only the proxy can enforce, so container traffic stays intercepted.")
+                        .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if draft.effectiveKernelSentry != .off, let snap = KernelSentryService.shared.snapshot(draft.id) {
+                Text("Sentry: " + (snap.connected ? "connected" + (snap.kernel.map { " · kernel \($0)" } ?? "") : "not connected")
+                     + (snap.dropped > 0 ? " · \(snap.dropped) event(s) dropped under load" : ""))
+                    .font(.caption2.weight(.medium))
+            }
+        }
+    }
+}
+
+/// OpenShell's ways in and out of the workspace's credentials, shown in the
+/// Credentials pane of a workspace whose firewall is an OpenShell policy.
+/// Neither is a separate store: an attached provider profile adds ordinary
+/// credentials (plus a `_provider_` rule for its endpoints), and the
+/// placeholders change how those credentials look inside the VM.
+struct OpenShellCredentialsSection: View {
+    @Binding var draft: Profile
+    @State private var pendingProvider: PendingProvider?
+    @State private var importError: String?
+
+    /// A provider profile picked for import, waiting for its secrets.
+    struct PendingProvider: Identifiable {
+        let id = UUID()
+        let yaml: String
+        let profile: OpenShellProviderProfile
+        var instanceName: String
+        var values: [String: String] = [:]
+    }
+
     /// Attached OpenShell provider profiles: their credentials become
     /// workspace credentials bound to the profile's endpoints, and their
     /// endpoints a `_provider_<name>` rule.
-    @ViewBuilder private var providersSection: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
-                Text("Provider profiles").font(.callout.weight(.medium))
+                Text("OpenShell provider profiles").font(.headline)
                 InfoTip("Import an OpenShell provider profile to add its credentials to this workspace. Bromure keeps the real values on the Mac, gives the VM stand-ins, and only swaps them in on the profile's endpoints (hosts and paths); the profile's endpoints are added as a rule.")
             }
             ForEach(draft.openShellProviders) { a in
@@ -532,6 +606,14 @@ struct OpenShellPolicyEditor: View {
                 .buttonStyle(.borderless)
             if let importError {
                 Label(importError, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(.red)
+            }
+            Divider().padding(.vertical, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Toggle("Use OpenShell credential placeholders", isOn: $draft.openShellCredentialPlaceholders)
+                    InfoTip("The agent sees `openshell:resolve:env:NAME` in its environment instead of Bromure's look-alike tokens, for the credentials this workspace passes as environment variables. The proxy swaps in the real value in request headers, and in request bodies or WebSocket messages only where an endpoint sets `request_body_credential_rewrite` or `websocket_credential_rewrite`. Each credential still works only on its own hosts. Some tools check a token's format and may reject a placeholder. Takes effect at the next VM start.")
+                }
+                Text("Takes effect at the next VM start.").font(.caption).foregroundStyle(.secondary)
             }
         }
         .sheet(item: $pendingProvider) { _ in providerSheet }
@@ -627,59 +709,4 @@ struct OpenShellPolicyEditor: View {
         draft.manualTokens.removeAll { a.tokenIDs.contains($0.id) }
         draft.openShellProviders.removeAll { $0.id == a.id }
     }
-
-    private func importPolicy() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "yaml"), UTType(filenameExtension: "yml"), .plainText]
-            .compactMap { $0 }
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url,
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        draft.networkPolicy = text
-    }
-
-    private func exportPolicy() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(draft.name.isEmpty ? "workspace" : draft.name)-policy.yaml"
-        panel.allowedContentTypes = [UTType(filenameExtension: "yaml") ?? .plainText]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? draft.networkPolicy.write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    /// A working default for a coding agent: source hosting and the package
-    /// registries, read-only where uploads are the risk. The agent's own
-    /// services and credentialed hosts come from the provider layer.
-    static let starterPolicy = """
-    version: 1
-
-    # OpenShell sandbox policy — https://github.com/NVIDIA/OpenShell
-    # Everything not listed is denied. Bromure also allows the workspace's
-    # agents and every host it injects a credential for (_provider_* rules).
-    network_policies:
-      github:
-        endpoints:
-          - { host: github.com, port: 443 }
-          - { host: api.github.com, port: 443 }
-          - { host: "**.githubusercontent.com", port: 443 }
-
-      npm:
-        endpoints:
-          - host: registry.npmjs.org
-            port: 443
-            protocol: rest
-            enforcement: enforce
-            access: read-only          # installs work; publish is blocked
-            allow_encoded_slash: true  # scoped packages (@types%2Fnode)
-
-      pypi:
-        endpoints:
-          - { host: pypi.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-          - { host: files.pythonhosted.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-
-      ubuntu_apt:
-        endpoints:
-          - { host: ports.ubuntu.com, ports: [80, 443] }
-          - { host: security.ubuntu.com, ports: [80, 443] }
-
-    """
 }

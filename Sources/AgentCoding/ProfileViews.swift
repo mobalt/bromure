@@ -95,7 +95,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
-    case firewall         = "Firewall"
+    case firewall         = "Sandbox Policy"
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
     case pii              = "PII Protection"
@@ -137,7 +137,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:             return "tools servers mcp"
         case .tracing:         return "trace http log requests"
         case .guardrails:      return "credentials approval write policy kubernetes aws docker github destructive exfiltration"
-        case .firewall:        return "firewall egress outbound network connections block allow deny host port web methods interception proxy"
+        case .firewall:        return "firewall sandbox openshell kernel sentry landlock egress outbound network connections block allow deny host port web methods interception proxy"
         case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
         case .promptInjection: return "injection detector scan classifier"
         case .pii:             return "privacy personal data names email phone gdpr redact anonymize pseudonymize"
@@ -2191,6 +2191,13 @@ struct ProfileEditorView: View {
                 Spacer()
             }
             .buttonStyle(.bordered).controlSize(.small).padding(.top, 2)
+
+            #if os(macOS)
+            if draft.usesOpenShellPolicy {
+                Divider()
+                OpenShellCredentialsSection(draft: $draft)
+            }
+            #endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

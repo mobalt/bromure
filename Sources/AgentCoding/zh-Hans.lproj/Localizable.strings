@@ -1579,6 +1579,7 @@
 "Credential brokering" = "凭据中转";
 "Supply chain" = "供应链";
 "Firewall" = "防火墙";
+"Sandbox Policy" = "沙盒策略";
 "Credential used" = "凭据使用";
 "Upstream TLS" = "上游 TLS";
 "Prompt injection" = "提示注入";

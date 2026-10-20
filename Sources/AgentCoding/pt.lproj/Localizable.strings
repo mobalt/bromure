@@ -1579,6 +1579,7 @@
 "Credential brokering" = "Intermediação de credenciais";
 "Supply chain" = "Cadeia de suprimentos";
 "Firewall" = "Firewall";
+"Sandbox Policy" = "Política de sandbox";
 "Credential used" = "Credencial usada";
 "Upstream TLS" = "TLS upstream";
 "Prompt injection" = "Injeção de prompt";

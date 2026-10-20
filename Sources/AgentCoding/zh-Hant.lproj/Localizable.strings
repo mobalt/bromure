@@ -1582,6 +1582,7 @@
 "Credential brokering" = "憑證中介";
 "Supply chain" = "供應鏈";
 "Firewall" = "防火牆";
+"Sandbox Policy" = "沙盒原則";
 "Credential used" = "憑證使用";
 "Upstream TLS" = "上游 TLS";
 "Prompt injection" = "提示注入";

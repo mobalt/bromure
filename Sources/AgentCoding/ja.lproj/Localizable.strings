@@ -1579,6 +1579,7 @@
 "Credential brokering" = "資格情報ブローカー";
 "Supply chain" = "サプライチェーン";
 "Firewall" = "ファイアウォール";
+"Sandbox Policy" = "サンドボックスポリシー";
 "Credential used" = "資格情報の使用";
 "Upstream TLS" = "上流 TLS";
 "Prompt injection" = "プロンプトインジェクション";

@@ -1580,6 +1580,7 @@
 "Credential brokering" = "Credential brokering";
 "Supply chain" = "Supply chain";
 "Firewall" = "Firewall";
+"Sandbox Policy" = "Sandbox Policy";
 "Credential used" = "Credential used";
 "Upstream TLS" = "Upstream TLS";
 "Prompt injection" = "Prompt injection";
