@@ -408,14 +408,25 @@ public actor SocketDevClient {
             guard vn.count == 2 else { return nil }
             type = "composer"; segments = vn
         case "go":
-            // proxy.golang.org case-encodes capitals ("!x" → "X").
+            // proxy.golang.org case-encodes capitals ("!x" → "X"), and only
+            // ASCII ones: "!" before anything but a-z (or at the end) isn't a
+            // module path. Never `Character(ch.uppercased())` — the name is off
+            // the guest's request line, and "ß" uppercases to "SS", two
+            // characters, which traps (and took the host down with it).
             var module = ""
             var bang = false
             for ch in name {
-                if ch == "!" { bang = true; continue }
-                module.append(bang ? Character(ch.uppercased()) : ch)
-                bang = false
+                if bang {
+                    guard ch.isASCII, ch.isLowercase else { return nil }
+                    module += ch.uppercased()
+                    bang = false
+                } else if ch == "!" {
+                    bang = true
+                } else {
+                    module.append(ch)
+                }
             }
+            guard !bang else { return nil }
             type = "golang"; segments = module.split(separator: "/").map(String.init)
             guard !segments.isEmpty else { return nil }
         default:

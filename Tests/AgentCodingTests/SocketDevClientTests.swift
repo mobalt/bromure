@@ -26,6 +26,17 @@ struct SocketDevClientTests {
         // proxy.golang.org case-encodes capitals.
         #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/!burnt!sushi/toml", version: "v1.4.0")
                 == "pkg:golang/github.com/BurntSushi/toml@v1.4.0")
+        // Finding (CWE-248): a guest's request line is read as Latin-1, so
+        // "!" + byte 0xDF reaches here as "!ß" — "ß" uppercases to "SS",
+        // which trapped in Character(_:) and aborted the host. Only "!a-z"
+        // is a case marker; anything else after "!", or a trailing "!",
+        // names no module.
+        #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/!\u{DF}x/y", version: "v1.0.0") == nil)
+        #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/!\u{0149}x/y", version: "v1.0.0") == nil)
+        #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/!Ax/y", version: "v1.0.0") == nil)
+        #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/x/y!", version: "v1.0.0") == nil)
+        #expect(SocketDevClient.purl(ecosystem: "go", name: "github.com/\u{DF}x/y", version: "v1.0.0")
+                == "pkg:golang/github.com/%C3%9Fx/y@v1.0.0")
         // Nothing for what it can't name.
         #expect(SocketDevClient.purl(ecosystem: "maven", name: "no-group", version: "1") == nil)
         #expect(SocketDevClient.purl(ecosystem: "npm-ish", name: "x", version: "1") == nil)
