@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 import SwiftUI
 import Testing
 @testable import bromure_ac
@@ -360,6 +361,64 @@ struct SquelchLedgerTests {
         o2.seen = ["t3": 100]
         ledger.record(o2, profileID: ws, conversation: nil)
         #expect(ledger.pendingCloudReport().rows.first?.outputs == 1)
+    }
+
+    @Test("a conversation past any count of outputs still counts each once")
+    func longConversation() throws {
+        // Finding: "Squelch ledger counts the same output again after 4000
+        // entries" — the oldest digests were dropped while their outputs were
+        // still resent every turn, so the next turn counted them again.
+        let ledger = SquelchLedger(file: nil)
+        let ws = UUID()
+        var o = SquelchRewriter.Outcome(body: Data())
+        o.seen = Dictionary(uniqueKeysWithValues: (0..<60_000).map { ("call\($0)", 10) })
+        ledger.record(o, profileID: ws, conversation: "long")
+        o.seen["call-new"] = 10
+        ledger.record(o, profileID: ws, conversation: "long")
+        ledger.record(o, profileID: ws, conversation: "long")
+        #expect(ledger.workspace(ws)?.total.outputs == 60_001)
+    }
+
+    @Test("what was counted survives a restart, from the old format too, and is forgotten only once no request carried it for 90 days")
+    func countedPersistsAndAges() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("squelch-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("ledger.json")
+        let ws = UUID()
+        let day0 = Date(timeIntervalSince1970: 1_790_000_000)
+        func outcome(_ ids: String...) -> SquelchRewriter.Outcome {
+            var o = SquelchRewriter.Outcome(body: Data())
+            o.seen = Dictionary(uniqueKeysWithValues: ids.map { ($0, 10) })
+            return o
+        }
+        func outputs() -> Int { SquelchLedger(file: file).workspace(ws)?.total.outputs ?? -1 }
+
+        let a = SquelchLedger(file: file)
+        a.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0)
+        a.flush()
+        let b = SquelchLedger(file: file)
+        b.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0)
+        // t1 resent on day 80 and day 160: never 90 days apart, still once.
+        b.record(outcome("t1"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(80 * 86_400))
+        b.record(outcome("t1"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(160 * 86_400))
+        b.flush()
+        #expect(outputs() == 2)
+        // t2 wasn't carried since day 0: forgotten, a resend counts anew.
+        let c = SquelchLedger(file: file)
+        c.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(161 * 86_400))
+        c.flush()
+        #expect(outputs() == 3)
+
+        // A ledger.json written before: `counted` hex digests (9 bytes).
+        let legacy = UUID()
+        let hex = SHA256.hash(data: Data("c|t9".utf8)).prefix(9).map { String(format: "%02x", $0) }.joined()
+        var old = SquelchLedger.Workspace()
+        old.total = SquelchTally(outputs: 1, trimmed: 0, rawBytes: 10, keptBytes: 10)
+        old.counted = [hex]
+        try JSONEncoder().encode(SquelchLedger.Snapshot(workspaces: [legacy.uuidString: old])).write(to: file)
+        let d = SquelchLedger(file: file)
+        d.record(outcome("t9"), profileID: legacy, conversation: "c")
+        #expect(d.workspace(legacy)?.total.outputs == 1)
     }
 
     @Test("command labels name the work")
