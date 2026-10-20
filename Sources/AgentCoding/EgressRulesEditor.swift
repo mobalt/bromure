@@ -430,7 +430,7 @@ struct EgressRulesEditor: View {
 
 /// The rule on/off checkbox, in AppKit: an NSButton checkbox whose
 /// accessibility label (the rule) reaches assistive tools as AXDescription.
-private struct RuleCheckbox: NSViewRepresentable {
+struct RuleCheckbox: NSViewRepresentable {
     @Binding var isOn: Bool
     let label: String
     let help: String

@@ -1679,6 +1679,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// destination (one a minute) and fold into a counted row.
     public var logAllowedConnections: Bool? = nil
 
+    /// "Tell the agent when policy blocks it" (`PolicySteering`): a note in
+    /// the agent's session naming what was refused and why, so it asks the
+    /// user instead of routing around the block. nil = automatic — on while
+    /// the workspace runs an OpenShell policy.
+    public var tellAgentOnDeny: Bool? = nil
+
+    /// Whether policy denials are told to the workspace's agents.
+    public var tellsAgentOnDeny: Bool { tellAgentOnDeny ?? usesOpenShellPolicy }
+
     /// Parsed firewall rules, or allow-all when empty/unparseable (never blocks
     /// on a bad rule — the editor validates before save). An OpenShell policy
     /// that fails to parse is the exception: it fails CLOSED (deny all but the
@@ -2374,6 +2383,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case openShellAdvisorMode
         case watchdogMode
         case logAllowedConnections
+        case tellAgentOnDeny
         case disableTransparentProxy
         case strictCredentials
         case strictSandbox
@@ -2512,6 +2522,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         openShellAdvisorMode = try c.decodeIfPresent(String.self, forKey: .openShellAdvisorMode) ?? "off"
         watchdogMode = try c.decodeIfPresent(String.self, forKey: .watchdogMode) ?? "off"
         logAllowedConnections = try c.decodeIfPresent(Bool.self, forKey: .logAllowedConnections)
+        tellAgentOnDeny = try c.decodeIfPresent(Bool.self, forKey: .tellAgentOnDeny)
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
         strictCredentials = try c.decodeIfPresent(Bool.self, forKey: .strictCredentials) ?? false
         strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
@@ -2701,6 +2712,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             try c.encode(kernelSentry, forKey: .kernelSentry)
         }
         try c.encodeIfPresent(logAllowedConnections, forKey: .logAllowedConnections)
+        try c.encodeIfPresent(tellAgentOnDeny, forKey: .tellAgentOnDeny)
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
         }
@@ -4749,9 +4761,11 @@ public final class ProfileStore {
                 }
             }
             hooks["SessionStart"] = hookCmd("start") + othersUnder("SessionStart")
-            hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
+            // `policy`: notes about actions the workspace's policy refused
+            // (PolicySteering), read right after the tool call that hit them.
+            hooks["UserPromptSubmit"] = hookCmd("working") + hookCmd("policy") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
-            hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
+            hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
             hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
@@ -4833,6 +4847,41 @@ public final class ProfileStore {
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
             # Either way the pane resolves this tab's window index — reported in
             # the filename so each tab's dot is independent.
+            # `policy` (Claude's PostToolUse / UserPromptSubmit): hand the model
+            # the notes the host left for this tab when the workspace's policy
+            # blocked something it did (PolicySteering), as the hook's
+            # additionalContext. Each note is claimed by rename, so two hooks
+            # firing at once never hand over the same one.
+            if [ "${1:-}" = policy ]; then
+              [ -n "${TMUX_PANE:-}" ] || exit 0
+              idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+              [ -n "$idx" ] || exit 0
+              set -- "$HOME"/.bromure/policy-notes/w"$idx"-*.note
+              [ -e "$1" ] || exit 0
+              exec python3 -c '
+            import json, os, sys
+            event = "PostToolUse"
+            try:
+                event = json.load(sys.stdin).get("hook_event_name") or event
+            except Exception:
+                pass
+            notes = []
+            for f in sorted(sys.argv[1:]):
+                mine = "%s.%d" % (f, os.getpid())
+                try:
+                    os.rename(f, mine)
+                except OSError:
+                    continue
+                try:
+                    with open(mine) as h:
+                        notes.append(h.read().strip())
+                finally:
+                    os.unlink(mine)
+            if notes:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                                         "additionalContext": "\n".join(notes)}}))
+            ' "$@"
+            fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
             # No pane → bail. An empty -t target resolves to the ACTIVE window,

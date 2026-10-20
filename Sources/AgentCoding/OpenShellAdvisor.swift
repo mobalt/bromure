@@ -542,18 +542,27 @@ final class OpenShellAdvisorModeCache: @unchecked Sendable {
     private let lock = NSLock()
     private var modes: [UUID: OpenShellAdvisorMode] = [:]
     private var watchdog: [UUID: AgentWatchdogMode] = [:]
+    private var tellsAgent: Set<UUID> = []
 
     func refresh(_ profiles: [Profile]) {
         var m: [UUID: OpenShellAdvisorMode] = [:]
         var w: [UUID: AgentWatchdogMode] = [:]
+        var t: Set<UUID> = []
         for p in profiles {
+            if p.tellsAgentOnDeny { t.insert(p.id) }
             if p.usesOpenShellPolicy || OpenShellGovernance.shared.boundaryYAML != nil {
                 m[p.id] = OpenShellGovernance.shared.effectiveAdvisorMode(
                     OpenShellAdvisorMode(rawValue: p.openShellAdvisorMode) ?? .off)
             }
             w[p.id] = AgentWatchdogMode(rawValue: p.watchdogMode) ?? .off
         }
-        lock.lock(); modes = m; watchdog = w; lock.unlock()
+        lock.lock(); modes = m; watchdog = w; tellsAgent = t; lock.unlock()
+    }
+
+    /// Whether the workspace tells its agents about policy denials.
+    func tellsAgentOnDeny(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return tellsAgent.contains(id)
     }
 
     func watchdogMode(for id: UUID) -> AgentWatchdogMode {

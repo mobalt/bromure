@@ -3851,6 +3851,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
             wireOpenShellAdvisor(engine)
+            wirePolicySteering(engine)
             AgentWatchdog.shared.modeProvider = { OpenShellAdvisorModeCache.shared.watchdogMode(for: $0) }
             // The kernel sentry's liveness clock only runs while the VM does
             // (a paused, quarantined or suspended VM sends nothing).
@@ -15098,9 +15099,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         // Agents' PreToolUse hooks: each tool call before it runs, with its
         // provider id and the agent's pid (network lineage).
-        sandbox.onAgentToolCall = { line in
+        sandbox.onAgentToolCall = { line, window in
             guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let id = o["tool_use_id"] as? String, !id.isEmpty else { return }
+            // Which tab this agent is: a policy note about a process in its
+            // tree goes to it.
+            if let window, let agentPid = o["pid"] as? Int {
+                PolicySteering.shared.noteAgent(profileID: pid, pid: agentPid, window: window)
+            }
             NetworkLineage.shared.noteToolCall(
                 profileID: pid, id: String(id.prefix(128)), tool: o["tool"] as? String ?? "tool",
                 command: (o["command"] as? String).map { String($0.prefix(4000)) }, reasoning: "",
