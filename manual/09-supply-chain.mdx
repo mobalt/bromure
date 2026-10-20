@@ -169,7 +169,7 @@ If you want a say, enable **Prompt before passing lockfile-pinned tarballs throu
 
 ## Consent prompts and grants
 
-All supply-chain ask-the-user paths — the lockfile pass-through and the unverified-package hold described below — go through a shared consent broker with burst coalescing: concurrent requests for the same scope wait on a single dialog instead of stacking alerts. Every prompt offers the same four decisions:
+All supply-chain ask-the-user paths — the lockfile pass-through and the unverified-package hold described below — go through a shared consent broker with burst coalescing: concurrent requests for the same scope wait on a single dialog instead of stacking alerts. The lockfile pass-through offers these four decisions (the unverified-package hold has its own, per package — see [Offline and degraded behavior](#offline-and-degraded-behavior)):
 
 | Decision | Effect |
 |---|---|
