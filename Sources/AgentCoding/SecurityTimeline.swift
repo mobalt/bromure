@@ -173,8 +173,35 @@ public final class SecurityTimeline {
     /// Mirrored hosts' events (fat client), by host name.
     public private(set) var remote: [String: [Event]] = [:]
     private static let cap = 5000
-    /// Days of history kept on disk.
-    nonisolated static let retentionDays = 90
+    /// Days of history kept on disk (Preferences › Tracing › Security
+    /// history): 0 = forever. Unset = 90.
+    nonisolated static let retentionKey = "securityTimeline.retentionDays"
+    nonisolated static var retentionDays: Int {
+        UserDefaults.standard.object(forKey: retentionKey) == nil ? 90 : UserDefaults.standard.integer(forKey: retentionKey)
+    }
+    /// The time range the Overview counts and the Timeline opens on, in hours:
+    /// 0 = all history. Unset = 24.
+    nonisolated static let defaultRangeKey = "securityTimeline.defaultRangeHours"
+    nonisolated static var defaultRangeHours: Int {
+        UserDefaults.standard.object(forKey: defaultRangeKey) == nil ? 24 : UserDefaults.standard.integer(forKey: defaultRangeKey)
+    }
+    /// The ranges offered, in hours (0 = all).
+    nonisolated static let rangeChoices = [1, 24, 168, 720, 0]
+    nonisolated static func rangeTitle(hours: Int) -> String {
+        switch hours {
+        case 1:   return NSLocalizedString("Last hour", comment: "security time range")
+        case 24:  return NSLocalizedString("Last 24 hours", comment: "security time range")
+        case 168: return NSLocalizedString("Last 7 days", comment: "security time range")
+        case 720: return NSLocalizedString("Last 30 days", comment: "security time range")
+        default:  return NSLocalizedString("All history", comment: "security time range")
+        }
+    }
+
+    /// Apply a changed retention now (not only at the next launch).
+    public func pruneNow() {
+        guard let dir = directory else { return }
+        io.async { Self.prune(dir) }
+    }
 
     /// This Mac's and every mirrored host's events, oldest first.
     public var allEvents: [Event] {
@@ -356,7 +383,9 @@ public final class SecurityTimeline {
 
     /// Drop daily logs past the retention window.
     nonisolated static func prune(_ directory: URL, now: Date = Date()) {
-        let cutoff = dayFormatter.string(from: now.addingTimeInterval(-Double(retentionDays) * 86400))
+        let days = retentionDays
+        guard days > 0 else { return }   // kept forever
+        let cutoff = dayFormatter.string(from: now.addingTimeInterval(-Double(days) * 86400))
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         where name.hasSuffix(".jsonl") && String(name.dropLast(6)) < cutoff {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))

@@ -297,6 +297,20 @@ struct BromureAC: ParsableCommand {
                     tl.append(.init(time: now.addingTimeInterval(Double(-600 + i * 60)), engine: r.0, condition: r.1,
                                     decision: r.2, kind: r.3, profileID: pid, workspace: "Claude Dev"))
                 }
+                // One noisy block (grouped into one row with a count) and a
+                // guest-sandbox denial with a changing pid (grouped by what
+                // was tried), from a second, OpenShell workspace.
+                let osID = UUID()
+                for i in 0..<101 {
+                    tl.append(.init(time: now.addingTimeInterval(Double(-3000 + i * 25)), engine: "Firewall",
+                                    condition: "telemetry.example.net:443 tcp", decision: "deny", kind: .blocked,
+                                    profileID: i % 3 == 0 ? osID : pid, workspace: i % 3 == 0 ? "Payments API" : "Claude Dev"))
+                }
+                for (i, procID) in [412, 980, 1311].enumerated() {
+                    tl.append(.init(time: now.addingTimeInterval(Double(-120 + i * 30)), engine: "Guest sandbox",
+                                    condition: "bash (pid \(procID)) — exec /opt/grok/bin/grok", decision: "denied",
+                                    kind: .blocked, profileID: osID, workspace: "Payments API"))
+                }
                 // PII swaps go through the real mapping.
                 for (i, d) in [["name": 2, "email": 1], ["name": 3, "phone": 1, "address": 1]].enumerated() {
                     var data: [String: AnyJSON] = ["host": .string("api.anthropic.com"),
@@ -313,6 +327,8 @@ struct BromureAC: ParsableCommand {
                                     guardrails: true, promptInjection: true, pii: true),
                     SecurityPosture(id: UUID(), name: "Daily", colorHex: "#10B981", firewall: false, supplyChain: true,
                                     guardrails: false, promptInjection: true),
+                    SecurityPosture(id: osID, name: "Payments API", colorHex: "#22C55E", firewall: true, supplyChain: true,
+                                    guardrails: true, promptInjection: false, sandbox: true),
                 ]
                 view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
                                                     startOnTimeline: which == "timeline"))
