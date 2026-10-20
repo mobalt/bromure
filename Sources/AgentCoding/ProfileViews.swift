@@ -3926,6 +3926,14 @@ struct ProfileEditorView: View {
             }
 
             // Manual tokens moved to Credentials → Other API keys.
+
+            // App-wide: this Mac's Preferences only.
+            #if os(macOS)
+            if isLocalPreferences {
+                Divider()
+                SecurityHistorySettingsView()
+            }
+            #endif
         }
     }
 
