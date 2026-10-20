@@ -17,18 +17,32 @@ import AppKit
 ///
 /// So every caught exception is written to the app log with its stack, and
 /// one that crossed a Swift job stops the app right there, the exception
-/// named in the crash report, instead of running on in a corrupted state.
-/// An exception that didn't (plain event handling) is survived, as before.
+/// named in the crash report, instead of running on in a corrupted state —
+/// but only when this Mac runs no VMs of its own (a fat client mirroring a
+/// remote): stopping a native instance would take its workspaces down with
+/// it, so there the app carries on and may still crash later. An exception
+/// that didn't cross a Swift job (plain event handling) is survived, as before.
 final class BromureApplication: NSApplication {
     override func reportException(_ exception: NSException) {
         let stack = exception.callStackSymbols
         FileHandle.standardError.write(Data((
             "[exception] \(exception.name.rawValue): \(exception.reason ?? "")\n"
             + stack.map { "  \($0)" }.joined(separator: "\n") + "\n").utf8))
-        if Self.crossedSwiftJob(stack) {
+        let crossed = Self.crossedSwiftJob(stack)
+        let hostsVMs = crossed && UbuntuSandboxVM.anyLive
+        if Self.stopsApp(crossedSwiftJob: crossed, hostsVMs: hostsVMs) {
             fatalError("Objective-C exception inside a Swift task — \(exception.name.rawValue): \(exception.reason ?? "")")
         }
+        if crossed {
+            FileHandle.standardError.write(Data(
+                "[exception] it crossed a Swift task, but local VMs are running — carrying on; the app may crash later\n".utf8))
+        }
         super.reportException(exception)
+    }
+
+    /// Stop here only when nothing local would go down with the app.
+    nonisolated static func stopsApp(crossedSwiftJob: Bool, hostsVMs: Bool) -> Bool {
+        crossedSwiftJob && !hostsVMs
     }
 
     /// The exception was thrown under a Swift concurrency job: its stack

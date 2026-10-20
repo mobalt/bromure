@@ -31,6 +31,22 @@ struct BromureApplicationTests {
         #expect(!BromureApplication.crossedSwiftJob(inTimer))
         #expect(BromureApplication.crossedSwiftJob(["2 libswift_Concurrency.dylib 0x1 swift_job_run + 76"]))
     }
+
+    @Test("it stops a fat client, never a Mac running its own VMs")
+    func stopsOnlyWithoutLocalVMs() {
+        #expect(BromureApplication.stopsApp(crossedSwiftJob: true, hostsVMs: false))
+        #expect(!BromureApplication.stopsApp(crossedSwiftJob: true, hostsVMs: true))
+        #expect(!BromureApplication.stopsApp(crossedSwiftJob: false, hostsVMs: false))
+        #expect(!BromureApplication.stopsApp(crossedSwiftJob: false, hostsVMs: true))
+    }
+
+    @Test("a sandbox that was never started doesn't count as a live VM")
+    @MainActor func idleSandboxIsNotLive() {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let sandbox = UbuntuSandboxVM(imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp))
+        #expect(sandbox.state == .created)
+        #expect(!UbuntuSandboxVM.anyLive)
+    }
 }
 
 /// The exception behind the 5.2.3 crash: a browser_evaluate whose page
