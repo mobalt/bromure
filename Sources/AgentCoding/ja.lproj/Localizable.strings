@@ -4246,3 +4246,7 @@
 "Don't allow unverified packages for the rest of the session" = "このセッションの間は未検証のパッケージを許可しない";
 "Don't allow %@" = "%@ を許可しない";
 "all unverified packages" = "すべての未検証パッケージ";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "これを書いた後、エージェントが新しい質問をしました。送信するには回答を編集してください。";
+"The agent asked a new question before your answer went. Read it and answer again." = "回答が届く前にエージェントが新しい質問をしました。読んでからもう一度回答してください。";

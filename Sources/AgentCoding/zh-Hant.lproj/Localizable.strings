@@ -4249,3 +4249,7 @@
 "Don't allow unverified packages for the rest of the session" = "本次工作階段剩餘時間不允許未核驗的套件";
 "Don't allow %@" = "不允許 %@";
 "all unverified packages" = "所有未核驗的套件";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "你寫下這段內容後，代理又提出了新問題。修改你的回答後才能傳送。";
+"The agent asked a new question before your answer went. Read it and answer again." = "你的回答送出前，代理又提出了新問題。請閱讀後重新回答。";

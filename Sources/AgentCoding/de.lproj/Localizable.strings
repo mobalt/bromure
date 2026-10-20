@@ -4246,3 +4246,7 @@
 "Don't allow unverified packages for the rest of the session" = "Ungeprüfte Pakete für den Rest der Sitzung nicht erlauben";
 "Don't allow %@" = "%@ nicht erlauben";
 "all unverified packages" = "alle ungeprüften Pakete";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "Der Agent hat inzwischen eine neue Frage gestellt. Ändern Sie Ihre Antwort, um sie zu senden.";
+"The agent asked a new question before your answer went. Read it and answer again." = "Der Agent hat eine neue Frage gestellt, bevor Ihre Antwort ankam. Lesen Sie sie und antworten Sie erneut.";

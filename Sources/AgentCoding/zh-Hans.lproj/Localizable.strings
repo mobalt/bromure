@@ -4246,3 +4246,7 @@
 "Don't allow unverified packages for the rest of the session" = "本次会话余下时间不允许未核验的包";
 "Don't allow %@" = "不允许 %@";
 "all unverified packages" = "所有未核验的包";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "你写下这段内容后，代理又提出了新问题。修改你的回答后才能发送。";
+"The agent asked a new question before your answer went. Read it and answer again." = "你的回答发出前，代理又提出了新问题。请阅读后重新回答。";

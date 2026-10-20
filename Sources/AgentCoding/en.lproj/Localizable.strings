@@ -4280,3 +4280,7 @@
 "Don't allow unverified packages for the rest of the session" = "Don't allow unverified packages for the rest of the session";
 "Don't allow %@" = "Don't allow %@";
 "all unverified packages" = "all unverified packages";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "The agent asked a new question since you wrote this. Change your answer to send it.";
+"The agent asked a new question before your answer went. Read it and answer again." = "The agent asked a new question before your answer went. Read it and answer again.";

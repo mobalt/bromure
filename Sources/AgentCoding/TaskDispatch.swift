@@ -556,9 +556,18 @@ final class TaskDispatcher {
     // MARK: Board → assignee
 
     /// The user answers the assignee's question from the board.
-    func answer(_ taskID: UUID, text: String) async -> Bool {
+    /// `askID`: the ask the answer was written for — refused when the
+    /// agent has asked again since (nil: whatever is asked now, for callers
+    /// that don't say).
+    func answer(_ taskID: UUID, askID: UUID? = nil, text: String) async -> Bool {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
-              let ask = task.pendingAskID else { return false }
+              task.pendingAskID != nil else { return false }
+        guard let ask = Self.answerTarget(task, writtenFor: askID) else {
+            delegate.codingTaskStore.mutate(taskID) {
+                $0.lastError = NSLocalizedString("The agent asked a new question before your answer went. Read it and answer again.", comment: "coding task: an answer for an earlier question")
+            }
+            return false
+        }
         do {
             try await delegate.delegationEngine.answer(
                 from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)
@@ -568,11 +577,23 @@ final class TaskDispatcher {
             }
             return false
         }
-        delegate.codingTaskStore.mutate(taskID) {
-            $0.pendingQuestion = nil
-            $0.pendingAskID = nil
-        }
+        delegate.codingTaskStore.mutate(taskID) { Self.clearAnswered(&$0, ask: ask) }
         return true
+    }
+
+    /// The ask an answer goes to: the one on the card, unless the answer was
+    /// written for another (the agent asked again since).
+    static func answerTarget(_ task: CodingTask, writtenFor askID: UUID?) -> UUID? {
+        guard let ask = task.pendingAskID, askID == nil || askID == ask else { return nil }
+        return ask
+    }
+
+    /// `ask` was answered: the card's question goes — only if it's still that
+    /// one (the agent may have asked again while the answer was on its way).
+    static func clearAnswered(_ task: inout CodingTask, ask: UUID) {
+        guard task.pendingAskID == ask else { return }
+        task.pendingQuestion = nil
+        task.pendingAskID = nil
     }
 
     /// Review comments go back to the assignee as a steer (its own session
