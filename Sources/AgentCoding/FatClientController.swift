@@ -2779,19 +2779,28 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     /// machine show the same transcript. nil: follow the active tab (a
     /// plain workspace mount, no session on stage).
     private let windowIndex: Int?
+    /// The session in that window when the chat was made: window indices
+    /// are reused — a session closed, the next one's tab took its number.
+    private let sessionID: UUID?
 
     init(controller: RemoteHostController, workspaceID: Profile.ID, windowIndex: Int? = nil,
-         accent: Color) {
+         sessionID: UUID? = nil, accent: Color) {
         self.controller = controller
         self.workspaceID = workspaceID
         self.windowIndex = windowIndex
+        self.sessionID = sessionID
         self.accent = accent
     }
 
     /// Over the tunnel every byte counts: reuse what was downloaded, and take
     /// a smaller first window (scrolling up loads the rest).
+    /// Per session, not only per window: keyed by the window alone, a new
+    /// session in a reused window opened on the previous one's downloaded
+    /// conversation — a Codex for its first half-minute, until it writes
+    /// a rollout of its own.
     var historyCacheKey: String? {
-        windowIndex.map { "\(controller.host.id.uuidString):\(workspaceID.uuidString):\($0)" }
+        windowIndex.map { "\(controller.host.id.uuidString):\(workspaceID.uuidString):\($0)"
+            + (sessionID.map { ":\($0.uuidString)" } ?? "") }
     }
     var historyBytesHint: Int? { 1_500_000 }
 
@@ -3072,7 +3081,7 @@ final class RemoteRoomBackend: RoomStageBackend {
         guard let w = s.windowIndex else { return nil }
         // The session's own agent, not the workspace's default.
         window?.hintSessionTool(s.tool, profileID: s.profileID, window: w)
-        return window?.makeRemoteChatModel(id: s.profileID, window: w)
+        return window?.makeRemoteChatModel(id: s.profileID, window: w, session: s.id)
     }
 
     func startSwitchboard(_ room: AgentRoom) {
@@ -3177,6 +3186,9 @@ final class RemoteHostWindow: NSWindow {
     /// rebuilds the host — reusing it would show the previous tab's transcript
     /// until the next poll (the stale/blank flash a toggle worked around).
     private var beautifiedTabIndex: Int?
+    /// The session the mounted chat is for (`beautifiedTabIndex` alone is
+    /// reused by the next session to open in that window).
+    private var beautifiedSessionID: UUID?
     /// Boot "dive screen" overlaid on the stage while the shown workspace's VM
     /// boots and its tmux roster hasn't landed yet — the same cue the native
     /// window shows, so a reboot/base-image reset over the fat client reads as
@@ -7650,29 +7662,33 @@ final class RemoteHostWindow: NSWindow {
     /// sessions on one machine the same transcript.
     private func mountBeautified(for id: Profile.ID, window idx: Int) {
         let tabIndex: Int? = idx
-        // Keep the live host only for the same workspace AND the same tab; a
-        // different tab (or workspace) rebuilds so the transcript matches the
-        // tab on screen instead of lagging a poll behind.
-        if beautifiedWorkspace == id, beautifiedTabIndex == tabIndex, mountedBeautifiedHost != nil {
+        let sid = controller.sessionStore.session(profileID: id, windowIndex: idx)?.id
+        // Keep the live host only for the same workspace, tab AND session; a
+        // different one rebuilds so the transcript matches the tab on screen
+        // instead of lagging a poll behind — or, in a window a closed
+        // session left, showing that session's conversation.
+        if beautifiedWorkspace == id, beautifiedTabIndex == tabIndex, beautifiedSessionID == sid,
+           mountedBeautifiedHost != nil {
             shownWorkspace = id; return
         }
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
         // A chat shown lately is still warm (kept streaming off stage):
         // reuse it — switching back is a render, not a download.
-        let key = "\(id.uuidString):\(idx)"
+        let key = Self.warmChatKey(id, idx, sid)
         let m: BeautifiedSessionModel
         if let warm = warmChats.removeValue(forKey: key) {
             warmChatOrder.removeAll { $0 == key }
             m = warm
             m.setBackground(false)
         } else {
-            m = makeRemoteChatModel(id: id, window: idx)
+            m = makeRemoteChatModel(id: id, window: idx, session: sid)
             m.start()
         }
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
+        beautifiedSessionID = sid
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         // A long conversation's fitting height (thousands of points) must
         // never become the window's minimum.
@@ -7688,11 +7704,12 @@ final class RemoteHostWindow: NSWindow {
     /// the stage's own (delegations, mentions, slash commands, sign-in, the
     /// inline terminal) — not started. The stage mounts one; a room's grid
     /// builds one per session.
-    func makeRemoteChatModel(id: Profile.ID, window idx: Int) -> BeautifiedSessionModel {
+    func makeRemoteChatModel(id: Profile.ID, window idx: Int, session: UUID? = nil) -> BeautifiedSessionModel {
         let tabIndex: Int? = idx
         let accent = controller.profile(for: id).map { Color(hex: $0.color.hexInUI) } ?? .accentColor
+        let sid = session ?? controller.sessionStore.session(profileID: id, windowIndex: idx)?.id
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
-                                                windowIndex: idx, accent: accent)
+                                                windowIndex: idx, sessionID: sid, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
         m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)"
         m.cachedTranscript = { [weak controller] sid in controller?.cachedTranscript(sid) }
@@ -7815,10 +7832,15 @@ final class RemoteHostWindow: NSWindow {
     private var warmChats: [String: BeautifiedSessionModel] = [:]
     private var warmChatOrder: [String] = []
     private static let warmChatLimit = 4
+    /// A warm chat is a session's, in a window: the window alone was the
+    /// previous session's chat for the next one to open there.
+    static func warmChatKey(_ workspace: Profile.ID, _ window: Int, _ session: UUID?) -> String {
+        "\(workspace.uuidString):\(window)" + (session.map { ":\($0.uuidString)" } ?? "")
+    }
 
     private func unmountBeautified() {
         if let m = beautifiedModel, let id = beautifiedWorkspace, let idx = beautifiedTabIndex {
-            let key = "\(id.uuidString):\(idx)"
+            let key = Self.warmChatKey(id, idx, beautifiedSessionID)
             m.setBackground(true)
             warmChats[key] = m
             warmChatOrder.removeAll { $0 == key }
@@ -7832,6 +7854,7 @@ final class RemoteHostWindow: NSWindow {
         beautifiedModel = nil
         beautifiedWorkspace = nil
         beautifiedTabIndex = nil
+        beautifiedSessionID = nil
         mountedBeautifiedHost?.removeFromSuperview()
         mountedBeautifiedHost = nil
     }
