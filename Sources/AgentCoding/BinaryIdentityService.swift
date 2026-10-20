@@ -57,6 +57,31 @@ public final class BinaryIdentityService: @unchecked Sendable {
         return bridges[profileID]?.isConnected ?? false
     }
 
+    /// The program each recent connection was attested to, by destination
+    /// ("pid|host-or-ip|port"): an Allow under Enforce binaries names it in the
+    /// rule it adds, so the rule works at once and stays narrow.
+    private var recentExes: [String: (exe: String, at: Date)] = [:]
+
+    func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int) {
+        lock.lock(); defer { lock.unlock() }
+        for d in destinations where !d.isEmpty {
+            recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, Date())
+        }
+        if recentExes.count > 2048 {
+            let cutoff = Date().addingTimeInterval(-3600)
+            recentExes = recentExes.filter { $0.value.at > cutoff }
+        }
+    }
+
+    /// The program that last connected to one of `destinations` on `port`
+    /// within the hour, as the attestor reported it.
+    public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        let cutoff = Date().addingTimeInterval(-3600)
+        return destinations.compactMap { recentExes["\(profileID.uuidString)|\($0.lowercased())|\(port)"] }
+            .filter { $0.at > cutoff }.max { $0.at < $1.at }?.exe
+    }
+
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
     public func identity(profileID: UUID, sport: UInt16, dst: String, dport: UInt16) async
         -> OpenShellPolicy.BinaryIdentity? {
@@ -108,6 +133,7 @@ public final class BinaryIdentityService: @unchecked Sendable {
         let identity = OpenShellPolicy.BinaryIdentity(
             exe: exe, sha256: sha,
             ancestors: links.dropFirst().map { .init(exe: $0.exe, sha256: $0.sha256 ?? "") })
+        noteExe(exe, profileID: profileID, destinations: [dst], port: Int(dport))
         return identity
     }
 
@@ -131,6 +157,7 @@ public final class BinaryIdentityService: @unchecked Sendable {
         let dst = EgressPolicy.ipv4String(dstIP)
         Task {
             let id = await self.identity(profileID: profileID, sport: sport, dst: dst, dport: dport)
+            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport)) }
             let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
             self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, Date()); self.lock.unlock()
         }

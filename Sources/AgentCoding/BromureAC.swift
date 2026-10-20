@@ -363,6 +363,49 @@ struct BromureAC: ParsableCommand {
                     let wh = env.split(separator: "x").compactMap { Double($0) }
                     if wh.count == 2 { size = NSSize(width: wh[0], height: wh[1]) }
                 }
+            case "policy-drawer", "policy-drawer-openshell":
+                // The Sandbox drawer over a stand-in stage, with demo blocks
+                // in an in-memory timeline (never the user's own).
+                let os = which == "policy-drawer-openshell"
+                var p = Profile(name: "Web app", tool: .claude, authMode: .subscription)
+                if os {
+                    p.networkPolicy = OpenShellPolicyEditor.starterPolicy
+                        + "\nfilesystem_policy:\n  read_only: [/bin, /usr, /lib, /etc]\n  read_write: [/home/ubuntu, /tmp]\n"
+                    p.kernelSentry = .bestEffort
+                }
+                else { p.egressRules = "allow tcp github.com:443\nallow tcp registry.npmjs.org:443 #@until=\(Int(Date().timeIntervalSince1970) + 2400)\nallow web api.openai.com GET,POST #@until=stop\n" }
+                let tl = SecurityTimeline(directory: nil)
+                let now = Date()
+                for (i, (h, port, n)) in [("api.stripe.com", 443, 3), ("www.bromure.io", 443, 1),
+                                          ("pypi.org", 443, 7), ("10.0.0.12", 5432, 2)].enumerated() {
+                    tl.append(SecurityTimeline.Event(
+                        time: now.addingTimeInterval(Double(-90 - i * 260)), engine: "Firewall",
+                        condition: "\(h):\(port)", decision: "deny", kind: .blocked, profileID: p.id,
+                        count: n, firewall: .init(host: h.first!.isNumber ? nil : h, ip: h.first!.isNumber ? h : "104.18.1.\(i)",
+                                                  port: port, proto: "tcp", rule: nil, denied: true, byPolicy: true)))
+                }
+                if os {
+                    for (i, (path, exe, n)) in [("/opt/grok/downloads/grok-linux-aarch64", "/usr/bin/bash", 3),
+                                                ("/srv/datasets/train.parquet", "/usr/bin/python3.12", 12)].enumerated() {
+                        var ev = SecurityTimeline.Event(
+                            time: now.addingTimeInterval(Double(-40 - i * 400)), engine: "Guest sandbox",
+                            condition: path, decision: "denied", kind: .blocked, profileID: p.id)
+                        ev.eventType = "sentry.event"
+                        ev.detail = ["category": .string("sandbox_denial"), "kind": .string("landlock_denied"),
+                                     "path": .string(path), "exe": .string(exe), "op": .string(i == 0 ? "exec" : "open"),
+                                     "count": .int(n)]
+                        tl.append(ev)
+                    }
+                }
+                let list = SessionListModel()
+                list.policyDrawerOpen = true
+                view = AnyView(ZStack(alignment: .trailing) {
+                    LinearGradient(colors: [Color(nsColor: .textBackgroundColor), Color(nsColor: .underPageBackgroundColor)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    PolicyDrawer(list: list, onClose: {}, onOpenSettings: { _ in }, timeline: tl, profileOverride: p)
+                        .padding(10)
+                })
+                size = NSSize(width: 720, height: 620)
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -1153,6 +1196,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                  keyEquivalent: "b")
     browserItem.keyEquivalentModifierMask = [.command, .control]
     viewMenu.addItem(browserItem)
+    let networkItem = NSMenuItem(title: L("Toggle Sandbox Drawer"),
+                                 action: #selector(UnifiedSessionWindow.togglePolicyDrawer(_:)),
+                                 keyEquivalent: "n")
+    networkItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(networkItem)
     viewMenu.addItem(NSMenuItem.separator())
     let fullScreenItem = NSMenuItem(title: L("Enter Full Screen"),
                                     action: #selector(NSWindow.toggleFullScreen(_:)),

@@ -330,6 +330,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// from the guest over the shell vsock (see FileExplorer.swift).
     let fileExplorerModel = FileExplorerModel()
     private var filePaneHost: NonMovableHostingView<FileExplorerPane>!
+    /// The Sandbox drawer, floating over the stage's right edge.
+    private var policyDrawerHost: NSView?
+    private var policyDrawerTrailing: NSLayoutConstraint?
     private var filePaneWidthConstraint: NSLayoutConstraint?
     private var filePaneResizeHandle: SidebarResizeHandle?
     private(set) var filePaneOpen = false
@@ -913,6 +916,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
             onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
             onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) },
+            onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer(nil) },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showVMDashboard(id) },
@@ -988,6 +992,61 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// ⌃⌘E / the toolbar's sidebar.right button.
     @objc func toggleFilePane(_ sender: Any?) {
         setFilePaneOpen(!filePaneOpen, animated: true)
+    }
+
+    // MARK: Sandbox drawer
+
+    /// ⌃⌘N / the toolbar's shield button.
+    @objc func togglePolicyDrawer(_ sender: Any?) {
+        setPolicyDrawerOpen(!listModel.policyDrawerOpen)
+    }
+
+    func setPolicyDrawerOpen(_ open: Bool) {
+        let host = ensurePolicyDrawer()
+        listModel.policyDrawerOpen = open
+        if open { host.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            policyDrawerTrailing?.animator().constant = open ? -10 : 400
+            host.animator().alphaValue = open ? 1 : 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.listModel.policyDrawerOpen else { return }
+                self.policyDrawerHost?.isHidden = true
+            }
+        })
+    }
+
+    /// Built on first open, on top of everything on the stage.
+    private func ensurePolicyDrawer() -> NSView {
+        if let h = policyDrawerHost { return h }
+        let drawer = PolicyDrawer(
+            list: listModel,
+            onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
+            onOpenSettings: { [weak self] id in
+                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
+                self?.acDelegate?.sidebarEditProfile(id)
+            })
+        let host = NSHostingView(rootView: drawer)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.wantsLayer = true
+        host.alphaValue = 0
+        host.isHidden = true
+        stage.addSubview(host, positioned: .above, relativeTo: nil)
+        let trailing = host.trailingAnchor.constraint(equalTo: stage.trailingAnchor, constant: 400)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: stage.topAnchor, constant: 10),
+            host.bottomAnchor.constraint(equalTo: stage.bottomAnchor, constant: -10),
+            host.widthAnchor.constraint(equalToConstant: 368),
+            trailing,
+        ])
+        stage.layoutSubtreeIfNeeded()
+        policyDrawerHost = host
+        policyDrawerTrailing = trailing
+        return host
     }
 
     /// Open/close the right file pane. Closed = width 0 and hidden (no rail);
@@ -5627,6 +5686,7 @@ struct UnifiedToolbarBar: View {
     let onToggleFusion: (Profile.ID, Bool) -> Void
     let onToggleFilePane: () -> Void
     let onToggleBrowser: () -> Void
+    var onTogglePolicyDrawer: () -> Void = {}
     let onToggleBeautified: (Profile.ID) -> Void
     /// Sessions-first: the Linux pill — a session's terminal tab, and from
     /// that tab the session again.
@@ -5735,6 +5795,7 @@ struct UnifiedToolbarBar: View {
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
+                PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 // The one Files view: the folder's files, git changes, drag

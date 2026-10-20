@@ -397,6 +397,16 @@ final class SessionListModel {
     /// True when the right-hand file-explorer pane is open. Drives the
     /// toolbar button tint and the pane's own context/polling.
     var filePaneOpen = false
+    /// True while the Sandbox drawer (blocked connections, proposals) is open.
+    var policyDrawerOpen = false
+    /// When each workspace's drawer was last looked at: the toolbar badge
+    /// counts blocks since.
+    var policyDrawerSeen: [UUID: Date] = [:]
+    /// The workspace the stage shows: with a session on stage, that
+    /// session's machine — not whichever machine was selected last.
+    var stageProfileID: UUID? {
+        (sessionsFirst && selectedSessionID != nil) ? (selectedSessionProfileID ?? selectedID) : selectedID
+    }
     /// True when the agentic browser pane is open. Drives the toolbar tint.
     /// (Local window; set from the selected pane's browser state.)
     var browserPaneOpen = false

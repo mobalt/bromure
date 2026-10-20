@@ -140,6 +140,57 @@ extension OpenShellPolicy {
         return out.hasSuffix("\n\n") ? String(out.dropLast()) : out
     }
 
+    /// `source` with `path` added to `filesystem_policy`'s `read_only` (or
+    /// `read_write`) list, the rest of the text left as written. Handles a
+    /// flow list (`read_only: [/usr, /lib]`), a block list (`- /usr` lines) and
+    /// a missing key; a path already listed comes back unchanged. Throws when
+    /// the policy has no `filesystem_policy` section or the result wouldn't
+    /// parse.
+    public static func addingFilesystemPath(_ path: String, readWrite: Bool, to source: String) throws -> String {
+        let key = readWrite ? "read_write" : "read_only"
+        if let fs = try OpenShellPolicy.parse(source).filesystem,
+           (readWrite ? fs.readWrite : fs.readOnly).contains(path) { return source }
+        var lines = source.components(separatedBy: "\n")
+        guard let start = lines.firstIndex(where: { $0.hasPrefix("filesystem_policy:") }) else {
+            throw ParseError(line: 0, path: "filesystem_policy", message: "the policy has no filesystem_policy section")
+        }
+        let end = ((start + 1)..<lines.count).first { i in
+            guard let c = lines[i].first else { return false }
+            return c != " " && c != "\t" && c != "#" && c != "-"
+        } ?? lines.count
+        let indent = firstChild(lines, after: start).flatMap { $0 < end ? String(lines[$0].prefix { $0 == " " }) : nil } ?? "  "
+        let keyLine = ((start + 1)..<end).first {
+            lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix(key + ":")
+        }
+        if let k = keyLine {
+            let afterKey = lines[k].components(separatedBy: key + ":").dropFirst().joined(separator: key + ":")
+            if let open = afterKey.firstIndex(of: "["), let close = afterKey.lastIndex(of: "]") {
+                // Flow list: append inside the brackets.
+                let inner = afterKey[afterKey.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
+                let prefix = lines[k].components(separatedBy: key + ":")[0]
+                lines[k] = prefix + key + ": [" + (inner.isEmpty ? path : inner + ", " + path) + "]"
+                    + afterKey[afterKey.index(after: close)...]
+            } else {
+                // Block list: after its last `- item` line.
+                var last = k
+                var itemIndent = indent + "  "
+                for i in (k + 1)..<end {
+                    let t = lines[i].trimmingCharacters(in: .whitespaces)
+                    if t.isEmpty || t.hasPrefix("#") { continue }
+                    guard t.hasPrefix("- ") else { break }
+                    last = i
+                    itemIndent = String(lines[i].prefix { $0 == " " })
+                }
+                lines.insert(itemIndent + "- " + path, at: last + 1)
+            }
+        } else {
+            lines.insert(indent + key + ": [" + path + "]", at: start + 1)
+        }
+        let out = lines.joined(separator: "\n")
+        _ = try OpenShellPolicy.parse(out)
+        return out
+    }
+
     private static func firstChild(_ lines: [String], after start: Int) -> Int? {
         for i in (start + 1)..<lines.count {
             let t = lines[i].trimmingCharacters(in: .whitespaces)

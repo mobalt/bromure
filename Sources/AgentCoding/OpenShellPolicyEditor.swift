@@ -331,11 +331,12 @@ struct OpenShellPolicyEditor: View {
 
         # Filesystem sandbox (OpenShell): the paths OpenShell's own example
         # policies use, with the workload home (/sandbox there) at
-        # /home/ubuntu. The agent may read the system and write only its
-        # home, its project folders (include_workdir) and /tmp.
+        # /home/ubuntu, plus /opt, where the Bromure image installs tools
+        # (grok, bun for omp, gcloud). The agent may read the system and
+        # write only its home, its project folders (include_workdir) and /tmp.
         filesystem_policy:
           include_workdir: true
-          read_only: [/bin, /usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+          read_only: [/bin, /usr, /lib, /opt, /proc, /dev/urandom, /etc, /var/log]
           read_write: [/home/ubuntu, /tmp, /dev/null]
         landlock:
           compatibility: best_effort

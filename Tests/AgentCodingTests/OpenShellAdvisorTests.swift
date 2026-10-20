@@ -151,6 +151,31 @@ struct OpenShellAdvisorTests {
         #expect(a.pending(for: pid).map(\.rule.key) == ["pypi_read"])
     }
 
+    @Test("Allow from the drawer: the rule goes in at once and names the program the attestor reported")
+    func allowNamesProgram() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        // A draft for the same destination is settled by the allow.
+        a.recordDenial(profileID: pid, layer: "l4", host: "www.bromure.io", port: 443, method: nil, path: nil, reason: "no rule")
+        BinaryIdentityService.shared.noteExe("/usr/bin/curl", profileID: pid, destinations: ["www.bromure.io"], port: 443)
+        let error = await a.allow(profileID: pid, host: "www.bromure.io", port: 443)
+        #expect(error == nil)
+        let policy = try OpenShellPolicy.parse(box.policy)
+        let rule = try #require(policy.networkPolicies.first { $0.key == "allow_www_bromure_io_443_curl" })
+        #expect(rule.binaries == ["/usr/bin/curl"])
+        #expect(rule.endpoints.first?.host == "www.bromure.io")
+        #expect(a.pending(for: pid).isEmpty)
+    }
+
+    @Test("Allow with no attested program: a host-and-port rule for any program")
+    func allowWithoutProgram() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) == nil)
+        let rule = try #require(try OpenShellPolicy.parse(box.policy).networkPolicies.first { $0.key == "allow_pypi_org_443" })
+        #expect(rule.binaries.isEmpty)
+        // Allowing it again is refused, not duplicated.
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) != nil)
+    }
+
     @Test("policy.local routes: feature_disabled when off; denials, policy, proposal wait")
     func agentAPI() async throws {
         let (off, offPID, _) = advisor(mode: .off)

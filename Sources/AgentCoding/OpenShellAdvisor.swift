@@ -132,13 +132,49 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         }
         lock.unlock()
         guard !exists else { return }
-        let key = "allow_" + host.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "_" }
-            .reduce(into: "") { $0.append($1) } + "_\(port)"
-        let ep = OpenShellPolicy.Endpoint(host: host.lowercased(), ports: [UInt16(port)], path: nil,
+        _ = enqueue(profileID: profileID, rule: Self.allowRule(profileID: profileID, host: host, port: port),
+                    source: "mechanistic", intent: "Drafted from a blocked connection to \(host):\(port)")
+    }
+
+    /// One host and port, no inspection. When the attestor named the program
+    /// that tried (Enforce binaries is on), the rule lists it: a rule without
+    /// `binaries` allows nothing there.
+    static func allowRule(profileID: UUID, host: String, port: Int) -> OpenShellPolicy.NetworkRule {
+        let h = host.lowercased()
+        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID, destinations: [h], port: port)
+        func slug(_ s: String) -> String { s.map { $0.isLetter || $0.isNumber ? $0 : "_" }.reduce(into: "") { $0.append($1) } }
+        var key = "allow_" + slug(h) + "_\(port)"
+        if let exe { key += "_" + slug((exe as NSString).lastPathComponent) }
+        let ep = OpenShellPolicy.Endpoint(host: h, ports: [UInt16(port)], path: nil,
                                           allowedIPs: [], l7: nil, tlsSkip: false, enforcement: .audit,
                                           access: nil, rules: [], denyRules: [], allowEncodedSlash: false)
-        _ = enqueue(profileID: profileID, rule: .init(key: key, name: key, endpoints: [ep], binaries: []),
-                    source: "mechanistic", intent: "Drafted from a blocked connection to \(host):\(port)")
+        return .init(key: key, name: key, endpoints: [ep], binaries: exe.map { [$0] } ?? [])
+    }
+
+    /// The user allowed a blocked destination (the Sandbox drawer): add the
+    /// rule now, through the same validation and apply path as an approval,
+    /// and settle any draft for it. Returns an error message, or nil.
+    public func allow(profileID: UUID, host: String, port: Int) async -> String? {
+        let rule = Self.allowRule(profileID: profileID, host: host, port: port)
+        let id: String
+        switch enqueue(profileID: profileID, rule: rule, source: "user", intent: "Allowed from the Sandbox drawer") {
+        case .ok(let v): id = v
+        case .refused(let why): return why
+        }
+        await approve(id: id, profileID: profileID)
+        let settled = proposal(id: id, profileID: profileID)
+        if settled?.status == .rejected { return settled?.rejectionReason ?? "couldn't add the rule" }
+        lock.lock()
+        for i in (proposals[profileID] ?? []).indices {
+            let p = proposals[profileID]![i]
+            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port {
+                proposals[profileID]![i].status = .rejected
+                proposals[profileID]![i].rejectionReason = "allowed by hand"
+            }
+        }
+        lock.unlock()
+        notify()
+        return nil
     }
 
     // MARK: - Proposals

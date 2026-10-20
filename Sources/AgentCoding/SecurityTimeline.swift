@@ -221,6 +221,11 @@ public final class SecurityTimeline {
         guard var e = Self.map(profileID: profileID, eventType: eventType,
                                eventData: eventData, now: Date()) else { return }
         if Self.detailedTypes.contains(eventType) { e.eventType = eventType; e.detail = eventData }
+        // A sandbox denial keeps its path and program: the Sandbox drawer
+        // offers to allow the path from it.
+        if eventType == "sentry.event", case .string("sandbox_denial")? = eventData["category"] {
+            e.eventType = eventType; e.detail = eventData
+        }
         Task { @MainActor in self.append(e) }
     }
 
