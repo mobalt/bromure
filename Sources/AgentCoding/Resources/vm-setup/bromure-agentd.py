@@ -74,6 +74,9 @@ import threading
 import time
 import traceback
 
+# See _UNIT_CONTENT: python children ignore the user site-packages too.
+os.environ["PYTHONNOUSERSITE"] = "1"
+
 
 def _ensure_utf8_locale():
     """tmux sanitizes what it prints for a client whose locale isn't UTF-8
@@ -223,6 +226,27 @@ def _tmux_argv():
     """
     socket_path = _SANDBOX.get("tmux_socket")
     return ["tmux", "-S", socket_path] if socket_path else ["tmux"]
+
+
+def _sandbox_ctl_request(request, timeout=20.0):
+    """One JSON request to bromure-sandboxd; its reply, or None. The reply may
+    be larger than one recv (an install's output), so read to the newline."""
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(timeout)
+        c.connect(SANDBOX_CTL)
+        c.sendall((json.dumps(request) + "\n").encode())
+        data = b""
+        while b"\n" not in data:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        c.close()
+        return json.loads(data.decode("utf-8").strip() or "{}")
+    except (OSError, ValueError) as e:
+        log("sandbox", "ctl %s: %s" % (request.get("op"), e))
+        return None
 
 
 def _sandbox_ctl(op, timeout=20.0):
@@ -1350,6 +1374,22 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         workdir = req.get("workdir")
         version_exit = _version_mismatch(req)
 
+        # A system package the user approved (Sandbox drawer): the root
+        # supervisor installs it. agentd only relays; it has no root under the
+        # strict sandbox, and the sandboxed agent can't reach the supervisor.
+        apt = req.get("apt_install")
+        if isinstance(apt, dict):
+            reply = _sandbox_ctl_request({"op": "apt_install",
+                                          "packages": apt.get("packages") or []},
+                                         timeout=900.0)
+            if reply is None:
+                resp = {"exit_code": 1, "output": "no reply from the sandbox supervisor"}
+            else:
+                resp = {"exit_code": int(reply.get("exit_code", 1)),
+                        "output": reply.get("output") or reply.get("reason") or ""}
+            resp_data = json.dumps(resp).encode("utf-8")
+            vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
+            return  # finally: close + replenish
         # The host's firewall cut a proxied connection: reset its bridge.
         abort = req.get("bridge_abort")
         if isinstance(abort, dict):
@@ -6650,6 +6690,13 @@ def task_set_mtu():
 # forever; the default 5-in-10s limit permanently failed the unit (and the
 # VM's whole control plane) on a crash loop, even after the host restaged a
 # fixed source.
+# `python3 -s`: no user site-packages. agentd runs as the workspace user,
+# OUTSIDE the sandbox, and the agent can write that user's home: anything it
+# drops into ~/.local/lib/python3*/site-packages (a usercustomize.py, a module
+# named like one agentd imports) would otherwise run inside agentd at its next
+# restart. pip installing into ~/.local by default (the OpenShell engine's
+# home packages) makes that path routine, so it is closed here, and
+# PYTHONNOUSERSITE does the same for every python agentd starts.
 _UNIT_PATH = "/etc/systemd/system/bromure-agentd.service"
 _UNIT_CONTENT = r"""[Unit]
 Description=Bromure guest agent daemon
@@ -6659,7 +6706,7 @@ ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
-ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+ExecStart=/usr/bin/python3 -s /mnt/bromure-meta/bromure-agentd.py
 Restart=always
 RestartSec=1
 KillMode=process
@@ -6874,14 +6921,14 @@ def task_fix_systemd_unit():
             current = f.read()
     except OSError:
         return   # not installed (dev run) — the tty1 bootstrap owns creation
-    if "KillMode=process" in current:
+    if "KillMode=process" in current and "python3 -s " in current:
         return
     tmp = "/tmp/.bromure-agentd-unit"
     with open(tmp, "w") as f:
         f.write(_UNIT_CONTENT)
     _sudo(["install", "-m", "644", tmp, _UNIT_PATH])
     _sudo(["systemctl", "daemon-reload"])
-    log("session", "systemd unit upgraded (KillMode=process)")
+    log("session", "systemd unit upgraded (KillMode=process, python3 -s)")
 
 
 def _sudo_write(path, content, mode="0644"):

@@ -149,6 +149,8 @@ struct OpenShellPolicyEditor: View {
                 strictSandboxSection
                 Divider()
                 guestSandboxSection
+                Divider()
+                packagesSection
             }
 
             PolicyCard(title: "Policy advisor", icon: "wand.and.stars", tint: .purple,
@@ -320,6 +322,25 @@ struct OpenShellPolicyEditor: View {
                     PolicyStatus(text: "Added for Bromure: " + (st.additionsReadWrite.map { "\($0) (rw)" } + st.additionsReadOnly.map { "\($0) (ro)" })
                         .joined(separator: ", "))
                 }
+            }
+        }
+    }
+
+    /// Package installs: the sandbox has no root, so pip defaults to the home
+    /// folder and `apt-get install` becomes a request for the user.
+    @ViewBuilder private var packagesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            PolicyRow(title: "Packages in the home folder",
+                      caption: "pip installs into ~/.local; npm already uses ~/.npm-global.",
+                      info: "The sandbox has no root, so system-wide installs can't work. With this on, pip installs into the home folder by default (PIP_USER), and npm installs globally into ~/.npm-global as on every workspace. Bromure's own processes outside the sandbox ignore packages in the home folder. Takes effect in new terminals.") {
+                Toggle("Packages in the home folder", isOn: $draft.sandboxHomePackages)
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            PolicyRow(title: "System packages on request",
+                      caption: "apt-get install asks you first; the agent never gets root.",
+                      info: "When the agent runs apt-get install (with or without sudo), the request waits in the Sandbox drawer. Approve it and the VM's root supervisor installs those packages — by exact name, from Ubuntu's mirrors, which Bromure allows for this. Reject it and the agent is told not to retry. Takes effect at the next VM start.") {
+                Toggle("System packages on request", isOn: $draft.sandboxSystemPackages)
+                    .labelsHidden().toggleStyle(.switch)
             }
         }
     }

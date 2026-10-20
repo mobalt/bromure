@@ -1773,6 +1773,19 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// variables, resolved by the proxy with OpenShell's rules (headers
     /// always; bodies / WebSocket text only where the endpoint opts in).
     public var openShellCredentialPlaceholders: Bool = false
+    /// OpenShell engine: Python packages install into the home folder by
+    /// default (`pip install` → `~/.local`), since the sandbox has no root for
+    /// system-wide installs. npm already installs globally into
+    /// `~/.npm-global` on every workspace. Default on.
+    public var sandboxHomePackages: Bool = true
+    /// OpenShell engine: the agent can ask for a system package
+    /// (`apt-get install …`, with or without sudo); the request waits in the
+    /// Sandbox drawer and, once approved, the guest's root supervisor installs
+    /// it. The agent never gets root. Default on.
+    public var sandboxSystemPackages: Bool = true
+    /// The two above, in force: only under the OpenShell engine.
+    public var effectiveSandboxHomePackages: Bool { usesOpenShellPolicy && sandboxHomePackages }
+    public var effectiveSandboxSystemPackages: Bool { usesOpenShellPolicy && sandboxSystemPackages }
     /// Don't intercept container traffic: flows the guest forwards for
     /// containers (marked by the kernel sentry, which root can't forge) skip
     /// the MiTM; the firewall still applies. Needs the kernel sentry.
@@ -2389,6 +2402,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case strictSandbox
         case kernelSentry
         case openShellCredentialPlaceholders
+        case sandboxHomePackages, sandboxSystemPackages
         case containerTrafficDirect
         case disableExfiltrationAlerts
         case supplyChain
@@ -2528,6 +2542,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
         kernelSentry = (try? c.decodeIfPresent(KernelSentryMode.self, forKey: .kernelSentry)) ?? .off
         openShellCredentialPlaceholders = try c.decodeIfPresent(Bool.self, forKey: .openShellCredentialPlaceholders) ?? false
+        sandboxHomePackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxHomePackages) ?? true
+        sandboxSystemPackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxSystemPackages) ?? true
         containerTrafficDirect = try c.decodeIfPresent(Bool.self, forKey: .containerTrafficDirect) ?? false
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
@@ -2705,6 +2721,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if openShellCredentialPlaceholders {
             try c.encode(true, forKey: .openShellCredentialPlaceholders)
         }
+        if !sandboxHomePackages { try c.encode(false, forKey: .sandboxHomePackages) }
+        if !sandboxSystemPackages { try c.encode(false, forKey: .sandboxSystemPackages) }
         if containerTrafficDirect {
             try c.encode(true, forKey: .containerTrafficDirect)
         }
@@ -5510,6 +5528,16 @@ public final class ProfileStore {
     # actually shadows the baked root grok).
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.grok/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 
+    # OpenShell engine (the sandbox has no root): pip installs into the home
+    # folder, and `apt-get install` (with or without sudo) becomes a request
+    # the user approves (Settings › Sandbox Policy › Sandbox, both switchable).
+    if [ -f /mnt/bromure-meta/home-packages ]; then
+        export PIP_USER=1 PIP_BREAK_SYSTEM_PACKAGES=1
+    fi
+    if [ -d /mnt/bromure-meta/pkg-bin ]; then
+        export PATH="/mnt/bromure-meta/pkg-bin:$PATH"
+    fi
+
     # MITM proxy env (HTTPS_PROXY + per-language CA bundles + ssh-agent
     # socket). Sourced before api_key.env so the fake API keys are
     # picked up alongside the proxy that swaps them.
@@ -6275,7 +6303,7 @@ public final class ProfileStore {
     # 5-in-10s limit permanently failed the unit on a crash loop even after
     # the host restaged a fixed source.
     if [ "$(tty)" = "/dev/tty1" ] && [ -r /mnt/bromure-meta/bromure-agentd.py ]; then
-        if ! grep -sq "KillMode=process" /etc/systemd/system/bromure-agentd.service; then
+        if ! grep -sq "python3 -s " /etc/systemd/system/bromure-agentd.service; then
             sudo -n tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
@@ -6285,7 +6313,7 @@ public final class ProfileStore {
     [Service]
     Type=simple
     User=ubuntu
-    ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+    ExecStart=/usr/bin/python3 -s /mnt/bromure-meta/bromure-agentd.py
     Restart=always
     RestartSec=1
     KillMode=process

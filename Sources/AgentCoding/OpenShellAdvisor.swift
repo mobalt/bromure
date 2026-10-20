@@ -70,7 +70,24 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         }
     }
 
+    /// A system package the agent asked for (`apt-get install …` under the
+    /// sandbox, which has no root): waits for the user, then the guest's root
+    /// supervisor installs it.
+    public struct PackageRequest: Identifiable, Sendable {
+        public enum Status: String, Sendable { case pending, installing, installed, failed, rejected }
+        public let id: String
+        public let profileID: UUID
+        public let manager: String
+        public let packages: [String]
+        public let createdAt: Date
+        public var status: Status = .pending
+        public var output = ""
+        public var exitCode: Int?
+        public var reason: String?
+    }
+
     private let lock = NSLock()
+    private var packageRequests: [UUID: [PackageRequest]] = [:]
     private var proposals: [UUID: [Proposal]] = [:]
     private var denials: [UUID: [Denial]] = [:]
     private var nextID = 1
@@ -85,6 +102,11 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// Append an approved rule to the workspace's policy, persist, and apply it
     /// live. Returns an error message, or nil on success.
     public var applyApproved: (@Sendable (UUID, Proposal) async -> String?) = { _, _ in "advisor not wired" }
+    /// Whether the workspace takes system-package requests.
+    public var systemPackagesProvider: (@Sendable (UUID) -> Bool) = { _ in false }
+    /// Install approved packages in the guest as root. Returns (exit code,
+    /// output).
+    public var installPackages: (@Sendable (UUID, String, [String]) async -> (Int, String)) = { _, _, _ in (1, "not wired") }
 
     // MARK: - Queries (UI)
 
@@ -101,6 +123,7 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         lock.lock()
         proposals[profileID] = nil
         denials[profileID] = nil
+        packageRequests[profileID] = nil
         lock.unlock()
         notify()
     }
@@ -344,6 +367,11 @@ public final class OpenShellAdvisor: @unchecked Sendable {
             (status, "application/json",
              (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data())
         }
+        // System packages on request: their own switch, independent of the
+        // advisor's mode.
+        if target.hasPrefix("/v1/packages") {
+            return await handlePackages(profileID: profileID, method: method, target: target, body: body, json: json)
+        }
         guard policyProvider(profileID) != nil, modeProvider(profileID) != .off else {
             return json(404, ["error": "feature_disabled",
                               "detail": "the policy advisor is off for this workspace"])
@@ -401,6 +429,134 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         default:
             return json(404, ["error": "not_found", "detail": "\(method) \(path)"])
         }
+    }
+
+    // MARK: - System packages
+
+    /// An apt package spec: a name (optionally `=version` or `/release`), never
+    /// an option or a path.
+    static func isValidPackage(_ s: String) -> Bool {
+        !s.hasSuffix(".deb")
+            && s.range(of: #"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$"#, options: .regularExpression) != nil
+    }
+
+    public func packageRequests(for profileID: UUID) -> [PackageRequest] {
+        lock.lock(); defer { lock.unlock() }
+        return packageRequests[profileID] ?? []
+    }
+
+    func packageRequest(id: String, profileID: UUID) -> PackageRequest? {
+        lock.lock(); defer { lock.unlock() }
+        return packageRequests[profileID]?.first { $0.id == id }
+    }
+
+    private func updatePackage(_ id: String, _ profileID: UUID, _ change: (inout PackageRequest) -> Void) {
+        lock.lock()
+        if let i = packageRequests[profileID]?.firstIndex(where: { $0.id == id }) { change(&packageRequests[profileID]![i]) }
+        lock.unlock()
+        notify()
+    }
+
+    /// Queue a request (the agent's shim). Returns it, or a refusal.
+    func requestPackages(profileID: UUID, manager: String, packages: [String]) -> Refusable<PackageRequest> {
+        guard systemPackagesProvider(profileID) else {
+            return .refused("system packages on request are off for this workspace")
+        }
+        guard manager == "apt" else { return .refused("only apt packages can be requested") }
+        let pkgs = Array(NSOrderedSet(array: packages).array as? [String] ?? packages)
+        guard !pkgs.isEmpty, pkgs.count <= 20 else { return .refused("ask for 1 to 20 packages") }
+        if let bad = pkgs.first(where: { !Self.isValidPackage($0) }) {
+            return .refused("\(bad) isn't a package name")
+        }
+        lock.lock()
+        // The same packages already waiting: the same request.
+        if let same = packageRequests[profileID]?.first(where: {
+            $0.status == .pending && $0.manager == manager && $0.packages == pkgs }) {
+            lock.unlock()
+            return .ok(same)
+        }
+        let r = PackageRequest(id: "pkg-\(nextID)", profileID: profileID, manager: manager, packages: pkgs, createdAt: Date())
+        nextID += 1
+        packageRequests[profileID, default: []].append(r)
+        if packageRequests[profileID]!.count > 100 { packageRequests[profileID]!.removeFirst() }
+        lock.unlock()
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.package_request", eventData: [
+            "manager": .string(manager), "packages": .array(pkgs.map { .string($0) }), "status": .string("requested")])
+        notify()
+        return .ok(r)
+    }
+
+    /// The user approved: install now (returns once the install finished).
+    public func approvePackages(id: String, profileID: UUID) async {
+        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
+        updatePackage(id, profileID) { $0.status = .installing }
+        let (code, output) = await installPackages(profileID, r.manager, r.packages)
+        updatePackage(id, profileID) {
+            $0.status = code == 0 ? .installed : .failed
+            $0.exitCode = code
+            $0.output = String(output.suffix(16_000))
+        }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.package_request", eventData: [
+            "manager": .string(r.manager), "packages": .array(r.packages.map { .string($0) }),
+            "status": .string(code == 0 ? "installed" : "failed"), "exit_code": .int(code)])
+    }
+
+    public func rejectPackages(id: String, profileID: UUID, reason: String) {
+        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
+        updatePackage(id, profileID) { $0.status = .rejected; $0.reason = reason.isEmpty ? nil : reason }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.package_request", eventData: [
+            "manager": .string(r.manager), "packages": .array(r.packages.map { .string($0) }), "status": .string("rejected")])
+    }
+
+    func describe(_ r: PackageRequest) -> [String: Any] {
+        var d: [String: Any] = ["id": r.id, "status": r.status.rawValue, "manager": r.manager, "packages": r.packages]
+        if let c = r.exitCode { d["exit_code"] = c }
+        if !r.output.isEmpty { d["output"] = r.output }
+        if let why = r.reason { d["reason"] = why }
+        return d
+    }
+
+    /// `POST /v1/packages {manager, packages}` → 202 {id, status};
+    /// `GET /v1/packages/<id>[/wait?timeout=N]` → the request, waiting while
+    /// it's pending or installing.
+    private func handlePackages(profileID: UUID, method: String, target: String, body: Data,
+                                json: (Int, Any) -> (Int, String, Data)) async -> (Int, String, Data) {
+        let parts = target.split(separator: "?", maxSplits: 1)
+        let path = String(parts.first ?? "")
+        let query = parts.count > 1 ? String(parts[1]) : ""
+        guard systemPackagesProvider(profileID) else {
+            return json(404, ["error": "feature_disabled", "detail": "system packages on request are off for this workspace"])
+        }
+        if method == "POST", path == "/v1/packages" {
+            let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+            let packages = obj["packages"] as? [String] ?? []
+            switch requestPackages(profileID: profileID, manager: obj["manager"] as? String ?? "apt", packages: packages) {
+            case .ok(let r): return json(202, describe(r))
+            case .refused(let why): return json(400, ["error": "refused", "detail": why])
+            }
+        }
+        if method == "GET", path.hasPrefix("/v1/packages/") {
+            let rest = path.dropFirst("/v1/packages/".count)
+            let isWait = rest.hasSuffix("/wait")
+            let id = String(isWait ? rest.dropLast("/wait".count) : rest)
+            guard var r = packageRequest(id: id, profileID: profileID) else {
+                return json(404, ["error": "not_found", "detail": "no package request \(id)"])
+            }
+            if isWait {
+                let t = query.split(separator: "&").compactMap { kv -> Double? in
+                    let p = kv.split(separator: "=", maxSplits: 1)
+                    return p.count == 2 && p[0] == "timeout" ? Double(p[1]) : nil
+                }.first ?? 60
+                let deadline = Date().addingTimeInterval(min(300, max(1, t)))
+                while r.status == .pending || r.status == .installing, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard let q = packageRequest(id: id, profileID: profileID) else { break }
+                    r = q
+                }
+            }
+            return json(200, describe(r))
+        }
+        return json(404, ["error": "not_found", "detail": "\(method) \(path)"])
     }
 
     /// `POST /v1/proposals`: `{intent_summary, operations: [{addRule: {ruleName, rule}}]}`.
@@ -579,20 +735,29 @@ final class OpenShellAdvisorModeCache: @unchecked Sendable {
     private var modes: [UUID: OpenShellAdvisorMode] = [:]
     private var watchdog: [UUID: AgentWatchdogMode] = [:]
     private var tellsAgent: Set<UUID> = []
+    private var systemPackages: Set<UUID> = []
 
     func refresh(_ profiles: [Profile]) {
         var m: [UUID: OpenShellAdvisorMode] = [:]
         var w: [UUID: AgentWatchdogMode] = [:]
         var t: Set<UUID> = []
+        var sp: Set<UUID> = []
         for p in profiles {
             if p.tellsAgentOnDeny { t.insert(p.id) }
+            if p.effectiveSandboxSystemPackages { sp.insert(p.id) }
             if p.usesOpenShellPolicy || OpenShellGovernance.shared.boundaryYAML != nil {
                 m[p.id] = OpenShellGovernance.shared.effectiveAdvisorMode(
                     OpenShellAdvisorMode(rawValue: p.openShellAdvisorMode) ?? .off)
             }
             w[p.id] = AgentWatchdogMode(rawValue: p.watchdogMode) ?? .off
         }
-        lock.lock(); modes = m; watchdog = w; tellsAgent = t; lock.unlock()
+        lock.lock(); modes = m; watchdog = w; tellsAgent = t; systemPackages = sp; lock.unlock()
+    }
+
+    /// Whether the workspace takes system-package requests.
+    func systemPackagesOn(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return systemPackages.contains(id)
     }
 
     /// Whether the workspace tells its agents about policy denials.

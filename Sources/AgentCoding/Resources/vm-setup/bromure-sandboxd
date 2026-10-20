@@ -50,6 +50,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import signal
 import socket
 import struct
@@ -1671,6 +1672,53 @@ def is_descendant_of(pid, ancestor):
     return pid == ancestor
 
 
+# ---------------------------------------------------------------------------
+# System packages on request
+# ---------------------------------------------------------------------------
+#
+# Under the strict sandbox the agent has no root, so `apt-get install` can't
+# work for it. The agent's shim asks the host; the user approves in the Sandbox
+# drawer; the host asks agentd, which relays here. This is the one place a
+# package gets installed, as root, and only by exact name: a name is
+# [a-z0-9][a-z0-9+.-]* (optionally =version or /release), never an option, a
+# path or a .deb, so nothing on the request line can change what apt does.
+
+_APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$")
+
+
+def apt_install(packages):
+    """Install `packages` with apt-get. Returns (exit code, output tail)."""
+    if not isinstance(packages, list) or not packages or len(packages) > 20 \
+            or not all(isinstance(p, str) and _APT_NAME.match(p) and not p.endswith(".deb")
+                       for p in packages):
+        return 2, "refused: not a list of 1 to 20 package names"
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive",
+               APT_LISTCHANGES_FRONTEND="none", NEEDRESTART_MODE="a")
+    cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
+    log("apt_install %s" % " ".join(packages))
+
+    def run(argv):
+        try:
+            p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=840)
+            return p.returncode, p.stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, "apt-get: %s" % exc
+
+    code, out = run(cmd)
+    # The image ships without package lists (or with stale ones): refresh
+    # once and retry.
+    if code != 0 and ("Unable to locate package" in out or "has no installation candidate" in out
+                      or "Failed to fetch" in out):
+        ucode, uout = run(["apt-get", "update"])
+        out += "\n" + uout
+        if ucode == 0:
+            code, out2 = run(cmd)
+            out += "\n" + out2
+    log("apt_install %s: exit %d" % (" ".join(packages), code))
+    return code, out[-16000:]
+
+
 class Supervisor(object):
     def __init__(self, plan, status, agentd_pid):
         self.plan = plan
@@ -2021,6 +2069,13 @@ class Supervisor(object):
             self.session_ready = True
             self.publish()
             conn.sendall((json.dumps({"ok": True}) + "\n").encode())
+        elif op == "apt_install":
+            # Only agentd gets here (the peer checks above), and only for a
+            # package the user approved on the host. Long: no socket timeout.
+            conn.settimeout(None)
+            code, output = apt_install(request.get("packages"))
+            conn.sendall((json.dumps({"ok": code == 0, "exit_code": code,
+                                      "output": output}) + "\n").encode())
         elif op == "poweroff":
             self.handle_poweroff(conn)
         elif op == "status":

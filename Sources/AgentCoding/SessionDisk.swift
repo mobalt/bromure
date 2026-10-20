@@ -717,6 +717,31 @@ public final class SessionDisk {
                 } else {
                     try? fm.removeItem(at: marker)
                 }
+                // Package installs under the OpenShell engine (no root):
+                // `home-packages` makes pip default to the home folder;
+                // `pkg-bin/` puts the apt / apt-get / sudo shims ahead of the
+                // real commands, turning `apt-get install` into a request the
+                // user approves and the root supervisor carries out.
+                let homePackages = tmp.appendingPathComponent("home-packages")
+                if profile.effectiveSandboxHomePackages {
+                    try "1\n".writeIfChanged(to: homePackages)
+                } else {
+                    try? fm.removeItem(at: homePackages)
+                }
+                let pkgBin = tmp.appendingPathComponent("pkg-bin")
+                let shimSrc = adURL.deletingLastPathComponent().appendingPathComponent("bromure-pkg-shim")
+                if profile.effectiveSandboxSystemPackages, let shim = try? Data(contentsOf: shimSrc) {
+                    try fm.createDirectory(at: pkgBin, withIntermediateDirectories: true)
+                    for name in ["apt", "apt-get", "sudo"] {
+                        let dst = pkgBin.appendingPathComponent(name)
+                        if (try? Data(contentsOf: dst)) != shim {
+                            try shim.write(to: dst, options: .atomic)
+                            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dst.path)
+                        }
+                    }
+                } else {
+                    try? fm.removeItem(at: pkgBin)
+                }
                 // OpenShell filesystem_policy / landlock / process + the
                 // kernel sentry: the guest's root launcher applies them before
                 // any agent code runs. Absent → behave exactly as before.

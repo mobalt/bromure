@@ -6483,7 +6483,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         switch (method, sub.count) {
         case ("GET", 1):
-            return (200, ["proposals": advisor.proposals(for: profileID).map(describe)])
+            return (200, ["proposals": advisor.proposals(for: profileID).map(describe),
+                          "packages": advisor.packageRequests(for: profileID).map(advisor.describe)])
+        case ("POST", 3) where sub[1].hasPrefix("pkg-") && (sub[2] == "approve" || sub[2] == "reject"):
+            // A system-package request: approve starts the install and returns.
+            let id = sub[1]
+            guard let r = advisor.packageRequests(for: profileID).first(where: { $0.id == id }) else {
+                return (404, ["error": "No package request \(id)"])
+            }
+            guard r.status == .pending else {
+                return (409, ["error": "Package request \(id) is already \(r.status.rawValue)", "request": advisor.describe(r)])
+            }
+            if sub[2] == "reject" {
+                advisor.rejectPackages(id: id, profileID: profileID, reason: (body["reason"] as? String) ?? "")
+            } else {
+                Task.detached { await advisor.approvePackages(id: id, profileID: profileID) }
+            }
+            return (200, ["ok": true, "request": advisor.packageRequests(for: profileID).first { $0.id == id }.map(advisor.describe) ?? [:]])
         case ("POST", 3) where sub[2] == "approve" || sub[2] == "reject":
             let id = sub[1]
             guard let current = advisor.proposals(for: profileID).first(where: { $0.id == id }) else {
@@ -10753,6 +10769,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 self.applyLiveEditToRunningSession(updated)
                 return nil
+            }
+        }
+        // System packages on request: an approved package is installed by
+        // the guest's root supervisor (agentd → sandboxd), never by the agent.
+        advisor.systemPackagesProvider = { modes.systemPackagesOn($0) }
+        advisor.installPackages = { [weak self] pid, manager, packages in
+            guard let self else { return (1, "the app is going away") }
+            do {
+                let reply = try await self.guestJSONRequest(
+                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 900])
+                return (reply["exit_code"] as? Int ?? 1, reply["output"] as? String ?? "")
+            } catch {
+                return (1, "\(error)")
             }
         }
         modes.refresh(profiles)

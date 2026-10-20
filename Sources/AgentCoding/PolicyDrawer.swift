@@ -22,6 +22,7 @@ struct PolicyDrawer: View {
     @State private var busy: Set<String> = []
     @State private var errors: [String: String] = [:]
     @State private var proposals: [OpenShellAdvisor.Proposal] = []
+    @State private var packages: [OpenShellAdvisor.PackageRequest] = []
     @State private var now = Date()
     @ObservedObject private var ticker = FirewallRulesTicker.shared
     /// The timeline and workspace to show (screenshots pass stand-ins; the
@@ -116,7 +117,8 @@ struct PolicyDrawer: View {
                 Text(label("Files", fileDenials(profile).count)).tag(Tab.files)
             }
             if isOpenShell {
-                Text(label("Proposals", proposals.filter { $0.status == .pending }.count)).tag(Tab.proposals)
+                Text(label("Proposals", proposals.filter { $0.status == .pending }.count
+                           + packages.filter { $0.status == .pending }.count)).tag(Tab.proposals)
             } else {
                 Text(label("Temporary", temporaryRules(profile).count)).tag(Tab.temporary)
             }
@@ -445,7 +447,8 @@ struct PolicyDrawer: View {
 
     @ViewBuilder private func proposalList(_ profile: Profile) -> some View {
         let pending = proposals.filter { $0.status == .pending }
-        if pending.isEmpty {
+        packageList(profile)
+        if pending.isEmpty && packages.isEmpty {
             emptyState(icon: "wand.and.stars", title: "No proposals",
                        text: profile.openShellAdvisorMode == OpenShellAdvisorMode.off.rawValue
                            ? "The policy advisor is off for this workspace."
@@ -500,8 +503,60 @@ struct PolicyDrawer: View {
     }
 
     private func reloadProposals() {
-        guard let id = list.stageProfileID else { proposals = []; return }
+        guard let id = list.stageProfileID else { proposals = []; packages = []; return }
         proposals = OpenShellAdvisor.shared.proposals(for: id)
+        packages = OpenShellAdvisor.shared.packageRequests(for: id)
+    }
+
+    /// System packages the agent asked for: waiting, installing, or just
+    /// done (the last few, so the outcome is seen).
+    @ViewBuilder private func packageList(_ profile: Profile) -> some View {
+        let shown = packages.filter { $0.status == .pending || $0.status == .installing }
+            + packages.filter { $0.status != .pending && $0.status != .installing }.suffix(3).reversed()
+        ForEach(shown) { r in
+            DrawerCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "shippingbox.fill").foregroundStyle(.orange)
+                        Text(verbatim: r.packages.joined(separator: " ")).font(.callout.weight(.medium))
+                            .lineLimit(2).truncationMode(.tail)
+                        Spacer()
+                        Text(verbatim: "apt").font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    }
+                    switch r.status {
+                    case .pending:
+                        Text("The agent asked to install these system packages.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Spacer()
+                            Button("Reject") {
+                                OpenShellAdvisor.shared.rejectPackages(id: r.id, profileID: profile.id, reason: "")
+                            }
+                            .buttonBorderShape(.capsule)
+                            Button("Install") {
+                                let id = r.id, pid = profile.id
+                                Task.detached { await OpenShellAdvisor.shared.approvePackages(id: id, profileID: pid) }
+                            }
+                            .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
+                        }
+                        .controlSize(.small)
+                    case .installing:
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Installing…").font(.caption).foregroundStyle(.secondary)
+                        }
+                    case .installed:
+                        PolicyStatus(text: NSLocalizedString("Installed", comment: "network drawer: package request"), tone: .ok)
+                    case .failed:
+                        PolicyStatus(text: String(format: NSLocalizedString("Install failed (exit %d)", comment: "network drawer: package request"),
+                                                  r.exitCode ?? 1), tone: .bad)
+                            .help(Text(verbatim: String(r.output.suffix(1500))))
+                    case .rejected:
+                        PolicyStatus(text: NSLocalizedString("Rejected", comment: "network drawer: package request"))
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Temporary rules (Bromure Firewall)

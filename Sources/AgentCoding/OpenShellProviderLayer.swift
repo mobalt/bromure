@@ -81,6 +81,15 @@ extension Profile {
             groups.append(("aws", Self.domainEndpoints("amazonaws.com")))
         }
 
+        // System packages on request: the guest's root supervisor runs
+        // apt-get for an approved package, and under Enforce binaries a
+        // rule without `binaries` would refuse it. Ubuntu's mirrors only
+        // serve signed packages; nothing can be uploaded there.
+        if effectiveSandboxSystemPackages {
+            groups.append(("system_packages", ["ports.ubuntu.com", "archive.ubuntu.com", "security.ubuntu.com"]
+                .map { OpenShellPolicy.ProviderEndpoint(host: $0, ports: [80, 443]) }))
+        }
+
         // Local Models: the in-VM sentinel never leaves this Mac.
         groups.append(("local_models", [.init(host: InferenceService.localMitmHost)]))
         return groups

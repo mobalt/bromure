@@ -533,6 +533,22 @@ public final class SecurityTimeline {
                                  : NSLocalizedString("enforced", comment: "Security Timeline decision"),
                        bad ? .blocked : off ? .info : .allowed)
 
+        case "sandbox.package_request":
+            // A system package the agent asked for, and what became of it.
+            var names: [String] = []
+            if case .array(let a)? = d["packages"] { names = a.compactMap { if case .string(let v) = $0 { return v }; return nil } }
+            let status = str(d, "status") ?? "requested"
+            let decision: String
+            let kind: Decision
+            switch status {
+            case "installed": decision = NSLocalizedString("installed", comment: "Security Timeline decision"); kind = .allowed
+            case "rejected":  decision = NSLocalizedString("rejected", comment: "Security Timeline decision"); kind = .blocked
+            case "failed":    decision = NSLocalizedString("install failed", comment: "Security Timeline decision"); kind = .blocked
+            default:          decision = NSLocalizedString("asked for approval", comment: "Security Timeline decision"); kind = .info
+            }
+            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                       "\(str(d, "manager") ?? "apt") install \(names.joined(separator: " "))", decision, kind)
+
         case "sentry.state":
             let up = str(d, "state") == "connected"
             return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
