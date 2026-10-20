@@ -63,6 +63,24 @@ struct TerminalScrollResizeTests {
                               "#{e|-:#{history_size},#{scroll_position}}"))
             def mode(): return tm("display", "-p", "-t", "bromure:0", "#{pane_in_mode}")
             pump(0.8)
+            if sys.argv[3] == "selection":
+                # A keyboard selection made in wheel-entered copy-mode, then
+                # one more wheel tick: the copy must still be the marked lines.
+                for keys in ("emacs", "vi"):
+                    tm("set-option", "-g", "mode-keys", keys)
+                    wheel(b"\x1b[1000001~", 30)
+                    # The line's first word: the view's position overlay follows it.
+                    start = tm("display", "-p", "-t", "bromure:0", "#{copy_cursor_line}").split()[0]
+                    tm("send-keys", "-t", "bromure:0", "-X", "begin-selection")
+                    for _ in range(3):
+                        tm("send-keys", "-t", "bromure:0", "-X", "cursor-down")
+                    wheel(b"\x1b[1000001~", 1)
+                    tm("send-keys", "-t", "bromure:0", "-X", "copy-selection-no-clear")
+                    out[keys] = {"start": start, "copied": tm("show-buffer").splitlines()}
+                    tm("send-keys", "-t", "bromure:0", "-X", "cancel")
+                    pump(0.2)
+                print(json.dumps(out))
+                sys.exit(0)
             tm("set-option", "-g", "window-size", "manual")
             wheel(b"\x1b[1000001~", 30)
             out["scrolled"] = mode() == "1"
@@ -79,24 +97,43 @@ struct TerminalScrollResizeTests {
         print(json.dumps(out))
         """#
 
-    @Test("the top line stays put across resizes; the wheel still scrolls and leaves at the bottom",
-          .enabled(if: TerminalScrollResizeTests.runnable))
-    func scrollPositionKept() throws {
-        let agentd = Self.root.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py")
+    private static func drive(_ scenario: String) throws -> [String: Any] {
+        let agentd = root.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py")
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = ["-I", "-c", Self.driver, agentd.path, try #require(Self.tmux)]
+        proc.arguments = ["-I", "-c", driver, agentd.path, try #require(tmux), scenario]
         let out = Pipe()
         proc.standardOutput = out
         proc.standardError = FileHandle.nullDevice
         try proc.run()
         proc.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        let r = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test("the top line stays put across resizes; the wheel still scrolls and leaves at the bottom",
+          .enabled(if: TerminalScrollResizeTests.runnable))
+    func scrollPositionKept() throws {
+        let r = try Self.drive("resize")
         #expect(r["scrolled"] as? Bool == true)
         let before = try #require(r["before"] as? Int)
         #expect(r["after"] as? Int == before, "view moved from line \(before) to \(r["after"] ?? "?")")
         #expect(r["down5"] as? Int == before + 5)
         #expect(r["leftAtBottom"] as? Bool == true)
+    }
+
+    @Test("a wheel tick leaves a keyboard selection's end where it was (emacs and vi keys)",
+          .enabled(if: TerminalScrollResizeTests.runnable))
+    func wheelKeepsSelection() throws {
+        let r = try Self.drive("selection")
+        for keys in ["emacs", "vi"] {
+            let run = try #require(r[keys] as? [String: Any], "\(keys): no result")
+            let start = try #require(run["start"] as? String)
+            let copied = try #require(run["copied"] as? [String])
+            #expect(copied.first == start, "\(keys): copy starts at \(copied.first ?? "-"), selection began at \(start)")
+            // Three lines down, one back with the wheel's scroll-up: the
+            // marked line and the next (emacs keys stop short of the cursor).
+            #expect(copied.prefix(2) == [start, String(Int(start)! + 1)], "\(keys): selection collapsed to \(copied)")
+        }
     }
 }
