@@ -3511,7 +3511,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
                     assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
                     answer: { [weak self] id, ask, text in
-                        await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) ?? false
+                        await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) == true ? .taken : .refused
                     },
                     recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
                     openAssignee: { [weak self] task in

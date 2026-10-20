@@ -2428,14 +2428,15 @@ final class RemoteHostController {
     }
 
     // Coding-board verbs, over the tunnel; the mirror confirms on poll.
-    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`; `pending`
-    /// when still being delivered — the card says how it went), refused
+    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`), still
+    /// being delivered (`pending` — the card says how it went), refused
     /// (`ok: false`, `error`), or none (the link failed: not taken). A
     /// server from before the reply waited answers `{ok: true}` at once —
     /// as it always did.
-    nonisolated static func answerAccepted(_ reply: [String: Any]?) -> Bool {
-        guard let reply else { return false }
-        return (reply["ok"] as? Bool) ?? (reply["error"] == nil)
+    nonisolated static func answerOutcome(_ reply: [String: Any]?) -> TaskAnswerOutcome {
+        guard let reply else { return .refused }
+        if reply["pending"] as? Bool == true { return .pending }
+        return ((reply["ok"] as? Bool) ?? (reply["error"] == nil)) ? .taken : .refused
     }
 
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
@@ -5007,7 +5008,7 @@ final class RemoteHostWindow: NSWindow {
                         let r = await c.taskCommandReply(
                             id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
                             recvTimeoutSeconds: 75)
-                        return RemoteHostController.answerAccepted(r)
+                        return RemoteHostController.answerOutcome(r)
                     },
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),

@@ -423,7 +423,7 @@ struct CodingKanbanView: View {
         /// to the agent; false when it was refused (the agent asked again,
         /// the question is gone) or couldn't be sent — the sheet then keeps
         /// the text.
-        var answer: (UUID, UUID?, String) async -> Bool = { _, _, _ in false }
+        var answer: (UUID, UUID?, String) async -> TaskAnswerOutcome = { _, _, _ in .refused }
         /// Take a handed-off task back to the backlog.
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
@@ -1967,7 +1967,7 @@ private struct AssignedTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void
-    var onAnswer: (UUID?, String) async -> Bool
+    var onAnswer: (UUID?, String) async -> TaskAnswerOutcome
     var onRecall: () -> Void
     @State private var answering = false
     @State private var draft = TaskAnswerDraft()
@@ -1975,6 +1975,10 @@ private struct AssignedTaskCard: View {
     /// The last Send was refused or didn't go (the sheet says why from the
     /// task's current `lastError`).
     @State private var sendFailed = false
+    /// A send still being delivered on the server (`.pending`): what was
+    /// sent and the card's error as it was — the sheet waits for the card
+    /// to say how it went.
+    @State private var delivering: (sent: TaskAnswerDraft, error: String?)?
 
     var body: some View {
         Button(action: onOpen) {
@@ -2072,12 +2076,17 @@ private struct AssignedTaskCard: View {
                                 sendFailed = false
                                 let sent = draft
                                 Task { @MainActor in
-                                    let ok = await onAnswer(sent.askID, text)
+                                    let outcome = await onAnswer(sent.askID, text)
+                                    // Still being delivered: wait for the card.
+                                    if outcome == .pending {
+                                        delivering = (sent, task.lastError)
+                                        return
+                                    }
                                     sending = false
                                     // Gone only once the board took it: a
                                     // refused answer stays, with why.
-                                    draft = draft.afterSend(sent, accepted: ok)
-                                    if ok {
+                                    draft = draft.afterSend(sent, accepted: outcome == .taken)
+                                    if outcome == .taken {
                                         answering = false
                                     } else {
                                         sendFailed = true
@@ -2086,7 +2095,29 @@ private struct AssignedTaskCard: View {
                             },
                             onCancel: { answering = false })   // the draft stays for next time
         }
+        .onChange(of: task.pendingAskID) { _, now in
+            // The question it answered is gone: it went.
+            guard let d = delivering, now != d.sent.askID else { return }
+            delivering = nil
+            sending = false
+            draft = draft.afterSend(d.sent, accepted: true)
+            answering = false
+        }
+        .onChange(of: task.lastError) { _, now in
+            // The card says the delivery failed: the text is still here.
+            guard let d = delivering, now != nil, now != d.error else { return }
+            delivering = nil
+            sending = false
+            sendFailed = true
+        }
     }
+}
+
+/// How a Send of an answer came back: taken by the board, refused (the
+/// text stays, with why), or still being delivered on the server (the
+/// card says how it went).
+enum TaskAnswerOutcome: Equatable, Sendable {
+    case taken, refused, pending
 }
 
 /// An answer being written, and the ask it was written for. The agent can

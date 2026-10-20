@@ -151,7 +151,7 @@ final class ACAutomationServer {
             sem.signal()
         }
         guard sem.wait(timeout: .now() + timeout) == .success, let r = box.r else {
-            return ["ok": true, "pending": true]
+            return ["ok": false, "pending": true]
         }
         return r
     }
