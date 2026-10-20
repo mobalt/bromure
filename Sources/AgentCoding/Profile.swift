@@ -6240,7 +6240,12 @@ public final class ProfileStore {
     # Apply per-profile hostname BEFORE startx — see comment above.
     if [ -r /mnt/bromure-meta/hostname.txt ]; then
         NEW_HOST=$(head -1 /mnt/bromure-meta/hostname.txt | tr -d '[:space:]')
-        if [ -n "$NEW_HOST" ]; then
+        # Every terminal is a login shell too: only the first one (tty1, at
+        # boot) has anything to change. sudo -n everywhere in this file: under
+        # the strict sandbox the agent user has no sudo, and a plain sudo
+        # prompts for a password on the terminal (>/dev/null doesn't hide
+        # the prompt, which goes to the tty).
+        if [ -n "$NEW_HOST" ] && [ "$(hostname)" != "$NEW_HOST" ]; then
             # /etc/hosts first, so subsequent sudo calls can resolve.
             NEW_HOSTS=$(mktemp 2>/dev/null || echo /tmp/hosts.new)
             {
@@ -6249,10 +6254,10 @@ public final class ProfileStore {
                 printf '127.0.1.1\t%s\n'             "$NEW_HOST"
                 printf '\n# Bromure AC: managed at session boot.\n'
             } > "$NEW_HOSTS"
-            sudo install -m 644 "$NEW_HOSTS" /etc/hosts >/dev/null 2>&1 || true
+            sudo -n install -m 644 "$NEW_HOSTS" /etc/hosts >/dev/null 2>&1 || true
             rm -f "$NEW_HOSTS"
-            sudo hostname "$NEW_HOST" >/dev/null 2>&1 || true
-            echo "$NEW_HOST" | sudo tee /etc/hostname >/dev/null 2>&1 || true
+            sudo -n hostname "$NEW_HOST" >/dev/null 2>&1 || true
+            echo "$NEW_HOST" | sudo -n tee /etc/hostname >/dev/null 2>&1 || true
         fi
     fi
 
@@ -6271,7 +6276,7 @@ public final class ProfileStore {
     # the host restaged a fixed source.
     if [ "$(tty)" = "/dev/tty1" ] && [ -r /mnt/bromure-meta/bromure-agentd.py ]; then
         if ! grep -sq "KillMode=process" /etc/systemd/system/bromure-agentd.service; then
-            sudo tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
+            sudo -n tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
@@ -6288,10 +6293,10 @@ public final class ProfileStore {
     [Install]
     WantedBy=multi-user.target
     UNIT
-            sudo systemctl daemon-reload >/dev/null 2>&1 || true
-            sudo systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
+            sudo -n systemctl daemon-reload >/dev/null 2>&1 || true
+            sudo -n systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
         fi
-        sudo systemctl start bromure-agentd.service >/dev/null 2>&1 || true
+        sudo -n systemctl start bromure-agentd.service >/dev/null 2>&1 || true
     fi
     [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
     """#
