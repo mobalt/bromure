@@ -4217,20 +4217,13 @@
 /* Squelch */
 "Squelch" = "Squelch";
 "Trim the noise out of command output before the model reads it" = "在模型讀取之前，去除命令輸出中的雜訊";
-"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "適用於所有代理程式，無需在機器中安裝任何東西：Bromure 在這台 Mac 上精簡每個請求所攜帶的命令結果。開啟或關閉會從代理程式的下一個請求起生效，無需重新啟動。";
-"What it trims" = "去除哪些內容";
-"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "測試（pytest、jest、vitest、go、cargo、swift、xcodebuild…）：去掉通過的測試；保留失敗與摘要";
-"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "安裝（npm、pip、uv、apt、brew、cargo、docker pull…）：下載與解壓縮訊息、棄用提示";
-"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "建置（cargo、swift、xcodebuild、make、cmake、gradle、docker build…）：逐檔進度與重複的警告；保留錯誤";
-"git push, pull, fetch, clone: transfer counters and hints" = "git push、pull、fetch、clone：傳輸計數與提示";
-"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "記錄：僅數字不同的連續行；搜尋結果：截短壓縮過的長行";
-"Everywhere: terminal escapes, progress bars, the same line repeated" = "所有命令：終端機跳脫序列、進度列、重複的同一行";
 "Saved so far" = "至今節省";
 "%@ saved" = "節省 %@";
 "Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch 在模型讀取之前去除命令輸出中的雜訊——按一下查看節省了多少";
 "Squelch is off on this machine — click to trim the noise out of command output" = "此機器上的 Squelch 已關閉——按一下以去除命令輸出中的雜訊";
-"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "Squelch 會在代理程式的模型讀取之前，去除命令列印內容中的雜訊——通過的測試、下載與建置進度、傳輸計數、重複的記錄行。錯誤、失敗與警告一律保留，檔案內容與 diff 從不更動。要查看命令的完整輸出，代理程式會在命令前加上 BROMURE_FULL_OUTPUT=1 重新執行。";
-"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "靈感來自 rtk（rtk-ai.app）。token 數以字元數 ÷ 4 估算。";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "在模型讀取之前，從命令輸出中移除通過的測試、進度列和重複行。錯誤和警告會保留。";
+"Inspired by" = "靈感來自";
+"Tokens are estimated as characters ÷ 4." = "token 數以字元數 ÷ 4 估算。";
 "Trim command output on “%@”" = "精簡「%@」上的命令輸出";
 "Off on “%@”: its agents' models read every command's output as printed." = "在「%@」上已關閉：其代理程式的模型會照原樣讀取每個命令的輸出。";
 "This conversation" = "此對話";

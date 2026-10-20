@@ -3,11 +3,9 @@ import Foundation
 /// Squelch: cuts the noise out of command output before the agent's model
 /// reads it — passing tests, download and compile progress, git's transfer
 /// counters, repeated log lines — and keeps what the agent acts on: errors,
-/// failures, warnings, summaries. Modelled on rtk (Rust Token Killer,
-/// https://github.com/rtk-ai/rtk, Apache-2.0), which does it by rewriting the
-/// agent's shell commands; Bromure does it in its proxy instead, on the tool
-/// results each request carries, so every agent gets it with nothing installed
-/// in the guest (`SquelchRewriter`). The filters here are Bromure's own.
+/// failures, warnings, summaries. It runs in the proxy, on the tool results
+/// each request carries, so every agent gets it with nothing installed in the
+/// guest (`SquelchRewriter`).
 ///
 /// Deterministic: the same command and output always give the same text, so a
 /// conversation resent turn after turn keeps its prompt-cache prefix.

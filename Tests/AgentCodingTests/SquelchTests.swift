@@ -4,7 +4,7 @@ import SwiftUI
 import Testing
 @testable import bromure_ac
 
-/// Squelch (board: "implement rtk in Bromure"): command output noise is cut
+/// Squelch: command output noise is cut
 /// out of the tool results an agent sends its model, the savings are
 /// counted per workspace and conversation, and nothing else in the request
 /// changes.
@@ -400,6 +400,23 @@ struct SquelchPopoverTests {
             try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
         }
         #expect(toggled.isEmpty)
+    }
+
+    @Test("hung off the header's one-line meta row, its text still wraps")
+    func wrapsUnderHeaderLineLimit() throws {
+        _ = NSApplication.shared
+        func height(_ v: some View) -> CGFloat { NSHostingView(rootView: v).fittingSize.height }
+        let popover = SquelchPopover(machine: "omp + z.ai", enabled: false, session: nil, summary: nil, setEnabled: { _ in })
+        let free = height(popover)
+        let inHeader = NSHostingView(rootView: popover.lineLimit(1))
+        inHeader.frame = NSRect(origin: .zero, size: inHeader.fittingSize)
+        inHeader.layoutSubtreeIfNeeded()
+        #expect(inHeader.fittingSize.height == free, "clipped: \(inHeader.fittingSize.height) vs \(free)")
+        if let out = ProcessInfo.processInfo.environment["SQUELCH_SHOT_OFF"],
+           let rep = inHeader.bitmapImageRepForCachingDisplay(in: inHeader.bounds) {
+            inHeader.cacheDisplay(in: inHeader.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+        }
     }
 }
 

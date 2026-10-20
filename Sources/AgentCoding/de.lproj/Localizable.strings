@@ -4214,20 +4214,13 @@
 /* Squelch */
 "Squelch" = "Squelch";
 "Trim the noise out of command output before the model reads it" = "Rauschen aus der Befehlsausgabe entfernen, bevor das Modell sie liest";
-"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "Funktioniert mit jedem Agenten, ohne dass etwas auf der Maschine installiert wird: Bromure kürzt die Befehlsergebnisse, die jede Anfrage mitführt, auf diesem Mac. Das Ein- oder Ausschalten gilt ab der nächsten Anfrage der Agenten – ohne Neustart.";
-"What it trims" = "Was entfernt wird";
-"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): bestandene Tests entfallen; Fehlschläge und die Zusammenfassung bleiben";
-"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "Installationen (npm, pip, uv, apt, brew, cargo, docker pull…): Download- und Entpackmeldungen, Hinweise auf veraltete Pakete";
-"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): Fortschritt pro Datei und wiederholte Warnungen; Fehler bleiben";
-"git push, pull, fetch, clone: transfer counters and hints" = "git push, pull, fetch, clone: Übertragungszähler und Hinweise";
-"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "Logs: Folgen von Zeilen, die sich nur in Zahlen unterscheiden; Suchergebnisse: minifizierte Zeilen gekürzt";
-"Everywhere: terminal escapes, progress bars, the same line repeated" = "Überall: Terminal-Escapesequenzen, Fortschrittsbalken, dieselbe Zeile wiederholt";
 "Saved so far" = "Bisher eingespart";
 "%@ saved" = "%@ gespart";
 "Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch entfernt das Rauschen aus der Befehlsausgabe, bevor das Modell sie liest – klicken Sie für die Einsparungen";
 "Squelch is off on this machine — click to trim the noise out of command output" = "Squelch ist auf dieser Maschine aus – klicken Sie, um das Rauschen aus der Befehlsausgabe zu entfernen";
-"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "Squelch entfernt das Rauschen aus dem, was Befehle ausgeben – bestandene Tests, Download- und Build-Fortschritt, Übertragungszähler, wiederholte Logzeilen –, bevor das Modell des Agenten es liest. Fehler, Fehlschläge und Warnungen bleiben immer erhalten, Dateiinhalte und Diffs werden nie angetastet. Um die vollständige Ausgabe eines Befehls zu sehen, führt der Agent ihn erneut mit vorangestelltem BROMURE_FULL_OUTPUT=1 aus.";
-"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "Inspiriert von rtk (rtk-ai.app). Tokens werden als Zeichen ÷ 4 geschätzt.";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Entfernt bestandene Tests, Fortschrittsbalken und wiederholte Zeilen aus der Befehlsausgabe, bevor das Modell sie liest. Fehler und Warnungen bleiben.";
+"Inspired by" = "Inspiriert von";
+"Tokens are estimated as characters ÷ 4." = "Tokens werden als Zeichen ÷ 4 geschätzt.";
 "Trim command output on “%@”" = "Befehlsausgabe auf „%@“ kürzen";
 "Off on “%@”: its agents' models read every command's output as printed." = "Aus auf „%@“: Die Modelle seiner Agenten lesen jede Befehlsausgabe so, wie sie ausgegeben wurde.";
 "This conversation" = "Diese Unterhaltung";

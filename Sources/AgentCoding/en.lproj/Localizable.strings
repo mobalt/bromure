@@ -4248,20 +4248,13 @@
 /* Squelch */
 "Squelch" = "Squelch";
 "Trim the noise out of command output before the model reads it" = "Trim the noise out of command output before the model reads it";
-"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart.";
-"What it trims" = "What it trims";
-"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay";
-"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices";
-"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay";
-"git push, pull, fetch, clone: transfer counters and hints" = "git push, pull, fetch, clone: transfer counters and hints";
-"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "Logs: runs of lines that differ only in their numbers; search results: minified lines clipped";
-"Everywhere: terminal escapes, progress bars, the same line repeated" = "Everywhere: terminal escapes, progress bars, the same line repeated";
 "Saved so far" = "Saved so far";
 "%@ saved" = "%@ saved";
 "Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch trims the noise out of command output before the model reads it — click for what it saved";
 "Squelch is off on this machine — click to trim the noise out of command output" = "Squelch is off on this machine — click to trim the noise out of command output";
-"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1.";
-"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4.";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay.";
+"Inspired by" = "Inspired by";
+"Tokens are estimated as characters ÷ 4." = "Tokens are estimated as characters ÷ 4.";
 "Trim command output on “%@”" = "Trim command output on “%@”";
 "Off on “%@”: its agents' models read every command's output as printed." = "Off on “%@”: its agents' models read every command's output as printed.";
 "This conversation" = "This conversation";

@@ -25,7 +25,7 @@ enum SquelchSettings {
 }
 
 /// The savings record: per workspace, per agent conversation, per command and
-/// per day — `rtk gain`'s numbers. Each command output counts once, the first
+/// per day. Each command output counts once, the first
 /// time a request carries it (the conversation is resent every turn).
 /// Persisted in Application Support; a cloud report is a delta since the
 /// last one (`pendingCloudReport`, `SquelchCloud`).

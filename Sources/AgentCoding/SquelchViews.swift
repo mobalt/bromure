@@ -12,11 +12,11 @@ enum SquelchHome {
     }
 
     static let explanation = NSLocalizedString(
-        "Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1.",
+        "Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay.",
         comment: "Squelch: what it does")
-    static let credit = NSLocalizedString(
-        "Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4.",
-        comment: "Squelch: credit and how tokens are counted")
+    static let tokenNote = NSLocalizedString(
+        "Tokens are estimated as characters ÷ 4.",
+        comment: "Squelch: how tokens are counted")
 }
 
 /// The header popover: the machine's switch, this conversation's savings,
@@ -51,6 +51,7 @@ struct SquelchPopover: View {
             if !(on ?? enabled) {
                 Text(String(format: NSLocalizedString("Off on “%@”: its agents' models read every command's output as printed.", comment: "Squelch: off"), machine))
                     .font(.system(size: 12, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let session, !session.isEmpty {
                 SquelchTallyRow(title: NSLocalizedString("This conversation", comment: "Squelch: the session's savings"), tally: session)
@@ -77,8 +78,11 @@ struct SquelchPopover: View {
                     SquelchDaysChart(days: summary.days)
                 }
             }
-            Text(SquelchHome.credit).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+            Text(SquelchHome.tokenNote).font(.system(size: 10.5)).foregroundStyle(.tertiary)
         }
+        // The popover hangs off the header's one-line meta row and would
+        // inherit its lineLimit(1).
+        .lineLimit(nil)
         .padding(16)
         .frame(width: 380)
         .onChange(of: enabled) { _, _ in on = nil }

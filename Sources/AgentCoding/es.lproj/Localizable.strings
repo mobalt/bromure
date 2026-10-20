@@ -4216,20 +4216,13 @@
 /* Squelch */
 "Squelch" = "Squelch";
 "Trim the noise out of command output before the model reads it" = "Quitar el ruido de la salida de los comandos antes de que el modelo la lea";
-"Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart." = "Funciona con todos los agentes, sin instalar nada en la máquina: Bromure recorta los resultados de comandos que lleva cada solicitud, en este Mac. Activarlo o desactivarlo se aplica a la siguiente solicitud de los agentes, sin reiniciar.";
-"What it trims" = "Qué recorta";
-"Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay" = "Pruebas (pytest, jest, vitest, go, cargo, swift, xcodebuild…): se quitan las pruebas superadas; los fallos y el resumen se quedan";
-"Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices" = "Instalaciones (npm, pip, uv, apt, brew, cargo, docker pull…): mensajes de descarga y desempaquetado, avisos de obsolescencia";
-"Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay" = "Compilaciones (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): progreso por archivo y advertencias repetidas; los errores se quedan";
-"git push, pull, fetch, clone: transfer counters and hints" = "git push, pull, fetch, clone: contadores de transferencia y sugerencias";
-"Logs: runs of lines that differ only in their numbers; search results: minified lines clipped" = "Registros: series de líneas que solo difieren en sus números; resultados de búsqueda: líneas minificadas recortadas";
-"Everywhere: terminal escapes, progress bars, the same line repeated" = "En todas partes: secuencias de escape del terminal, barras de progreso, la misma línea repetida";
 "Saved so far" = "Ahorrado hasta ahora";
 "%@ saved" = "%@ ahorrados";
 "Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch quita el ruido de la salida de los comandos antes de que el modelo la lea: haz clic para ver lo que ahorró";
 "Squelch is off on this machine — click to trim the noise out of command output" = "Squelch está desactivado en esta máquina: haz clic para quitar el ruido de la salida de los comandos";
-"Squelch cuts the noise out of what commands print — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it. Errors, failures and warnings always stay, and file contents and diffs are never touched. To see a command's whole output, the agent runs it again prefixed with BROMURE_FULL_OUTPUT=1." = "Squelch quita el ruido de lo que imprimen los comandos (pruebas superadas, progreso de descargas y compilaciones, contadores de transferencia, líneas de registro repetidas) antes de que el modelo del agente lo lea. Los errores, fallos y advertencias siempre se quedan, y el contenido de los archivos y los diffs nunca se tocan. Para ver la salida completa de un comando, el agente lo vuelve a ejecutar precedido de BROMURE_FULL_OUTPUT=1.";
-"Inspired by rtk (rtk-ai.app). Tokens are estimated as characters ÷ 4." = "Inspirado en rtk (rtk-ai.app). Los tokens se estiman como caracteres ÷ 4.";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Quita las pruebas superadas, las barras de progreso y las líneas repetidas de la salida de los comandos antes de que el modelo la lea. Los errores y las advertencias se quedan.";
+"Inspired by" = "Inspirado en";
+"Tokens are estimated as characters ÷ 4." = "Los tokens se estiman como caracteres ÷ 4.";
 "Trim command output on “%@”" = "Recortar la salida de los comandos en «%@»";
 "Off on “%@”: its agents' models read every command's output as printed." = "Desactivado en «%@»: los modelos de sus agentes leen la salida de cada comando tal como se imprimió.";
 "This conversation" = "Esta conversación";

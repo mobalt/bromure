@@ -130,7 +130,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo sensitive reach delegation nickname"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
-        case .squelch:         return "rtk tokens noise output trim filter compress savings context cost test logs"
+        case .squelch:         return "tokens noise output trim filter compress savings context cost test logs"
         case .folders:         return "shared folder mount directory"
         case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
         case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
@@ -4659,35 +4659,11 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var squelchSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(SquelchHome.explanation)
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
             GroupBox(label: Label(NSLocalizedString("Squelch", comment: "Squelch: feature name"),
                                   systemImage: EditorCategory.squelch.symbol)) {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle(NSLocalizedString("Trim the noise out of command output before the model reads it", comment: "Squelch toggle"),
                            isOn: $draft.squelch.enabled)
-                    Text(NSLocalizedString("Works for every agent, with nothing installed in the machine: Bromure trims the command results each request carries, on this Mac. Turning it on or off applies to the agents' next request — no restart.", comment: "Squelch: how it applies"))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(8)
-            }
-
-            GroupBox(label: Label(NSLocalizedString("What it trims", comment: "Squelch: examples"), systemImage: "scissors")) {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach([
-                        NSLocalizedString("Tests (pytest, jest, vitest, go, cargo, swift, xcodebuild…): passing tests go; failures and the summary stay", comment: "Squelch example"),
-                        NSLocalizedString("Installs (npm, pip, uv, apt, brew, cargo, docker pull…): download and unpack chatter, deprecation notices", comment: "Squelch example"),
-                        NSLocalizedString("Builds (cargo, swift, xcodebuild, make, cmake, gradle, docker build…): per-file progress and repeated warnings; errors stay", comment: "Squelch example"),
-                        NSLocalizedString("git push, pull, fetch, clone: transfer counters and hints", comment: "Squelch example"),
-                        NSLocalizedString("Logs: runs of lines that differ only in their numbers; search results: minified lines clipped", comment: "Squelch example"),
-                        NSLocalizedString("Everywhere: terminal escapes, progress bars, the same line repeated", comment: "Squelch example"),
-                    ], id: \.self) { line in
-                        Label { Text(line).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "minus") }
-                            .font(.caption)
-                    }
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -4720,12 +4696,15 @@ struct ProfileEditorView: View {
             }
             #endif
 
-            Text(SquelchHome.credit)
+            Text(SquelchHome.tokenNote)
                 .font(.caption).foregroundStyle(.secondary)
-            Link(destination: URL(string: "https://github.com/rtk-ai/rtk")!) {
-                Text(verbatim: "rtk — Rust Token Killer (rtk-ai), Apache-2.0")
+            HStack(spacing: 4) {
+                Text(NSLocalizedString("Inspired by", comment: "Squelch: credit, followed by the project's link"))
+                Link(destination: URL(string: "https://github.com/rtk-ai/rtk")!) {
+                    Text(verbatim: "rtk — Rust Token Killer (rtk-ai), Apache-2.0")
+                }
             }
-            .font(.caption)
+            .font(.caption).foregroundStyle(.secondary)
         }
     }
 

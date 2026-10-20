@@ -19,8 +19,8 @@ public struct SquelchPolicy: Codable, Equatable, Sendable {
     }
 }
 
-/// What Squelch did, as counts. Tokens are estimated as bytes / 4 (rtk's
-/// estimate too: no tokenizer — the share saved is reliable, the absolute
+/// What Squelch did, as counts. Tokens are estimated as bytes / 4 (no
+/// tokenizer — the share saved is reliable, the absolute
 /// count approximate).
 struct SquelchTally: Codable, Equatable, Sendable {
     /// Command outputs the model was sent, and how many of them were trimmed.
