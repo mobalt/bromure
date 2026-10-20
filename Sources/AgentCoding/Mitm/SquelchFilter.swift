@@ -241,10 +241,15 @@ enum Squelch {
             }
         case "hg", "svn", "jj", "fossil":
             // Other VCSs: diffs and file contents, as git's.
-            return ["diff", "log", "show", "cat", "annotate", "blame", "export", "file"].contains(a1) ? .verbatim : .other
+            let sub = positionals(w, valued: ["-R", "--repository", "--cwd", "--config", "--at-op", "--at-operation",
+                                              "--color", "--pager", "--encoding", "--encodingmode", "--username", "--password",
+                                              "--config-dir", "--config-option"]).first
+            return ["diff", "log", "show", "cat", "annotate", "blame", "export", "file"].contains(sub ?? "") ? .verbatim : .other
         case "gh", "glab":
             // `gh pr diff`, `gh api …`: the content itself.
-            return a1 == "api" || a2 == "diff" || (a1 == "gist" && a2 == "view") ? .verbatim : .other
+            let p = positionals(w, valued: ["-R", "--repo", "--hostname"])
+            let p0 = p.first ?? "", p1 = p.count > 1 ? p[1] : ""
+            return p0 == "api" || p1 == "diff" || (p0 == "gist" && p1 == "view") ? .verbatim : .other
         case "grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "find", "fd":
             return cmd == "find" || cmd == "fd" ? .other : .search
         case "terraform", "tofu", "pulumi", "helm", "ansible-playbook":
@@ -257,16 +262,23 @@ enum Squelch {
     /// git's subcommand, past its global options (`git --no-pager diff`,
     /// `git -C repo log`, `git -c color.ui=never show`).
     static func gitSubcommand(_ w: [String]) -> String {
-        let takesValue: Set<String> = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
-                                       "--super-prefix"]
+        positionals(w, valued: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                                "--super-prefix", "--attr-source"]).first ?? ""
+    }
+
+    /// A command's words after its name that aren't options: `valued`
+    /// options take the next word (`-R repo`); `--opt=value` and the rest
+    /// are flags.
+    static func positionals(_ w: [String], valued: Set<String>) -> [String] {
+        var out: [String] = []
         var i = 1
         while i < w.count {
             let a = w[i]
-            if takesValue.contains(a) { i += 2; continue }
-            if a.hasPrefix("-") { i += 1; continue }
-            return a
+            if valued.contains(a) { i += 2; continue }
+            if !a.hasPrefix("-") { out.append(a) }
+            i += 1
         }
-        return ""
+        return out
     }
 
     /// The family an output reads as when the command isn't known — for the

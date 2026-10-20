@@ -84,7 +84,9 @@ struct SquelchFilterTests {
         for cmd in ["git --no-pager diff", "git -C repo diff --stat", "git -c color.ui=never show HEAD",
                     "git --git-dir .git --work-tree . log -p", "GIT_PAGER=cat git diff", "git -P diff",
                     "git diff | head -200", "git log -p | grep -A3 foo", "cd repo && git --no-pager diff HEAD~1",
-                    "gh pr diff 12", "gh api repos/o/r/contents/x", "hg diff", "jj diff", "svn log"] {
+                    "gh pr diff 12", "gh api repos/o/r/contents/x", "hg diff", "jj diff", "svn log",
+                    "gh -R owner/repo pr diff 12", "gh --repo owner/repo pr diff", "svn --non-interactive diff",
+                    "jj -R repo diff", "hg -R repo log -p", "git --attr-source HEAD diff", "hg --pager never diff"] {
             #expect(Squelch.family(of: cmd) == .verbatim, "\(cmd)")
         }
         #expect(Squelch.family(of: "git -C repo push origin main") == .git)
