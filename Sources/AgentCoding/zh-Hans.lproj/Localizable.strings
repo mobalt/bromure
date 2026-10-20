@@ -4253,3 +4253,4 @@
 
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "无法发送回答。";
+"Your answer is already on its way." = "你的回答已在发送中。";

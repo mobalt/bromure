@@ -19,6 +19,8 @@ import Foundation
 final class TaskDispatcher {
     private weak var delegate: ACAppDelegate?
     private var timer: Timer?
+    /// Asks an answer is being delivered to (`answer`).
+    private var answering: Set<UUID> = []
 
     init(delegate: ACAppDelegate?) {
         self.delegate = delegate
@@ -568,6 +570,16 @@ final class TaskDispatcher {
             }
             return false
         }
+        // One answer per question in flight: a second Send while the first
+        // is still being delivered (its scan, a slow link that gave up on
+        // the reply) must not post the answer twice.
+        guard answering.insert(ask).inserted else {
+            delegate.codingTaskStore.mutate(taskID) {
+                $0.lastError = NSLocalizedString("Your answer is already on its way.", comment: "coding task: a second send of the same answer")
+            }
+            return false
+        }
+        defer { answering.remove(ask) }
         do {
             try await delegate.delegationEngine.answer(
                 from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)

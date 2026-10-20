@@ -135,8 +135,10 @@ final class ACAutomationServer {
     var onTaskAnswer: ((_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
 
     /// The answer route's reply, on the connection's thread: the handler's
-    /// verdict once it has one (on the main actor), else after `timeout`
-    /// a refusal — never a blind `ok`.
+    /// verdict once it has one (on the main actor). Past `timeout` the
+    /// delivery is still under way and can't be called off — never a
+    /// refusal then (the client would offer to send it again): `pending`,
+    /// and the card says how it went.
     nonisolated static func awaitTaskAnswer(_ answer: @escaping (UUID, [String: Any]) async -> [String: Any],
                                             id: UUID, body: [String: Any],
                                             timeout: TimeInterval = 60) -> [String: Any] {
@@ -149,8 +151,7 @@ final class ACAutomationServer {
             sem.signal()
         }
         guard sem.wait(timeout: .now() + timeout) == .success, let r = box.r else {
-            return ["ok": false, "error": NSLocalizedString("The answer couldn't be sent.",
-                                                             comment: "coding task: answer refused")]
+            return ["ok": true, "pending": true]
         }
         return r
     }

@@ -128,11 +128,13 @@ struct TaskAnswerSendTests {
         #expect(RemoteHostController.answerAccepted(refused) == false)
         let taken = ACAutomationServer.awaitTaskAnswer({ _, _ in ["ok": true] }, id: UUID(), body: [:])
         #expect(RemoteHostController.answerAccepted(taken))
-        // No verdict in time: a refusal, not a blind ok.
+        // No verdict in time: the delivery is still under way and goes on —
+        // "pending", never a refusal the client would offer to send again.
         let late = ACAutomationServer.awaitTaskAnswer({ _, _ in
             try? await Task.sleep(nanoseconds: 2_000_000_000); return ["ok": true]
         }, id: UUID(), body: [:], timeout: 0.2)
-        #expect(RemoteHostController.answerAccepted(late) == false)
+        #expect(late["pending"] as? Bool == true)
+        #expect(RemoteHostController.answerAccepted(late))
         // The link failed: not taken. A server from before the wait: `{ok: true}`, as ever.
         #expect(!RemoteHostController.answerAccepted(nil))
         #expect(RemoteHostController.answerAccepted(["ok": true]))

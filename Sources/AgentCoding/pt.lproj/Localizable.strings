@@ -4253,3 +4253,4 @@
 
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "Não foi possível enviar a resposta.";
+"Your answer is already on its way." = "Sua resposta já está a caminho.";

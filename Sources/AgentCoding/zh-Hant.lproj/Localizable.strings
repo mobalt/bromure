@@ -4256,3 +4256,4 @@
 
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "無法傳送回答。";
+"Your answer is already on its way." = "你的回答已在傳送中。";

@@ -4287,3 +4287,4 @@
 
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "The answer couldn't be sent.";
+"Your answer is already on its way." = "Your answer is already on its way.";
