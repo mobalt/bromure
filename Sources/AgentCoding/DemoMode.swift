@@ -62,6 +62,11 @@ enum DemoMode {
             var color: String?
             var tool: String?
             var running: Bool?
+            /// Sandbox Policy pane: pf-style rules, or an OpenShell policy
+            /// ("starter" = the editor's starter policy), and the sentry.
+            var egressRules: String?
+            var networkPolicy: String?
+            var kernelSentry: String?
         }
         struct Room: Decodable {
             var name: String
@@ -128,10 +133,13 @@ enum DemoMode {
             if let existing = d.profiles.first(where: { $0.name == w.name }) {
                 id = existing.id
             } else {
-                let p = Profile(name: w.name,
+                var p = Profile(name: w.name,
                                 tool: w.tool.flatMap(Profile.Tool.init(rawValue:)) ?? .claude,
                                 authMode: .token,
                                 color: w.color.flatMap(ProfileColor.init(rawValue:)) ?? .blue)
+                if let r = w.egressRules { p.egressRules = r }
+                if let n = w.networkPolicy { p.networkPolicy = n == "starter" ? OpenShellPolicyEditor.starterPolicy : n }
+                if let k = w.kernelSentry.flatMap(KernelSentryMode.init(rawValue:)) { p.kernelSentry = k }
                 try d.store.save(p)
                 id = p.id
             }
