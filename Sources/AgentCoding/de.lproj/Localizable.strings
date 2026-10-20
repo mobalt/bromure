@@ -2202,8 +2202,6 @@
 "The planning session failed: %@" = "Die Planungssitzung ist fehlgeschlagen: %@";
 "No git identity or credentials found." = "Keine Git-Identität oder Zugangsdaten gefunden.";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure hat Inhalte markiert, die der Agent gleich an das Modell senden will (aus %@). Durchlassen oder diese Anfrage blockieren?\n\n%@";
-"an unverified package" = "ein ungeprüftes Paket";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure konnte %@ nicht erreichen, um %@ %@@%@ zu prüfen. Es zu installieren heißt, ein Paket zu akzeptieren, das nicht gegen Ihre konfigurierten Reputationsquellen geprüft wurde.\n\nDiese Installation trotzdem erlauben?";
 "to authenticate with the API server at %@" = "zur Authentifizierung beim API-Server unter %@";
 "Activity only" = "Nur Aktivität";
 "AI request details" = "Details der KI-Anfragen";
@@ -4231,3 +4229,20 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ von %@ Tokens Befehlsausgabe · %d Ausgaben, %d gekürzt";
 "Last two weeks" = "Letzte zwei Wochen";
 "%@: %@ tokens saved" = "%@: %@ Tokens gespart";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev hat nicht geantwortet.";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev hat den API-Schlüssel abgelehnt (HTTP %d) — prüfen Sie ihn in den Lieferketten-Einstellungen des Arbeitsbereichs.";
+"socket.dev is rate-limiting this API key." = "socket.dev drosselt diesen API-Schlüssel.";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev hat die Analyse dieser Version noch nicht abgeschlossen.";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev kennt diese Version nicht (sie ist vielleicht sehr neu).";
+"socket.dev's reply couldn't be read." = "Die Antwort von socket.dev war nicht lesbar.";
+"socket.dev answered HTTP %d." = "socket.dev hat mit HTTP %d geantwortet.";
+"the OSV vulnerability database didn't answer." = "die OSV-Schwachstellendatenbank hat nicht geantwortet.";
+"Install %@ from workspace “%@” without a reputation check?" = "%@ aus dem Arbeitsbereich „%@“ ohne Reputationsprüfung installieren?";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure konnte das %@-Paket %@ nicht prüfen: %@ Wer es installiert, akzeptiert ein Paket, das nicht gegen Ihre Reputationsquellen geprüft wurde.";
+"%d more unverified packages are waiting for an answer." = "%d weitere ungeprüfte Pakete warten auf eine Antwort.";
+"Allow all unverified packages for 15 minutes" = "Alle ungeprüften Pakete 15 Minuten lang erlauben";
+"Don't allow unverified packages for the rest of the session" = "Ungeprüfte Pakete für den Rest der Sitzung nicht erlauben";
+"Don't allow %@" = "%@ nicht erlauben";
+"all unverified packages" = "alle ungeprüften Pakete";

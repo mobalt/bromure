@@ -75,4 +75,29 @@ struct SocketDevClientTests {
              "alerts": [["type": "malware", "severity": "high"]]]])
         #expect(SocketDevClient.parsePURLResponse(array, purl: purl)?.compromised.first?.type == "malware")
     }
+
+    /// Issue #43: every failed lookup read "couldn't reach socket.dev" — a
+    /// refused key, a version not analysed yet and a network failure alike.
+    @Test("a lookup with no verdict says why")
+    func unavailableReasons() {
+        let purl = "pkg:pypi/werkzeug@3.1.8"
+        func ndjson(_ lines: [[String: Any]]) -> Data {
+            Data(lines.map { String(decoding: try! JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
+                .joined(separator: "\n").utf8)
+        }
+        func why(_ d: Data) -> SocketDevClient.Unavailable? {
+            if case .failure(let e) = SocketDevClient.parsePURLOutcome(d, purl: purl) { return e.reason }
+            return nil
+        }
+        #expect(why(ndjson([["name": "werkzeug", "inputPurl": purl, "alerts": [["type": "pendingScan"]]]])) == .notAnalyzedYet)
+        #expect(why(ndjson([["name": "werkzeug", "inputPurl": purl, "alerts": [["type": "notFound"]]]])) == .unknownPackage)
+        #expect(why(ndjson([["_type": "purlError", "value": ["inputPurl": purl, "retryable": true]]])) == .notAnalyzedYet)
+        #expect(why(ndjson([["_type": "purlError", "value": ["inputPurl": purl, "retryable": false]]])) == .unknownPackage)
+        #expect(why(Data("garbage".utf8)) == .failed(status: 0))
+        #expect(SocketDevClient.Unavailable.from(status: 401) == .keyRefused(status: 401))
+        #expect(SocketDevClient.Unavailable.from(status: 429) == .rateLimited)
+        #expect(SocketDevClient.Unavailable.from(status: 500) == .failed(status: 500))
+        #expect(SocketDevClient.Unavailable.keyRefused(status: 401).explanation.contains("API key"))
+        #expect(SocketDevClient.Unavailable.notAnalyzedYet.explanation.contains("analysing"))
+    }
 }

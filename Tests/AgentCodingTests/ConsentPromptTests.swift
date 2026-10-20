@@ -169,4 +169,106 @@ struct ConsentPromptTests {
         #expect(await next == true)
         #expect(p.openCount == 0)
     }
+
+    /// Issue #43: a `uv sync` held six unverified packages; when the first
+    /// prompt timed out the rest showed at once, all at "0 s", and never
+    /// closed. They had been asked together, so they shared a deadline: each
+    /// was pumped the instant the one before expired, answered itself from
+    /// its first tick before the presenter held it, and was never dismissed.
+    @Test("prompts that share a deadline time out without piling up panels")
+    func sharedDeadlineNoPileUp() async throws {
+        var built = 0
+        install(shown: { _ in built += 1 })
+        let a = UUID()
+        let p = ConsentPanelPresenter.shared
+        async let r1 = p.present(profileID: a, title: "1", message: "", choices: ["Allow", "Deny"], denyIndex: 1,
+                                 style: .warning, detailText: nil, timeout: 1)
+        async let r2 = p.present(profileID: a, title: "2", message: "", choices: ["Allow", "Deny"], denyIndex: 1,
+                                 style: .warning, detailText: nil, timeout: 1)
+        async let r3 = p.present(profileID: a, title: "3", message: "", choices: ["Allow", "Deny"], denyIndex: 1,
+                                 style: .warning, detailText: nil, timeout: 1)
+        let (x, y, z) = await (r1, r2, r3)
+        #expect(x == 1 && y == 1 && z == 1)
+        #expect(built == 1, "\(built) panels built for one that could be answered")
+        #expect(p.openCount == 0)
+    }
+
+    @Test("a panel answered while it's being built is closed")
+    func answeredWhileBuilt() async {
+        final class Counting: ConsentPanelUI {
+            var dismissed = 0
+            func dismiss() { dismissed += 1 }
+        }
+        let ui = Counting()
+        ConsentPanelPresenter.shared.makeUI = { _, answer in
+            answer(1)
+            return ui
+        }
+        let r = await ConsentPanelPresenter.shared.present(
+            profileID: UUID(), title: "t", message: "", choices: ["Allow", "Deny"], denyIndex: 1,
+            style: .warning, detailText: nil, timeout: 30)
+        #expect(r == 1)
+        #expect(ui.dismissed == 1)
+        #expect(ConsentPanelPresenter.shared.openCount == 0)
+    }
+
+    /// Issue #43: the unverified-package question — one at a time per
+    /// workspace; "this package" covers that version for the session, the
+    /// "all" answers settle the packages still waiting without a panel.
+    @Test("unverified packages: one question at a time, and an answer for all settles the rest")
+    func unverifiedPackages() async throws {
+        var shown: [String] = []
+        install(shown: { shown.append($0.title) })
+        let broker = SupplyChainConsentBroker()
+        let ws = UUID()
+        await broker.setProfileName("NIST", for: ws)
+        let p = ConsentPanelPresenter.shared
+        func ask(_ name: String) async -> Bool {
+            await broker.consentUnverified(profileID: ws, ecosystem: "pypi", name: name, version: "1.0",
+                                           why: "socket.dev hasn't finished analysing this version yet.")
+        }
+        async let six = ask("six")
+        async let werkzeug = ask("werkzeug")
+        async let mistune = ask("mistune")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(shown.count == 1, "\(shown)")
+        #expect(p.shownTitles.count == 1)
+        // "Allow <first>": only that one; the next question shows.
+        #expect(p.answer(profileID: ws, choice: SupplyChainConsentBroker.UnverifiedChoice.allowPackage.rawValue))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(shown.count == 2)
+        // "Allow all unverified packages for 15 minutes": the third never asks.
+        #expect(p.answer(profileID: ws, choice: SupplyChainConsentBroker.UnverifiedChoice.allowAll15min.rawValue))
+        let (a, b, c) = await (six, werkzeug, mistune)
+        #expect(a && b && c)
+        #expect(shown.count == 2)
+        #expect(await ask("pandas"))                      // within the 15 minutes
+        #expect(shown.count == 2)
+
+        // "Don't allow unverified packages for the rest of the session".
+        let other = UUID()
+        func askOther(_ name: String) async -> Bool {
+            await broker.consentUnverified(profileID: other, ecosystem: "npm", name: name, version: "2.0", why: "")
+        }
+        async let first = askOther("left-pad")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(p.answer(profileID: other, choice: SupplyChainConsentBroker.UnverifiedChoice.denyAllSession.rawValue))
+        #expect(await first == false)
+        #expect(await askOther("is-odd") == false)
+        #expect(shown.count == 3)
+        // "Allow <package>" is remembered for that package and version only.
+        await broker.revokeEverything()
+        async let one = askOther("left-pad")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(p.answer(profileID: other, choice: SupplyChainConsentBroker.UnverifiedChoice.allowPackage.rawValue))
+        #expect(await one)
+        #expect(await askOther("left-pad"))
+        #expect(shown.count == 4)
+        async let two = askOther("is-even")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(shown.count == 5)
+        #expect(p.answer(profileID: other, choice: nil))   // no answer / Esc: refused
+        #expect(await two == false)
+        #expect(p.openCount == 0)
+    }
 }

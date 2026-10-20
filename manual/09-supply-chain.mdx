@@ -231,7 +231,14 @@ To see it in action: open the Timeline, run any install inside a session (`npm i
 
 The pipeline's reputation checks depend on outbound calls from your Mac (never from the VM): `api.osv.dev` for OSV, `api.socket.dev` for socket.dev, `pypi.org` for the PyPI publish-time backstop, and `depi-npm-proxy.landh.tech` for Depi. When an enabled source cannot produce a verdict — network down after retries, HTTP error, rate-limiting, an auth failure, or an unsupported ecosystem — Bromure **fails closed** rather than silently allowing.
 
-The download pauses and an [unverified-package hold](18-glossary.mdx) asks you, per package and version, with a system alert titled **Pass through an unverified package from workspace "…"?**: Bromure could not reach the source to vet the package, and installing it means accepting a package that was not checked against your configured reputation sources. The four standard consent decisions apply; denying (including when no GUI is available and the remote prompt times out) blocks with a 451. Holds are keyed per package@version, so one approval can never blanket the whole dependency graph.
+The download pauses and an [unverified-package hold](18-glossary.mdx) asks you, in a panel titled **Install *package version* from workspace "…" without a reputation check?**. It says why there is no verdict — socket.dev didn't answer, refused the API key (check it in the workspace's **Supply Chain** settings), is rate-limiting the key, hasn't finished analysing that version yet, or doesn't know the version (it may be very new) — and that installing means accepting a package that was not checked against your configured reputation sources. The choices:
+
+- **Allow *package version*** — this version installs, and won't ask again for the rest of the session.
+- **Allow all unverified packages for 15 minutes** — this one and every other package of the workspace that gets no verdict in the next 15 minutes.
+- **Don't allow unverified packages for the rest of the session** — this one and every later one are refused without asking.
+- **Don't allow *package version*** — refused (with a 451). No answer before the countdown ends, Esc, or closing the panel means the same.
+
+One question is on screen per workspace at a time: when a `uv sync` or an `npm install` hits several unverified packages, they are asked one after another (the panel says how many are waiting), and an answer for all of them settles the rest at once.
 
 This is deliberate protection: without it, an attacker who can induce rate-limiting on the reputation service could sneak packages through unchecked. The practical consequences:
 

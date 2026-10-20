@@ -2202,8 +2202,6 @@
 "The planning session failed: %@" = "計画セッションが失敗しました：%@";
 "No git identity or credentials found." = "git の作者情報も認証情報も見つかりません。";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure は、エージェントがモデルに送ろうとしている内容（%@ から）を検出しました。通しますか、それともこのリクエストをブロックしますか？\n\n%@";
-"an unverified package" = "未検証のパッケージ";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure は %2$@ %3$@@%4$@ を審査するために %1$@ に接続できませんでした。インストールすると、設定した評価ソースで確認されていないパッケージを受け入れることになります。\n\nそれでもこのインストールを許可しますか？";
 "to authenticate with the API server at %@" = "%@ の API サーバで認証するため";
 "Activity only" = "アクティビティのみ";
 "AI request details" = "AI リクエストの詳細";
@@ -4231,3 +4229,20 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "コマンド出力 %2$@ トークンのうち %1$@ · 出力 %3$d 件、切り詰め %4$d 件";
 "Last two weeks" = "過去 2 週間";
 "%@: %@ tokens saved" = "%@：%@ トークン節約";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev から応答がありませんでした。";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev が API キーを拒否しました（HTTP %d）。ワークスペースのサプライチェーン設定で確認してください。";
+"socket.dev is rate-limiting this API key." = "socket.dev がこの API キーのレートを制限しています。";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev はこのバージョンの解析をまだ終えていません。";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev はこのバージョンを認識していません（公開されたばかりの可能性があります）。";
+"socket.dev's reply couldn't be read." = "socket.dev の応答を読み取れませんでした。";
+"socket.dev answered HTTP %d." = "socket.dev は HTTP %d を返しました。";
+"the OSV vulnerability database didn't answer." = "OSV 脆弱性データベースから応答がありませんでした。";
+"Install %@ from workspace “%@” without a reputation check?" = "ワークスペース「%2$@」の %1$@ を評判チェックなしでインストールしますか？";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure は %@ パッケージ %@ を検証できませんでした：%@ インストールすると、設定した評判ソースで確認されていないパッケージを受け入れることになります。";
+"%d more unverified packages are waiting for an answer." = "ほかに %d 個の未検証パッケージが回答を待っています。";
+"Allow all unverified packages for 15 minutes" = "未検証のパッケージを 15 分間すべて許可";
+"Don't allow unverified packages for the rest of the session" = "このセッションの間は未検証のパッケージを許可しない";
+"Don't allow %@" = "%@ を許可しない";
+"all unverified packages" = "すべての未検証パッケージ";

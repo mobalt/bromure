@@ -47,6 +47,54 @@ public actor SocketDevClient {
         public let vulnerabilities: [Issue]  // CVE bucket
     }
 
+    /// Why a lookup gave no verdict — said in the "unverified package"
+    /// prompt instead of a blanket "couldn't reach socket.dev" (a refused
+    /// key, a version socket.dev hasn't analysed yet and a network failure
+    /// call for different answers).
+    public enum Unavailable: Sendable, Equatable {
+        /// No answer: the network, a timeout.
+        case unreachable
+        /// 401/403: the API key is wrong, revoked or lacks the scope.
+        case keyRefused(status: Int)
+        /// 429: socket.dev's quota.
+        case rateLimited
+        /// socket.dev is still analysing this version (`pendingScan`).
+        case notAnalyzedYet
+        /// socket.dev doesn't know this package or version (`notFound`,
+        /// a non-retryable `purlError`).
+        case unknownPackage
+        /// Any other refusal or an unreadable reply.
+        case failed(status: Int)
+
+        static func from(status: Int) -> Unavailable {
+            switch status {
+            case 401, 403: return .keyRefused(status: status)
+            case 429: return .rateLimited
+            default: return .failed(status: status)
+            }
+        }
+
+        /// The sentence after "Bromure couldn't vet <pkg>:".
+        public var explanation: String {
+            switch self {
+            case .unreachable:
+                return NSLocalizedString("socket.dev didn't answer.", comment: "supply chain: why a package has no verdict")
+            case .keyRefused(let status):
+                return String(format: NSLocalizedString("socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings.", comment: "supply chain: why a package has no verdict"), status)
+            case .rateLimited:
+                return NSLocalizedString("socket.dev is rate-limiting this API key.", comment: "supply chain: why a package has no verdict")
+            case .notAnalyzedYet:
+                return NSLocalizedString("socket.dev hasn't finished analysing this version yet.", comment: "supply chain: why a package has no verdict")
+            case .unknownPackage:
+                return NSLocalizedString("socket.dev doesn't know this version (it may be very new).", comment: "supply chain: why a package has no verdict")
+            case .failed(let status):
+                return status == 0
+                    ? NSLocalizedString("socket.dev's reply couldn't be read.", comment: "supply chain: why a package has no verdict")
+                    : String(format: NSLocalizedString("socket.dev answered HTTP %d.", comment: "supply chain: why a package has no verdict"), status)
+            }
+        }
+    }
+
     private struct CacheKey: Hashable {
         let ecosystem: String
         let name: String
@@ -189,24 +237,31 @@ public actor SocketDevClient {
 
     public func check(ecosystem: String, name: String, version: String,
                       apiKey: String) async -> CheckResult? {
-        if apiKey.isEmpty { return nil }
+        try? await lookup(ecosystem: ecosystem, name: name, version: version, apiKey: apiKey).get()
+    }
+
+    /// The verdict, or why there is none.
+    public func lookup(ecosystem: String, name: String, version: String,
+                       apiKey: String) async -> Result<CheckResult, UnavailableError> {
+        if apiKey.isEmpty { return .failure(.init(.keyRefused(status: 0))) }
         let key = CacheKey(ecosystem: ecosystem,
                             name: name.lowercased(),
                             version: version)
-        if let cached = cache[key] { return cached }
+        if let cached = cache[key] { return .success(cached) }
 
         // Only npm has the per-package `issues` route: every other
         // ecosystem got "API route not found" (404), so every PyPI, Go,
         // Maven… install read as "couldn't reach socket.dev" and asked.
         // Those go through the package-URL lookup instead.
         if ecosystem != "npm" {
-            guard let purl = Self.purl(ecosystem: ecosystem, name: name, version: version) else { return nil }
-            guard let result = await checkPURL(purl, label: "\(ecosystem)/\(name)@\(version)", apiKey: apiKey)
-            else { return nil }
-            remember(key, result)
-            return result
+            guard let purl = Self.purl(ecosystem: ecosystem, name: name, version: version) else {
+                return .failure(.init(.unknownPackage))
+            }
+            let r = await checkPURL(purl, label: "\(ecosystem)/\(name)@\(version)", apiKey: apiKey)
+            if case .success(let result) = r { remember(key, result) }
+            return r
         }
-        guard let eco = Self.socketEcosystem(ecosystem) else { return nil }
+        guard let eco = Self.socketEcosystem(ecosystem) else { return .failure(.init(.unknownPackage)) }
         // URL-encode the package name (npm scoped packages contain
         // `/` which must be percent-encoded).
         guard let encName = name.addingPercentEncoding(
@@ -214,9 +269,9 @@ public actor SocketDevClient {
                 .replacingOccurrences(of: "/", with: "%2F"),
               let encVer = version.addingPercentEncoding(
                 withAllowedCharacters: .urlPathAllowed)
-        else { return nil }
+        else { return .failure(.init(.unknownPackage)) }
         let urlStr = "https://api.socket.dev/v0/\(eco)/\(encName)/\(encVer)/issues"
-        guard let url = URL(string: urlStr) else { return nil }
+        guard let url = URL(string: urlStr) else { return .failure(.init(.unknownPackage)) }
 
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
@@ -266,7 +321,7 @@ public actor SocketDevClient {
             let msg = lastError?.localizedDescription ?? "unknown"
             SupplyChainLog.shared.record(
                 "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error after retries: \(msg)")
-            return nil
+            return .failure(.init(.unreachable))
         }
         let (data, resp) = response
         let http = resp as? HTTPURLResponse
@@ -279,12 +334,13 @@ public actor SocketDevClient {
             let bodyPreview = String(data: data.prefix(200), encoding: .utf8) ?? ""
             SupplyChainLog.shared.record(
                 "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)")
-            return nil
+            // npm's route answers 404 for a package (version) it doesn't know.
+            return .failure(.init(status == 404 ? .unknownPackage : .from(status: status)))
         }
         guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             SupplyChainLog.shared.record(
                 "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON")
-            return nil
+            return .failure(.init(.failed(status: 0)))
         }
 
         let result = Self.classify(arr.map { entry in
@@ -297,7 +353,13 @@ public actor SocketDevClient {
         SupplyChainLog.shared.record(
             "[socket.dev] ✓  \(ecosystem)/\(name)@\(version) — \(result.compromised.count) compromise, \(result.vulnerabilities.count) CVE")
         remember(key, result)
-        return result
+        return .success(result)
+    }
+
+    /// `Unavailable` as an Error, for `Result`.
+    public struct UnavailableError: Error, Sendable, Equatable {
+        public let reason: Unavailable
+        public init(_ reason: Unavailable) { self.reason = reason }
     }
 
     private func remember(_ key: CacheKey, _ result: CheckResult) {
@@ -394,7 +456,7 @@ public actor SocketDevClient {
     /// One package by its package URL. Waits (poll) up to 20 s for an
     /// analysis socket.dev hasn't finished; one still pending is no
     /// verdict (nil), like a failed lookup.
-    private func checkPURL(_ purl: String, label: String, apiKey: String) async -> CheckResult? {
+    private func checkPURL(_ purl: String, label: String, apiKey: String) async -> Result<CheckResult, UnavailableError> {
         await acquireSlot()
         defer { releaseSlot() }
         let query = "alerts=true&compact=true&poll=true&timeoutSec=20"
@@ -405,6 +467,7 @@ public actor SocketDevClient {
         }
         endpoints.append("https://api.socket.dev/v0/purl?\(query)")
         let body = (try? JSONSerialization.data(withJSONObject: ["components": [["purl": purl]]])) ?? Data()
+        var lastFailure = Unavailable.unreachable
         for (i, urlStr) in endpoints.enumerated() {
             guard let url = URL(string: urlStr) else { continue }
             var req = URLRequest(url: url)
@@ -429,24 +492,27 @@ public actor SocketDevClient {
                     try? await Task.sleep(nanoseconds: UInt64(attempt) * 250_000_000)
                 }
             }
-            guard let (data, resp) = response else { return nil }
+            guard let (data, resp) = response else { return .failure(.init(.unreachable)) }
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if status != 200 {
                 let bodyPreview = String(data: data.prefix(200), encoding: .utf8) ?? ""
                 SupplyChainLog.shared.record("[socket.dev] ✗  \(label) — HTTP \(status): \(bodyPreview)")
+                lastFailure = .from(status: status)
                 // The org-scoped route refused (scope, plan): the plain one.
                 if i < endpoints.count - 1, [401, 403, 404].contains(status) { continue }
-                return nil
+                return .failure(.init(lastFailure))
             }
-            guard let result = Self.parsePURLResponse(data, purl: purl) else {
-                SupplyChainLog.shared.record("[socket.dev] ✗  \(label) — no verdict in the response (pending analysis, or not found)")
-                return nil
+            switch Self.parsePURLOutcome(data, purl: purl) {
+            case .success(let result):
+                SupplyChainLog.shared.record(
+                    "[socket.dev] ✓  \(label) — \(result.compromised.count) compromise, \(result.vulnerabilities.count) CVE")
+                return .success(result)
+            case .failure(let why):
+                SupplyChainLog.shared.record("[socket.dev] ✗  \(label) — no verdict: \(why.reason.explanation)")
+                return .failure(why)
             }
-            SupplyChainLog.shared.record(
-                "[socket.dev] ✓  \(label) — \(result.compromised.count) compromise, \(result.vulnerabilities.count) CVE")
-            return result
         }
-        return nil
+        return .failure(.init(lastFailure))
     }
 
     /// Alerts that mean socket.dev has no verdict on the package: an
@@ -460,6 +526,11 @@ public actor SocketDevClient {
     /// package asked about, or nil (an error line, no artifact, or a
     /// no-verdict alert).
     static func parsePURLResponse(_ data: Data, purl: String) -> CheckResult? {
+        try? parsePURLOutcome(data, purl: purl).get()
+    }
+
+    /// `parsePURLResponse`, with why there is no verdict.
+    static func parsePURLOutcome(_ data: Data, purl: String) -> Result<CheckResult, UnavailableError> {
         var objects: [[String: Any]] = []
         if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             objects = arr
@@ -470,20 +541,29 @@ public actor SocketDevClient {
                 }
             }
         }
+        var why = Unavailable.failed(status: 0)
         for obj in objects {
-            guard obj["_type"] == nil,   // purlError / summary lines
+            if obj["_type"] as? String == "purlError" {
+                // A retryable one is socket.dev still working on it.
+                let retryable = ((obj["value"] as? [String: Any])?["retryable"] as? Bool) ?? false
+                why = retryable ? .notAnalyzedYet : .unknownPackage
+                continue
+            }
+            guard obj["_type"] == nil,   // summary lines
                   obj["name"] != nil || obj["inputPurl"] != nil else { continue }
             let alerts = (obj["alerts"] as? [[String: Any]]) ?? []
-            if alerts.contains(where: { noVerdictAlerts.contains(($0["type"] as? String) ?? "") }) { return nil }
-            return classify(alerts.map { a in
+            let types = Set(alerts.compactMap { $0["type"] as? String })
+            if types.contains("pendingScan") { return .failure(.init(.notAnalyzedYet)) }
+            if types.contains("notFound") { return .failure(.init(.unknownPackage)) }
+            return .success(classify(alerts.map { a in
                 let type = (a["type"] as? String) ?? ""
                 let props = a["props"] as? [String: Any]
                 let summary = (props?["title"] as? String) ?? (props?["description"] as? String)
                     ?? (props?["cveId"] as? String) ?? type
                 return Issue(type: type, severity: Severity.from(string: (a["severity"] as? String) ?? "unknown"),
                              summary: summary)
-            })
+            }))
         }
-        return nil
+        return .failure(.init(why))
     }
 }

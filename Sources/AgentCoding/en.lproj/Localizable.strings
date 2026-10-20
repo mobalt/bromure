@@ -2236,8 +2236,6 @@
 "The planning session failed: %@" = "The planning session failed: %@";
 "No git identity or credentials found." = "No git identity or credentials found.";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@";
-"an unverified package" = "an unverified package";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?";
 "to authenticate with the API server at %@" = "to authenticate with the API server at %@";
 "Activity only" = "Activity only";
 "AI request details" = "AI request details";
@@ -4265,3 +4263,20 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ of %@ tokens of command output · %d outputs, %d trimmed";
 "Last two weeks" = "Last two weeks";
 "%@: %@ tokens saved" = "%@: %@ tokens saved";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev didn't answer.";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings.";
+"socket.dev is rate-limiting this API key." = "socket.dev is rate-limiting this API key.";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev hasn't finished analysing this version yet.";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev doesn't know this version (it may be very new).";
+"socket.dev's reply couldn't be read." = "socket.dev's reply couldn't be read.";
+"socket.dev answered HTTP %d." = "socket.dev answered HTTP %d.";
+"the OSV vulnerability database didn't answer." = "the OSV vulnerability database didn't answer.";
+"Install %@ from workspace “%@” without a reputation check?" = "Install %@ from workspace “%@” without a reputation check?";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources.";
+"%d more unverified packages are waiting for an answer." = "%d more unverified packages are waiting for an answer.";
+"Allow all unverified packages for 15 minutes" = "Allow all unverified packages for 15 minutes";
+"Don't allow unverified packages for the rest of the session" = "Don't allow unverified packages for the rest of the session";
+"Don't allow %@" = "Don't allow %@";
+"all unverified packages" = "all unverified packages";
