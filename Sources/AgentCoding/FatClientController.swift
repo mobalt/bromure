@@ -4988,7 +4988,9 @@ final class RemoteHostWindow: NSWindow {
                             c.taskCommand(id, "assign", body: ["kind": "none"])
                         }
                     },
-                    answer: { id, text in c.taskCommand(id, "answer", body: ["text": text]) },
+                    answer: { id, ask, text in
+                        c.taskCommand(id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a })
+                    },
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),
                 sessionStore: c.sessionStore)

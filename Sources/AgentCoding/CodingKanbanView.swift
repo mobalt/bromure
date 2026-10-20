@@ -418,8 +418,9 @@ struct CodingKanbanView: View {
         /// Queue a task for new agents, a session or a room (nil = take it
         /// off its queue). nil closure = queues aren't available here.
         var assign: ((UUID, TaskAssignment?) -> Void)?
-        /// Answer the assignee's question.
-        var answer: (UUID, String) -> Void = { _, _ in }
+        /// Answer the assignee's question: task, the ask the answer was
+        /// written for (`pendingAskID`), text.
+        var answer: (UUID, UUID?, String) -> Void = { _, _, _ in }
         /// Take a handed-off task back to the backlog.
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
@@ -1019,7 +1020,7 @@ struct CodingKanbanView: View {
                         accentHex: accentHex(for: task.profileID),
                         workspaceName: workspaceName(for: task.profileID),
                         onOpen: { actions.openAssignee(task) },
-                        onAnswer: { actions.answer(task.id, $0) },
+                        onAnswer: { actions.answer(task.id, $0, $1) },
                         onRecall: { actions.recall(task.id) })
                 } else {
                 InProgressTaskCard(
@@ -1963,10 +1964,10 @@ private struct AssignedTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void
-    var onAnswer: (String) -> Void
+    var onAnswer: (UUID?, String) -> Void
     var onRecall: () -> Void
     @State private var answering = false
-    @State private var reply = ""
+    @State private var draft = TaskAnswerDraft()
 
     var body: some View {
         Button(action: onOpen) {
@@ -2052,10 +2053,40 @@ private struct AssignedTaskCard: View {
         // A sheet, not an alert: a question runs to paragraphs (lists, code)
         // and an answer to a few lines — the alert showed both in a sliver.
         .sheet(isPresented: $answering) {
-            TaskAnswerSheet(task: task, reply: $reply,
-                            onSend: { text in onAnswer(text); reply = ""; answering = false },
+            TaskAnswerSheet(task: task,
+                            reply: Binding(get: { draft.text }, set: { draft.edit($0, for: task.pendingAskID) }),
+                            stale: draft.isStale(for: task.pendingAskID),
+                            onSend: { text in
+                                guard draft.canSend(to: task.pendingAskID) else { return }
+                                onAnswer(draft.askID, text); draft = TaskAnswerDraft(); answering = false
+                            },
                             onCancel: { answering = false })   // the draft stays for next time
         }
+    }
+}
+
+/// An answer being written, and the ask it was written for. The agent can
+/// ask again while a draft waits (an ask returns after `waitCap`, and the
+/// next replaces the card's question): a draft for an earlier question is
+/// never sent to the new one until the user has edited it with the new
+/// question on screen.
+struct TaskAnswerDraft: Equatable {
+    private(set) var text = ""
+    private(set) var askID: UUID?
+
+    /// Every edit is made with `ask` on screen.
+    mutating func edit(_ text: String, for ask: UUID?) {
+        self.text = text
+        askID = ask
+    }
+
+    /// Written for another question than the one asked now.
+    func isStale(for ask: UUID?) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && askID != ask
+    }
+
+    func canSend(to ask: UUID?) -> Bool {
+        ask != nil && askID == ask && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
@@ -2064,6 +2095,8 @@ private struct AssignedTaskCard: View {
 struct TaskAnswerSheet: View {
     let task: CodingTask
     @Binding var reply: String
+    /// The draft was written for an earlier question.
+    var stale = false
     var onSend: (String) -> Void
     var onCancel: () -> Void
     @FocusState private var editorFocused: Bool
@@ -2106,6 +2139,13 @@ struct TaskAnswerSheet: View {
                     .overlay(RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(editorFocused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.5))
                     .focused($editorFocused)
+                if stale {
+                    Label(NSLocalizedString("The agent asked a new question since you wrote this. Change your answer to send it.", comment: "task answer sheet: the draft was for an earlier question"),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             HStack {
                 Text(NSLocalizedString("⌘↩ to send", comment: "task answer sheet"))
@@ -2117,7 +2157,7 @@ struct TaskAnswerSheet: View {
                 Button(NSLocalizedString("Send", comment: "")) { onSend(trimmed) }
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(trimmed.isEmpty)
+                    .disabled(trimmed.isEmpty || stale)
             }
         }
         .padding(20)

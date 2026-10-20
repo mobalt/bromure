@@ -4234,3 +4234,7 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "命令輸出 %2$@ 個 token 中的 %1$@ · %3$d 個輸出，精簡 %4$d 個";
 "Last two weeks" = "最近兩週";
 "%@: %@ tokens saved" = "%@：節省 %@ 個 token";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "你寫下這段內容後，代理又提出了新問題。修改你的回答後才能傳送。";
+"The agent asked a new question before your answer went. Read it and answer again." = "你的回答送出前，代理又提出了新問題。請閱讀後重新回答。";

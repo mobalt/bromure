@@ -4231,3 +4231,7 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "コマンド出力 %2$@ トークンのうち %1$@ · 出力 %3$d 件、切り詰め %4$d 件";
 "Last two weeks" = "過去 2 週間";
 "%@: %@ tokens saved" = "%@：%@ トークン節約";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "これを書いた後、エージェントが新しい質問をしました。送信するには回答を編集してください。";
+"The agent asked a new question before your answer went. Read it and answer again." = "回答が届く前にエージェントが新しい質問をしました。読んでからもう一度回答してください。";

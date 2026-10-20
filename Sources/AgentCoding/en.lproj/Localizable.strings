@@ -4265,3 +4265,7 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ of %@ tokens of command output · %d outputs, %d trimmed";
 "Last two weeks" = "Last two weeks";
 "%@: %@ tokens saved" = "%@: %@ tokens saved";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "The agent asked a new question since you wrote this. Change your answer to send it.";
+"The agent asked a new question before your answer went. Read it and answer again." = "The agent asked a new question before your answer went. Read it and answer again.";

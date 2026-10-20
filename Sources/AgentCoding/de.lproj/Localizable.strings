@@ -4231,3 +4231,7 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ von %@ Tokens Befehlsausgabe · %d Ausgaben, %d gekürzt";
 "Last two weeks" = "Letzte zwei Wochen";
 "%@: %@ tokens saved" = "%@: %@ Tokens gespart";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "Der Agent hat inzwischen eine neue Frage gestellt. Ändern Sie Ihre Antwort, um sie zu senden.";
+"The agent asked a new question before your answer went. Read it and answer again." = "Der Agent hat eine neue Frage gestellt, bevor Ihre Antwort ankam. Lesen Sie sie und antworten Sie erneut.";
