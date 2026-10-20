@@ -75,6 +75,46 @@ struct SquelchFilterTests {
         #expect(Squelch.family(of: "python -c 'import x; print(x)'") == .verbatim)
     }
 
+    /// Finding (CWE-670): "Squelch deletes pip and uv uninstall results as
+    /// install noise" — an uninstall took the install family, whose noise
+    /// pattern is pip's "Found existing installation / Uninstalling /
+    /// Successfully uninstalled": a bulk uninstall came back as the note alone.
+    @Test("an uninstall's output is its result: what went stays")
+    func uninstallsKeepTheirResult() throws {
+        for cmd in ["pip uninstall -y -r requirements.txt", "pip3 uninstall -y a b", "uv pip uninstall a b",
+                    "python3 -m pip uninstall -y a", "pipx uninstall black", "npm uninstall left-pad", "npm rm x",
+                    "pnpm remove x", "brew uninstall wget", "apt-get remove -y curl", "apt purge curl",
+                    "uv tool uninstall ruff", "apt-get -y remove curl", "python3 -m pip -q uninstall a",
+                    "uv pip -q uninstall a", "brew --cask uninstall x", "dnf -y remove x", "apk del curl",
+                    "pacman -Rns x"] {
+            #expect(Squelch.family(of: cmd) != .install, "\(cmd)")
+        }
+        #expect(Squelch.family(of: "pip install -r requirements.txt") == .install)
+        #expect(Squelch.family(of: "python -m pip install x") == .install)
+        #expect(Squelch.family(of: "uv pip install x") == .install)
+        #expect(Squelch.family(of: "apt-get -y install curl") == .install)
+        #expect(Squelch.family(of: "pacman -Syu") == .install)
+
+        var out = ""
+        for i in 0..<20 {
+            out += "Found existing installation: package-number-\(i) 1.2.\(i)\n"
+            out += "Uninstalling package-number-\(i)-1.2.\(i):\n"
+            out += "  Successfully uninstalled package-number-\(i)-1.2.\(i)\n"
+        }
+        for cmd in ["pip uninstall -y -r requirements.txt", "uv pip uninstall -r requirements.txt"] {
+            let kept = Squelch.trim(command: cmd, output: out)?.text ?? out
+            for i in 0..<20 { #expect(kept.contains("Successfully uninstalled package-number-\(i)-1.2.\(i)"), "\(cmd)") }
+        }
+        // An upgrade's "Successfully uninstalled" is a result line too.
+        var upgrade = ""
+        for i in 0..<30 { upgrade += "Collecting dep\(i)>=1.0\n  Downloading dep\(i)-2.0-py3-none-any.whl (120 kB)\n" }
+        upgrade += "  Attempting uninstall: dep1\n    Found existing installation: dep1 1.0\n    Uninstalling dep1-1.0:\n"
+        upgrade += "      Successfully uninstalled dep1-1.0\nSuccessfully installed dep0-2.0 dep1-2.0\n"
+        let r = try #require(Squelch.trim(command: "pip install -U -r requirements.txt", output: upgrade))
+        #expect(r.text.contains("Successfully uninstalled dep1-1.0") && r.text.contains("Successfully installed"))
+        #expect(!r.text.contains("Uninstalling dep1-1.0"))
+    }
+
     @Test("installs: download chatter and deprecation notices go, errors stay")
     func installs() throws {
         var npm = ""
