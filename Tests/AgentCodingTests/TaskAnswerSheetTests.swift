@@ -77,6 +77,25 @@ struct TaskAnswerSheetTests {
         #expect(!draft.canSend(to: nil))
     }
 
+    /// Finding (CWE-670): "A successful task answer leaves the stale-ask
+    /// error on the card" — the answer that then went cleared the question
+    /// but not the note, and the card (saved) kept saying it didn't go.
+    @Test("an answer that goes clears what an earlier try put on the card, and nothing else")
+    func answerClearsItsOwnError() {
+        var t = task()
+        t.lastError = TaskDispatcher.staleAnswerText
+        TaskDispatcher.clearAnswerError(&t, wrote: nil)
+        #expect(t.lastError == nil)
+        // A refused delivery's reason, as the try that got it recorded.
+        t.lastError = "No question is waiting for an answer."
+        TaskDispatcher.clearAnswerError(&t, wrote: "No question is waiting for an answer.")
+        #expect(t.lastError == nil)
+        // The assignee's own trouble stays.
+        t.lastError = "@importer's session went away."
+        TaskDispatcher.clearAnswerError(&t, wrote: "No question is waiting for an answer.")
+        #expect(t.lastError == "@importer's session went away.")
+    }
+
     @Test("the board answers only the question the answer was written for, and clears only that one")
     func answerTargetsItsAsk() {
         let first = UUID(), second = UUID()
