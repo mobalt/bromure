@@ -165,6 +165,128 @@ public actor SupplyChainConsentBroker {
         return allow
     }
 
+    // MARK: Unverified packages
+
+    /// The scope every unverified package of a workspace shares: "all
+    /// unverified packages for 15 minutes" / "for the rest of the session".
+    static let anyUnverifiedScope = "verify-unavailable:*"
+
+    static func unverifiedScope(ecosystem: String, name: String, version: String) -> String {
+        "verify-unavailable:\(ecosystem):\(name):\(version)"
+    }
+
+    /// The choices of the unverified-package question, in order; the last
+    /// is the deny (also no answer, Esc, closing the panel).
+    enum UnverifiedChoice: Int, CaseIterable {
+        case allowPackage, allowAll15min, denyAllSession, denyPackage
+    }
+
+    /// Workspaces with an unverified-package question open, and who waits
+    /// behind it: one question at a time, so an "all packages" answer
+    /// settles the rest without asking (a `uv sync` used to raise one panel
+    /// per package, all at once).
+    private var unverifiedBusy: Set<UUID> = []
+    private var unverifiedWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    /// A package no reputation source could vet: may it install? Allowing
+    /// or refusing "this package" covers that version for the session (an
+    /// installed package is installed — a timed grant on it meant nothing);
+    /// the other two answers cover every unverified package of the
+    /// workspace. No answer is a refusal of this package for a minute.
+    public func consentUnverified(profileID: UUID, ecosystem: String, name: String, version: String,
+                                  why: String) async -> Bool {
+        let pkgKey = Self.storeKey(profileID: profileID,
+                                   scope: Self.unverifiedScope(ecosystem: ecosystem, name: name, version: version))
+        let allKey = Self.storeKey(profileID: profileID, scope: Self.anyUnverifiedScope)
+        if let known = decided(pkgKey) ?? decided(allKey) { return known }
+
+        // One question at a time per workspace; the answer to the one
+        // before may have settled this one.
+        while unverifiedBusy.contains(profileID) {
+            await withCheckedContinuation { unverifiedWaiters[profileID, default: []].append($0) }
+        }
+        if let known = decided(pkgKey) ?? decided(allKey) {
+            wakeNextUnverified(profileID)
+            return known
+        }
+        unverifiedBusy.insert(profileID)
+
+        let waiting = unverifiedWaiters[profileID]?.count ?? 0
+        let profileName = profileNames[profileID] ?? "(unknown profile)"
+        let label = "\(name) \(version)"
+        let title = String(format: NSLocalizedString(
+            "Install %@ from workspace “%@” without a reputation check?",
+            comment: "Supply chain: unverified package prompt title (package and version, workspace)"), label, profileName)
+        var message = String(format: NSLocalizedString(
+            "Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources.",
+            comment: "Supply chain: unverified package prompt (ecosystem, package and version, why)"), ecosystem, label, why)
+        if waiting > 0 {
+            message += "\n\n" + String(format: NSLocalizedString(
+                "%d more unverified packages are waiting for an answer.",
+                comment: "Supply chain: unverified packages queued behind this prompt"), waiting)
+        }
+        let choices = UnverifiedChoice.allCases.map { c -> String in
+            switch c {
+            case .allowPackage:
+                return String(format: NSLocalizedString("Allow %@", comment: "Supply chain: allow this one package"), label)
+            case .allowAll15min:
+                return NSLocalizedString("Allow all unverified packages for 15 minutes", comment: "Supply chain")
+            case .denyAllSession:
+                return NSLocalizedString("Don't allow unverified packages for the rest of the session", comment: "Supply chain")
+            case .denyPackage:
+                return String(format: NSLocalizedString("Don't allow %@", comment: "Supply chain: refuse this one package"), label)
+            }
+        }
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: message,
+                                             choices: choices, denyIndex: UnverifiedChoice.denyPackage.rawValue,
+                                             style: .warning)
+        let allow = record(UnverifiedChoice(rawValue: idx ?? -1) ?? .denyPackage, pkgKey: pkgKey, allKey: allKey,
+                           label: label, now: Date())
+        unverifiedBusy.remove(profileID)
+        wakeNextUnverified(profileID)
+        return allow
+    }
+
+    /// A live decision for `key`: true (grant), false (deny), nil (ask).
+    private func decided(_ key: String, now: Date = Date()) -> Bool? {
+        if let d = denies[key] {
+            if d.expiration > now { return false }
+            denies.removeValue(forKey: key)
+        }
+        if let g = grants[key] {
+            if g.expiration > now { return true }
+            grants.removeValue(forKey: key)
+        }
+        return nil
+    }
+
+    private func wakeNextUnverified(_ profileID: UUID) {
+        guard var w = unverifiedWaiters[profileID], !w.isEmpty else { return }
+        let next = w.removeFirst()
+        unverifiedWaiters[profileID] = w.isEmpty ? nil : w
+        next.resume()
+    }
+
+    /// Store an answer to the unverified-package question; true = install.
+    func record(_ choice: UnverifiedChoice, pkgKey: String, allKey: String, label: String, now: Date) -> Bool {
+        let all = NSLocalizedString("all unverified packages", comment: "Supply chain: approvals list entry")
+        switch choice {
+        case .allowPackage:
+            grants[pkgKey] = Grant(expiration: .distantFuture, scopeDisplayName: label, isSessionScoped: true)
+            return true
+        case .allowAll15min:
+            grants[allKey] = Grant(expiration: now.addingTimeInterval(15 * 60), scopeDisplayName: all,
+                                   isSessionScoped: false)
+            return true
+        case .denyAllSession:
+            denies[allKey] = DenyMemory(expiration: .distantFuture, scopeDisplayName: all)
+            return false
+        case .denyPackage:
+            denies[pkgKey] = DenyMemory(expiration: now.addingTimeInterval(Self.denyTTL), scopeDisplayName: label)
+            return false
+        }
+    }
+
     public func snapshot() -> [LiveEntry] {
         let now = Date()
         var out: [LiveEntry] = []

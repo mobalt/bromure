@@ -326,6 +326,16 @@ final class ConsentPanelPresenter {
         queues[profileID] = q.isEmpty ? nil : q
         // Already answered (its deadline passed while it waited): next.
         if cont.isAnswered { pump(profileID); return }
+        // Its deadline is up, its watchdog not run yet (questions asked
+        // together share a deadline: the first one's expiry pumps the next
+        // at the same instant). Deny without a panel: one built now would
+        // answer itself from its first tick, before it's on record here, and
+        // stay on screen at "0 s" for good — a stack of them, one per package.
+        if !req.isNotice, req.effectiveDeadline() <= Date() {
+            cont.resume(req.denyIndex)
+            pump(profileID)
+            return
+        }
         if req.deadline == nil {
             // A notice: its (display-only) time runs from when it shows.
             req.deadline = Date().addingTimeInterval(max(1, req.timeout))
@@ -337,7 +347,8 @@ final class ConsentPanelPresenter {
         let ui = makeUI(req) { [weak self] choice in
             self?.resolve(profileID, requestID: req.id, choice: choice)
         }
-        if active[profileID]?.request.id == req.id { active[profileID]?.ui = ui }
+        // Answered while being built: nothing will close it but this.
+        if active[profileID]?.request.id == req.id { active[profileID]?.ui = ui } else { ui?.dismiss() }
     }
 
     private func resolve(_ profileID: UUID, requestID: UUID, choice: Int?) {
@@ -561,7 +572,9 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
             text.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.inset),
         ])
         panel.contentView = content
-        tick()
+        if !req.isNotice {
+            countdown.stringValue = Self.countdownLine(secondsLeft: Self.secondsLeft(until: deadline), request: req)
+        }
         content.layoutSubtreeIfNeeded()
         var size = content.fittingSize
         // The estimate above can run a few points over (a wrapped title or

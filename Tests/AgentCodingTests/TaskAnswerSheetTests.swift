@@ -55,6 +55,43 @@ struct TaskAnswerSheetTests {
         #expect(sent.isEmpty)
     }
 
+    /// Finding (CWE-670): "Coding-task answer draft is delivered to a later
+    /// question" — a draft kept after Esc (or typed while the agent's ask
+    /// timed out and it asked again) went to whatever question the card had
+    /// when Send was clicked.
+    @Test("a draft written for one question isn't sent to the next")
+    func draftFollowsItsQuestion() {
+        let first = UUID(), second = UUID()
+        var draft = TaskAnswerDraft()
+        #expect(!draft.canSend(to: first))
+        draft.edit("Only 5xx; keep 30 s.", for: first)
+        #expect(draft.canSend(to: first) && !draft.isStale(for: first))
+        // The agent asks again: the draft is for the earlier question.
+        #expect(draft.isStale(for: second))
+        #expect(!draft.canSend(to: second))
+        #expect(draft.askID == first)
+        // Edited with the new question on screen, it's an answer to it.
+        draft.edit("Only 5xx; keep 30 s. Per-client breaker: yes.", for: second)
+        #expect(draft.canSend(to: second) && draft.askID == second)
+        // Nothing asked any more: nothing to send to.
+        #expect(!draft.canSend(to: nil))
+    }
+
+    @Test("the board answers only the question the answer was written for, and clears only that one")
+    func answerTargetsItsAsk() {
+        let first = UUID(), second = UUID()
+        var t = task()
+        t.pendingAskID = second                       // asked again since
+        #expect(TaskDispatcher.answerTarget(t, writtenFor: first) == nil)
+        #expect(TaskDispatcher.answerTarget(t, writtenFor: second) == second)
+        #expect(TaskDispatcher.answerTarget(t, writtenFor: nil) == second)
+        // The answer to the first came back after the second was asked.
+        TaskDispatcher.clearAnswered(&t, ask: first)
+        #expect(t.pendingAskID == second && t.pendingQuestion != nil)
+        TaskDispatcher.clearAnswered(&t, ask: second)
+        #expect(t.pendingAskID == nil && t.pendingQuestion == nil)
+    }
+
     private func textViews(in view: NSView) -> [NSTextView] {
         ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews(in:))
     }

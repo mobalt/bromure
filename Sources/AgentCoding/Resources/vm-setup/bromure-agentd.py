@@ -5973,8 +5973,12 @@ def create_session():
     # size authority between clients of different sizes, so a few switches
     # landed a scrolled-back terminal at the bottom (issue #51). Anchored on
     # the top line, a resize keeps the view where it was. The guard: a
-    # scroll-down that reaches the bottom ends copy-mode (-e).
-    top = "if -F '#{pane_in_mode}' 'send-keys -X top-line'"
+    # scroll-down that reaches the bottom ends copy-mode (-e). Not while a
+    # keyboard selection is up: top-line moves the selection's end to the
+    # cursor, so a wheel tick would collapse it onto the top row. (The root
+    # User0 needs no guard: it only fires outside copy-mode, and the
+    # copy-mode it enters starts with no selection.)
+    top = "if -F '#{&&:#{pane_in_mode},#{!=:#{selection_present},1}}' 'send-keys -X top-line'"
     _tmux_ok("set-option", "-s", "user-keys[0]", "\x1b[1000001~")
     _tmux_ok("set-option", "-s", "user-keys[1]", "\x1b[1000002~")
     _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{mouse_any_flag}",

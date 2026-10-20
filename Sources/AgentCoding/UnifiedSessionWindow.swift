@@ -3569,8 +3569,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
                     assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
-                    answer: { [weak self] id, text in
-                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, text: text) }
+                    answer: { [weak self] id, ask, text in
+                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) }
                     },
                     recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
                     openAssignee: { [weak self] task in

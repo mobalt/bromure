@@ -2060,6 +2060,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 // Accumulates the enabled reputation sources we couldn't reach
                 // for this package — drives the fail-closed hold below.
                 var verifyGaps: [String] = []
+                // Why each gave no verdict, in the words the prompt shows.
+                var verifyWhy: [String] = []
 
                 // 2. OSV check (free, no key, off by default).
                 if policy.osvEnabled {
@@ -2085,14 +2087,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         // Lookup failed (network error, non-200, 429 rate-limit,
                         // parse error). No verdict — don't silently allow.
                         verifyGaps.append("the OSV vulnerability database")
+                        verifyWhy.append(NSLocalizedString("the OSV vulnerability database didn't answer.",
+                                                           comment: "supply chain: why a package has no verdict"))
                     }
                 }
 
                 // 3. socket.dev check (BYO key).
                 if policy.socketActive {
-                  if let result = await socketClient.check(
+                  let socketLookup = await socketClient.lookup(
                         ecosystem: ecosystem.rawValue, name: pkg, version: version,
-                        apiKey: policy.socketAPIKey) {
+                        apiKey: policy.socketAPIKey)
+                  if case .success(let result) = socketLookup {
                     if policy.socketBlockCompromised, let bad = result.compromised.first {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                             "flagged by socket.dev (\(bad.severity.rawValue)): " +
@@ -2121,10 +2126,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             return
                         }
                     }
-                  } else {
+                  } else if case .failure(let why) = socketLookup {
                     // socket.dev unreachable / non-200 / 429 / auth failure /
-                    // parse error → no verdict. Don't silently allow.
+                    // parse error / not analysed → no verdict. Don't silently allow.
                     verifyGaps.append("socket.dev")
+                    verifyWhy.append(why.reason.explanation)
                   }
                 }
 
@@ -2138,13 +2144,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 //     whole dependency graph.
                 if !verifyGaps.isEmpty {
                     let gaps = verifyGaps.joined(separator: " and ")
-                    let allowed = await supplyChainBroker.consent(
-                        profileID: profileID,
-                        scope: "verify-unavailable:\(ecosystem.rawValue):\(pkg):\(version)",
-                        scopeDisplayName: NSLocalizedString("an unverified package", comment: ""),
-                        detail: String(format: NSLocalizedString(
-                            "Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?",
-                            comment: ""), gaps, ecosystem.rawValue, pkg, version))
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] unverified: \(ecosystem.rawValue) \(pkg)@\(version) — \(verifyWhy.joined(separator: " "))")
+                    let allowed = await supplyChainBroker.consentUnverified(
+                        profileID: profileID, ecosystem: ecosystem.rawValue, name: pkg, version: version,
+                        why: verifyWhy.joined(separator: " "))
                     if !allowed {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) blocked — " +
                             "reputation lookup unavailable (\(gaps)); user denied the unverified install"

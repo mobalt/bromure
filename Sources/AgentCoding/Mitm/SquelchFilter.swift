@@ -116,8 +116,9 @@ enum Squelch {
         let first = words(of: stages.first ?? work)
         if let w = first.first, verbatimCommands.contains(w) { return .verbatim }
         if stages.count > 1, let last = words(of: stages.last!).first, shapingCommands.contains(last) {
-            // `cmd | grep x`, `cmd | tail -20`: what's left was chosen.
-            return .other
+            // `cmd | grep x`, `cmd | tail -20`: what's left was chosen — and
+            // may be what the model copies from (`git diff | head`).
+            return .verbatim
         }
         return family(words: first)
     }
@@ -128,6 +129,12 @@ enum Squelch {
         let a2 = w.count > 2 ? w[2] : ""
         let rest = Set(w.dropFirst())
         func isTestScript(_ s: String) -> Bool { s == "test" || s.hasPrefix("test:") || s.hasPrefix("test-") }
+        // An uninstall's output is its result — what went — not install
+        // chatter (pip's "Uninstalling x" / "Successfully uninstalled x").
+        let removals: Set<String> = ["uninstall", "remove", "rm", "purge", "autoremove", "erase", "un", "del"]
+        /// The first word after index `i` that isn't a flag (`apt-get -y
+        /// remove`, `python -m pip -q uninstall`).
+        func verb(after i: Int) -> String { w.dropFirst(i + 1).first { !$0.hasPrefix("-") } ?? "" }
         switch cmd {
         case "pytest", "py.test", "jest", "vitest", "mocha", "rspec", "phpunit", "tox", "nox",
              "ctest", "karma", "ava", "tap", "nextest", "bats", "behave", "playwright", "cypress":
@@ -160,7 +167,8 @@ enum Squelch {
             if cmd == "yarn" && a1.isEmpty { return .install }
             switch a1 {
             case "test", "t": return .tests
-            case "install", "i", "ci", "add", "update", "upgrade", "up", "remove", "rm", "uninstall": return .install
+            case "install", "i", "ci", "add", "update", "upgrade", "up": return .install
+            case _ where removals.contains(a1): return .other
             case "run", "run-script":
                 if isTestScript(a2) { return .tests }
                 return a2 == "build" || a2.hasPrefix("build:") ? .build : .other
@@ -170,9 +178,10 @@ enum Squelch {
         case "npx", "bunx", "pnpx":
             return family(words: Array(w.dropFirst()))
         case "pip", "pip3", "pipx":
-            return a1 == "install" || a1 == "uninstall" || a1 == "download" ? .install : .other
+            return a1 == "install" || a1 == "download" ? .install : .other
         case "uv":
             if a1 == "run" { return family(words: Array(w.dropFirst(2))) }
+            if (a1 == "pip" || a1 == "tool") && removals.contains(verb(after: 1)) { return .other }
             return a1 == "pip" || ["sync", "add", "lock", "install", "venv", "tool"].contains(a1) ? .install : .other
         case "poetry", "pdm", "hatch", "rye", "pipenv":
             if a1 == "run" { return family(words: Array(w.dropFirst(2))) }
@@ -180,16 +189,17 @@ enum Squelch {
         case "python", "python3":
             if a1 == "-m" {
                 if a2 == "pytest" || a2 == "unittest" || a2 == "nose2" || a2 == "tox" { return .tests }
-                if a2 == "pip" { return .install }
+                if a2 == "pip" { return removals.contains(verb(after: 2)) ? .other : .install }
                 if a2 == "build" { return .build }
             }
             return .other
         case "apt", "apt-get", "aptitude", "dnf", "yum", "apk", "pacman", "zypper", "brew", "port",
              "gem", "conda", "mamba", "micromamba", "composer", "pod", "dotnet-restore":
+            if removals.contains(verb(after: 0)) || cmd == "pacman" && a1.hasPrefix("-R") { return .other }
             if cmd == "brew" && ["list", "info", "search", "doctor", "config", "leaves", "deps"].contains(a1) { return .other }
             if cmd == "gem" && a1 != "install" && a1 != "update" { return .other }
             if cmd == "apt" || cmd == "apt-get" {
-                return ["install", "update", "upgrade", "dist-upgrade", "full-upgrade", "remove", "purge", "autoremove"]
+                return ["install", "update", "upgrade", "dist-upgrade", "full-upgrade"]
                     .contains(a1) || a1.hasPrefix("-") ? .install : .other
             }
             return .install
@@ -231,12 +241,24 @@ enum Squelch {
         case "journalctl", "dmesg", "log":
             return cmd == "log" && a1 != "show" && a1 != "stream" ? .other : .logs
         case "git":
-            switch a1 {
-            case "diff", "show", "blame", "cat-file", "format-patch", "apply", "log", "reflog", "ls-files", "ls-tree", "rev-parse":
+            switch gitSubcommand(w) {
+            case "diff", "show", "blame", "cat-file", "format-patch", "apply", "log", "reflog", "ls-files", "ls-tree",
+                 "rev-parse", "range-diff", "annotate", "whatchanged", "shortlog", "stash", "notes":
                 return .verbatim
             case "grep": return .search
             default: return .git
             }
+        case "hg", "svn", "jj", "fossil":
+            // Other VCSs: diffs and file contents, as git's.
+            let sub = positionals(w, valued: ["-R", "--repository", "--cwd", "--config", "--at-op", "--at-operation",
+                                              "--color", "--pager", "--encoding", "--encodingmode", "--username", "--password",
+                                              "--config-dir", "--config-option"]).first
+            return ["diff", "log", "show", "cat", "annotate", "blame", "export", "file"].contains(sub ?? "") ? .verbatim : .other
+        case "gh", "glab":
+            // `gh pr diff`, `gh api …`: the content itself.
+            let p = positionals(w, valued: ["-R", "--repo", "--hostname"])
+            let p0 = p.first ?? "", p1 = p.count > 1 ? p[1] : ""
+            return p0 == "api" || p1 == "diff" || (p0 == "gist" && p1 == "view") ? .verbatim : .other
         case "grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "find", "fd":
             return cmd == "find" || cmd == "fd" ? .other : .search
         case "terraform", "tofu", "pulumi", "helm", "ansible-playbook":
@@ -244,6 +266,28 @@ enum Squelch {
         default:
             return .other
         }
+    }
+
+    /// git's subcommand, past its global options (`git --no-pager diff`,
+    /// `git -C repo log`, `git -c color.ui=never show`).
+    static func gitSubcommand(_ w: [String]) -> String {
+        positionals(w, valued: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                                "--super-prefix", "--attr-source"]).first ?? ""
+    }
+
+    /// A command's words after its name that aren't options: `valued`
+    /// options take the next word (`-R repo`); `--opt=value` and the rest
+    /// are flags.
+    static func positionals(_ w: [String], valued: Set<String>) -> [String] {
+        var out: [String] = []
+        var i = 1
+        while i < w.count {
+            let a = w[i]
+            if valued.contains(a) { i += 2; continue }
+            if !a.hasPrefix("-") { out.append(a) }
+            i += 1
+        }
+        return out
     }
 
     /// The family an output reads as when the command isn't known — for the
@@ -581,7 +625,7 @@ extension Squelch {
 
         static let installNoise = re(#"""
         (?x)
-          ^\s*(Collecting|Downloading|Using\scached|Obtaining|Requirement\salready\ssatisfied|Processing|Building\swheels?|Created\swheel|Stored\sin\sdirectory|Preparing\smetadata|Installing\sbuild\sdependencies|Getting\srequirements|Attempting\suninstall|Found\sexisting\sinstallation|Uninstalling|Successfully\suninstalled|Downloaded|Resolved|Prepared|Audited|Using\sPython|Installing\scollected\spackages)\b
+          ^\s*(Collecting|Downloading|Using\scached|Obtaining|Requirement\salready\ssatisfied|Processing|Building\swheels?|Created\swheel|Stored\sin\sdirectory|Preparing\smetadata|Installing\sbuild\sdependencies|Getting\srequirements|Attempting\suninstall|Found\sexisting\sinstallation|Uninstalling|Downloaded|Resolved|Prepared|Audited|Using\sPython|Installing\scollected\spackages)\b
         | ^\s*[━─]+\s                                              # pip progress
         | ^(Get|Hit|Ign):\d+\s                                      # apt
         | ^(Reading\spackage\slists|Building\sdependency\stree|Reading\sstate\sinformation|Calculating\supgrade)

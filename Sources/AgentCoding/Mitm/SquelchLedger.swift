@@ -45,10 +45,13 @@ final class SquelchLedger: @unchecked Sendable {
         var families: [String: SquelchTally] = [:]
         /// By day ("2026-10-19", the Mac's calendar), the last `keepDays`.
         var days: [String: SquelchTally] = [:]
-        /// Outputs already counted (a digest of conversation and call id),
-        /// oldest first, the last `keepCounted`: a long session's early
-        /// outputs are still resent every turn.
-        var counted: [String] = []
+        /// Outputs already counted, with the day a request last carried
+        /// each (`SquelchLedger.Seen`, packed). Nothing is forgotten while
+        /// it is still resent — only what no request carried for `keepDays`.
+        var seen: Data?
+        /// Before `seen`: the most recent counted digests, oldest first. Read
+        /// once, into `seen`.
+        var counted: [String]?
         /// What cloud reports already covered, by day.
         var reportedDays: [String: SquelchTally] = [:]
     }
@@ -58,15 +61,15 @@ final class SquelchLedger: @unchecked Sendable {
     }
 
     static let keepDays = 90
-    static let keepCounted = 50_000
     static let keepCommands = 60
     static let keepConversations = 400
 
     private let file: URL?
     private let lock = NSLock()
     private var state = Snapshot()
-    /// `Workspace.counted` as sets, built on first use.
-    private var countedSets: [String: Set<String>] = [:]
+    /// `Workspace.seen`, unpacked on first use; packed back on save.
+    private var seenMaps: [String: Seen] = [:]
+    private var seenDirty: Set<String> = []
     private var dirty = false
     private var saveScheduled = false
     /// Called (off the main thread) when a workspace's numbers change.
@@ -75,7 +78,8 @@ final class SquelchLedger: @unchecked Sendable {
     init(file: URL?) {
         self.file = file
         if let file, let d = try? Data(contentsOf: file),
-           let s = try? JSONDecoder().decode(Snapshot.self, from: d) {
+           var s = try? JSONDecoder().decode(Snapshot.self, from: d) {
+            for (id, w) in s.workspaces { s.workspaces[id]?.counted = w.counted.map(Self.migratedCounted) }
             state = s
         }
     }
@@ -89,12 +93,17 @@ final class SquelchLedger: @unchecked Sendable {
         lock.lock()
         let wid = profileID.uuidString
         var w = state.workspaces[wid] ?? Workspace()
-        var counted = countedSets[wid] ?? Set(w.counted)
+        let today = Seen.dayNumber(now)
+        var seen = seenMaps[wid] ?? Seen(w, today: today)
         var changed = false
+        var touched = false
         for (callID, raw) in o.seen.sorted(by: { $0.key < $1.key }) {
             let key = Self.countedKey(conversation: conversation, callID: callID)
-            guard counted.insert(key).inserted else { continue }
-            w.counted.append(key)
+            switch seen.note(key, today: today) {
+            case .counted: continue
+            case .touched: touched = true; continue
+            case .new: touched = true
+            }
             var t = SquelchTally(outputs: 1, trimmed: 0, rawBytes: raw, keptBytes: raw)
             var family = Squelch.Family.other.rawValue
             var command = "other"
@@ -115,13 +124,15 @@ final class SquelchLedger: @unchecked Sendable {
             w.days[day] = (w.days[day] ?? SquelchTally()) + t
             changed = true
         }
-        guard changed else { countedSets[wid] = counted; lock.unlock(); return }
-        if w.counted.count > Self.keepCounted {
-            let drop = w.counted.count - Self.keepCounted
-            for k in w.counted.prefix(drop) { counted.remove(k) }
-            w.counted.removeFirst(drop)
+        if touched {
+            seen.forget(before: today - Int32(Self.keepDays))
+            seenDirty.insert(wid)
         }
-        countedSets[wid] = counted
+        seenMaps[wid] = seen
+        guard changed else {
+            if touched { scheduleSaveLocked() }
+            lock.unlock(); return
+        }
         Self.prune(&w)
         state.workspaces[wid] = w
         scheduleSaveLocked()
@@ -167,7 +178,8 @@ final class SquelchLedger: @unchecked Sendable {
     func reset(_ id: UUID) {
         lock.lock()
         state.workspaces[id.uuidString] = nil
-        countedSets[id.uuidString] = nil
+        seenMaps[id.uuidString] = nil
+        seenDirty.remove(id.uuidString)
         scheduleSaveLocked()
         lock.unlock()
         onChange?(id)
@@ -250,9 +262,78 @@ final class SquelchLedger: @unchecked Sendable {
         return String(first.prefix(40))
     }
 
-    static func countedKey(conversation: String?, callID: String) -> String {
+    /// The first 8 bytes of SHA256("conversation|callID") — the first 16
+    /// hex digits of the digests `Workspace.counted` held.
+    static func countedKey(conversation: String?, callID: String) -> UInt64 {
         let digest = SHA256.hash(data: Data(((conversation ?? "") + "|" + callID).utf8))
-        return digest.prefix(9).map { String(format: "%02x", $0) }.joined()
+        return digest.prefix(8).reduce(0) { $0 << 8 | UInt64($1) }
+    }
+
+    /// The outputs a workspace counted: digest → the day a request last
+    /// carried it. Agents resend the whole conversation every turn, so an
+    /// output stays here as long as its conversation goes on; one no request
+    /// carried for `keepDays` is forgotten (the agents' own transcripts are
+    /// gone by then, and so are the day buckets it was counted in).
+    struct Seen {
+        enum Note { case new, touched, counted }
+        private(set) var last: [UInt64: Int32] = [:]
+
+        static func dayNumber(_ d: Date) -> Int32 { Int32(floor(d.timeIntervalSince1970 / 86_400)) }
+
+        init() {}
+
+        init(_ w: Workspace, today: Int32) {
+            if let packed = w.seen {
+                packed.withUnsafeBytes { raw in
+                    for i in stride(from: 0, to: raw.count - 11, by: 12) {
+                        let key = UInt64(littleEndian: raw.loadUnaligned(fromByteOffset: i, as: UInt64.self))
+                        last[key] = Int32(littleEndian: raw.loadUnaligned(fromByteOffset: i + 8, as: Int32.self))
+                    }
+                }
+            } else {
+                for hex in w.counted ?? [] {
+                    if let key = UInt64(hex.prefix(16), radix: 16) { last[key] = today }
+                }
+            }
+        }
+
+        /// `.new` the first time; `.touched` when an already counted output
+        /// is carried on a new day; `.counted` otherwise.
+        mutating func note(_ key: UInt64, today: Int32) -> Note {
+            guard let day = last.updateValue(today, forKey: key) else { return .new }
+            return day == today ? .counted : .touched
+        }
+
+        mutating func forget(before day: Int32) {
+            guard last.values.contains(where: { $0 < day }) else { return }
+            last = last.filter { $0.value >= day }
+        }
+
+        var packed: Data {
+            var d = Data(capacity: last.count * 12)
+            for (key, day) in last.sorted(by: { $0.key < $1.key }) {
+                withUnsafeBytes(of: key.littleEndian) { d.append(contentsOf: $0) }
+                withUnsafeBytes(of: day.littleEndian) { d.append(contentsOf: $0) }
+            }
+            return d
+        }
+    }
+
+    /// The 9-byte hex digest `Workspace.counted` held (`Seen` reads its
+    /// first 16 hex digits as `countedKey`).
+    private static func countedDigest(_ preimage: String) -> String {
+        SHA256.hash(data: Data(preimage.utf8)).prefix(9).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The first ledgers kept `counted` as the plain "conversation|callID"
+    /// (a call id always follows the bar): digest those, so the outputs they
+    /// name aren't counted again when the next turn resends them.
+    static func migratedCounted(_ keys: [String]) -> [String] {
+        var seen = Set<String>()
+        return keys.compactMap { k in
+            let key = k.contains("|") ? countedDigest(k) : k
+            return seen.insert(key).inserted ? key : nil
+        }
     }
 
     static func dayKey(_ d: Date) -> String {
@@ -294,6 +375,12 @@ final class SquelchLedger: @unchecked Sendable {
         saveScheduled = false
         guard dirty, let file else { lock.unlock(); return }
         dirty = false
+        for wid in seenDirty {
+            guard let seen = seenMaps[wid] else { continue }
+            state.workspaces[wid]?.seen = seen.packed
+            state.workspaces[wid]?.counted = nil
+        }
+        seenDirty = []
         let data = try? JSONEncoder().encode(state)
         lock.unlock()
         guard let data else { return }

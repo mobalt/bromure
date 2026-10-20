@@ -86,4 +86,12 @@ enum AgentDetection {
         guard scan.complete else { return [] }
         return Set(ids.filter { scan.found[$0] == nil && onDisk[$0] == nil })
     }
+
+    /// The agents to offer for install once a scan is back: Claude, when it
+    /// is missing. nil when the scan didn't finish — no verdict, so nothing
+    /// is decided yet and the next complete scan decides.
+    static func preselection(complete: Bool, missing: Set<String>) -> Set<String>? {
+        guard complete else { return nil }
+        return missing.contains("claude") ? ["claude"] : []
+    }
 }

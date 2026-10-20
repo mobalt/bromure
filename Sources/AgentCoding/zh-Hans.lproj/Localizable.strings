@@ -2203,8 +2203,6 @@
 "The planning session failed: %@" = "规划会话失败：%@";
 "No git identity or credentials found." = "未找到 git 身份或凭据。";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure 标记了代理即将发送给模型的内容（来自 %@）。放行，还是阻止此请求？\n\n%@";
-"an unverified package" = "一个未经验证的软件包";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure 无法连接 %1$@ 来审查 %2$@ %3$@@%4$@。安装它意味着接受一个未经你配置的信誉来源核查的软件包。\n\n仍然允许此次安装？";
 "to authenticate with the API server at %@" = "以向 %@ 的 API 服务器认证";
 "Activity only" = "仅活动";
 "AI request details" = "AI 请求详情";
@@ -4232,3 +4230,24 @@
 "%@ of %@ tokens of command output · %d outputs, %d trimmed" = "命令输出 %2$@ 个 token 中的 %1$@ · %3$d 个输出，精简 %4$d 个";
 "Last two weeks" = "最近两周";
 "%@: %@ tokens saved" = "%@：节省 %@ 个 token";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev 没有响应。";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev 拒绝了 API 密钥（HTTP %d）——请在工作区的供应链设置中检查。";
+"socket.dev is rate-limiting this API key." = "socket.dev 正在限制此 API 密钥的请求速率。";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev 尚未完成对此版本的分析。";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev 不认识此版本（它可能刚刚发布）。";
+"socket.dev's reply couldn't be read." = "无法读取 socket.dev 的响应。";
+"socket.dev answered HTTP %d." = "socket.dev 返回了 HTTP %d。";
+"the OSV vulnerability database didn't answer." = "OSV 漏洞数据库没有响应。";
+"Install %@ from workspace “%@” without a reputation check?" = "要在不检查信誉的情况下从工作区“%2$@”安装 %1$@ 吗？";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure 无法核验 %@ 包 %@：%@ 安装它意味着接受一个未经你配置的信誉来源检查的包。";
+"%d more unverified packages are waiting for an answer." = "还有 %d 个未核验的包在等待答复。";
+"Allow all unverified packages for 15 minutes" = "15 分钟内允许所有未核验的包";
+"Don't allow unverified packages for the rest of the session" = "本次会话余下时间不允许未核验的包";
+"Don't allow %@" = "不允许 %@";
+"all unverified packages" = "所有未核验的包";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "你写下这段内容后，代理又提出了新问题。修改你的回答后才能发送。";
+"The agent asked a new question before your answer went. Read it and answer again." = "你的回答发出前，代理又提出了新问题。请阅读后重新回答。";

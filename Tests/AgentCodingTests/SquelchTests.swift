@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 import SwiftUI
 import Testing
 @testable import bromure_ac
@@ -67,12 +68,76 @@ struct SquelchFilterTests {
         #expect(Squelch.family(of: "git push origin main") == .git)
         #expect(Squelch.family(of: "docker compose logs api") == .logs)
         #expect(Squelch.family(of: "rg -n 'func ' Sources") == .search)
-        // A pipeline the agent shaped itself keeps what it chose.
-        #expect(Squelch.family(of: "pytest -v | tail -40") == .other)
+        // A pipeline the agent shaped itself keeps what it chose, untouched.
+        #expect(Squelch.family(of: "pytest -v | tail -40") == .verbatim)
         #expect(Squelch.family(of: "cat a.txt | wc -l") == .verbatim)
         // Separators inside quotes don't split the command.
         #expect(Squelch.family(of: "echo 'a && b' ; pytest") == .tests)
         #expect(Squelch.family(of: "python -c 'import x; print(x)'") == .verbatim)
+    }
+
+    /// Finding (CWE-670): "Squelch deletes pip and uv uninstall results as
+    /// install noise" — an uninstall took the install family, whose noise
+    /// pattern is pip's "Found existing installation / Uninstalling /
+    /// Successfully uninstalled": a bulk uninstall came back as the note alone.
+    @Test("an uninstall's output is its result: what went stays")
+    func uninstallsKeepTheirResult() throws {
+        for cmd in ["pip uninstall -y -r requirements.txt", "pip3 uninstall -y a b", "uv pip uninstall a b",
+                    "python3 -m pip uninstall -y a", "pipx uninstall black", "npm uninstall left-pad", "npm rm x",
+                    "pnpm remove x", "brew uninstall wget", "apt-get remove -y curl", "apt purge curl",
+                    "uv tool uninstall ruff", "apt-get -y remove curl", "python3 -m pip -q uninstall a",
+                    "uv pip -q uninstall a", "brew --cask uninstall x", "dnf -y remove x", "apk del curl",
+                    "pacman -Rns x"] {
+            #expect(Squelch.family(of: cmd) != .install, "\(cmd)")
+        }
+        #expect(Squelch.family(of: "pip install -r requirements.txt") == .install)
+        #expect(Squelch.family(of: "python -m pip install x") == .install)
+        #expect(Squelch.family(of: "uv pip install x") == .install)
+        #expect(Squelch.family(of: "apt-get -y install curl") == .install)
+        #expect(Squelch.family(of: "pacman -Syu") == .install)
+
+        var out = ""
+        for i in 0..<20 {
+            out += "Found existing installation: package-number-\(i) 1.2.\(i)\n"
+            out += "Uninstalling package-number-\(i)-1.2.\(i):\n"
+            out += "  Successfully uninstalled package-number-\(i)-1.2.\(i)\n"
+        }
+        for cmd in ["pip uninstall -y -r requirements.txt", "uv pip uninstall -r requirements.txt"] {
+            let kept = Squelch.trim(command: cmd, output: out)?.text ?? out
+            for i in 0..<20 { #expect(kept.contains("Successfully uninstalled package-number-\(i)-1.2.\(i)"), "\(cmd)") }
+        }
+        // An upgrade's "Successfully uninstalled" is a result line too.
+        var upgrade = ""
+        for i in 0..<30 { upgrade += "Collecting dep\(i)>=1.0\n  Downloading dep\(i)-2.0-py3-none-any.whl (120 kB)\n" }
+        upgrade += "  Attempting uninstall: dep1\n    Found existing installation: dep1 1.0\n    Uninstalling dep1-1.0:\n"
+        upgrade += "      Successfully uninstalled dep1-1.0\nSuccessfully installed dep0-2.0 dep1-2.0\n"
+        let r = try #require(Squelch.trim(command: "pip install -U -r requirements.txt", output: upgrade))
+        #expect(r.text.contains("Successfully uninstalled dep1-1.0") && r.text.contains("Successfully installed"))
+        #expect(!r.text.contains("Uninstalling dep1-1.0"))
+    }
+
+    /// Finding (CWE-670): "Squelch rewrites git diffs and shaped pipelines it
+    /// documents as untouched" — `git --no-pager diff`, `git -C repo diff`,
+    /// `git diff | head` were trimmed, so a diff adding a block of identical
+    /// lines reached the model collapsed, and the model could write that back.
+    @Test("a diff stays whole whatever git options or pipe lead to it")
+    func diffsStayWhole() {
+        for cmd in ["git --no-pager diff", "git -C repo diff --stat", "git -c color.ui=never show HEAD",
+                    "git --git-dir .git --work-tree . log -p", "GIT_PAGER=cat git diff", "git -P diff",
+                    "git diff | head -200", "git log -p | grep -A3 foo", "cd repo && git --no-pager diff HEAD~1",
+                    "gh pr diff 12", "gh api repos/o/r/contents/x", "hg diff", "jj diff", "svn log",
+                    "gh -R owner/repo pr diff 12", "gh --repo owner/repo pr diff", "svn --non-interactive diff",
+                    "jj -R repo diff", "hg -R repo log -p", "git --attr-source HEAD diff", "hg --pager never diff"] {
+            #expect(Squelch.family(of: cmd) == .verbatim, "\(cmd)")
+        }
+        #expect(Squelch.family(of: "git -C repo push origin main") == .git)
+        #expect(Squelch.family(of: "git -c core.x=1 grep -n foo") == .search)
+        // The text that was collapsed: a diff adding the same line 40 times.
+        var diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,0 +1,40 @@\n"
+        for _ in 0..<40 { diff += "+    assert_eq!(x.load(Ordering::SeqCst), 0);\n" }
+        for cmd in ["git --no-pager diff", "git diff | head -100"] {
+            #expect(Squelch.trim(command: cmd, output: diff) == nil, "\(cmd) was trimmed")
+        }
     }
 
     @Test("installs: download chatter and deprecation notices go, errors stay")
@@ -322,6 +387,29 @@ struct SquelchRewriterTests {
         #expect(c.trims.isEmpty && c.body == codeMode)
     }
 
+    /// Finding (CWE-670): "Codex code-mode exec output is trimmed without
+    /// knowing the command" — with the `exec` call in the same request, its
+    /// script parsed to no command, and the output went through the text
+    /// sniff: a script that cats a source file or prints a diff lost its
+    /// runs of identical lines.
+    @Test("a code-mode exec script's output is untouched, its call in the same request")
+    func codeModeSameRequest() throws {
+        let source = "let table = [\n" + String(repeating: "    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n", count: 40)
+            + "]\n\n\n\n\n\n\n\nfn main() {}\n"
+        for script in [#"const r = await tools.exec_command({cmd: "cat src/table.rs"}); text(r.output);"#,
+                       #"text((await tools.exec_command({cmd: "git --no-pager diff"})).output)"#] {
+            let body = json(["model": "gpt-5-codex", "input": [
+                ["type": "custom_tool_call", "call_id": "call_js", "name": "exec", "input": script],
+                ["type": "custom_tool_call_output", "call_id": "call_js", "output": source],
+            ]])
+            let o = SquelchRewriter.rewrite(body, priorCall: { _ in nil })
+            #expect(o.trims.isEmpty && o.body == body, "\(script)")
+        }
+        // The same tool name with a real command line is a shell call.
+        #expect(SquelchRewriter.command(fromInput: #"{"cmd":"pytest -q"}"#) == "pytest -q")
+        #expect(SquelchRewriter.command(fromInput: #"const r = await tools.exec_command({cmd: "pytest -q"});"#) == nil)
+    }
+
     @Test("string paths are exact through nesting and escapes")
     func paths() throws {
         let b = Array(#"{"a":[1,{"k":"v\"x","n":[true,"s"]}],"b":"t","c":{}}"#.utf8)
@@ -360,6 +448,89 @@ struct SquelchLedgerTests {
         o2.seen = ["t3": 100]
         ledger.record(o2, profileID: ws, conversation: nil)
         #expect(ledger.pendingCloudReport().rows.first?.outputs == 1)
+    }
+
+    @Test("a ledger from before the digest keys doesn't count its outputs again")
+    func plainKeysMigrate() throws {
+        // Finding: "Squelch savings are counted twice after the ledger key
+        // change" — the first ledgers saved "conversation|callID" itself.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("squelch-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("ledger.json")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ws = UUID()
+        var old = SquelchLedger.Workspace()
+        old.total = SquelchTally(outputs: 3, trimmed: 0, rawBytes: 30, keptBytes: 30)
+        old.counted = ["019a0000-aaaa-7bbb-8ccc-dddddddddddd|c1", "|c2",
+                       SHA256.hash(data: Data("019a0000-aaaa-7bbb-8ccc-dddddddddddd|c3".utf8)).prefix(9).map { String(format: "%02x", $0) }.joined()]
+        try JSONEncoder().encode(SquelchLedger.Snapshot(workspaces: [ws.uuidString: old])).write(to: file)
+
+        let ledger = SquelchLedger(file: file)
+        var o = SquelchRewriter.Outcome(body: Data())
+        o.seen = ["c1": 10, "c3": 10]
+        ledger.record(o, profileID: ws, conversation: "019a0000-aaaa-7bbb-8ccc-dddddddddddd")
+        o.seen = ["c2": 10]
+        ledger.record(o, profileID: ws, conversation: nil)
+        #expect(ledger.workspace(ws)?.total.outputs == 3)
+        #expect(ledger.workspace(ws)?.counted?.count == 3)
+    }
+
+    @Test("a conversation past any count of outputs still counts each once")
+    func longConversation() throws {
+        // Finding: "Squelch ledger counts the same output again after 4000
+        // entries" — the oldest digests were dropped while their outputs were
+        // still resent every turn, so the next turn counted them again.
+        let ledger = SquelchLedger(file: nil)
+        let ws = UUID()
+        var o = SquelchRewriter.Outcome(body: Data())
+        o.seen = Dictionary(uniqueKeysWithValues: (0..<60_000).map { ("call\($0)", 10) })
+        ledger.record(o, profileID: ws, conversation: "long")
+        o.seen["call-new"] = 10
+        ledger.record(o, profileID: ws, conversation: "long")
+        ledger.record(o, profileID: ws, conversation: "long")
+        #expect(ledger.workspace(ws)?.total.outputs == 60_001)
+    }
+
+    @Test("what was counted survives a restart, from the old format too, and is forgotten only once no request carried it for 90 days")
+    func countedPersistsAndAges() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("squelch-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("ledger.json")
+        let ws = UUID()
+        let day0 = Date(timeIntervalSince1970: 1_790_000_000)
+        func outcome(_ ids: String...) -> SquelchRewriter.Outcome {
+            var o = SquelchRewriter.Outcome(body: Data())
+            o.seen = Dictionary(uniqueKeysWithValues: ids.map { ($0, 10) })
+            return o
+        }
+        func outputs() -> Int { SquelchLedger(file: file).workspace(ws)?.total.outputs ?? -1 }
+
+        let a = SquelchLedger(file: file)
+        a.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0)
+        a.flush()
+        let b = SquelchLedger(file: file)
+        b.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0)
+        // t1 resent on day 80 and day 160: never 90 days apart, still once.
+        b.record(outcome("t1"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(80 * 86_400))
+        b.record(outcome("t1"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(160 * 86_400))
+        b.flush()
+        #expect(outputs() == 2)
+        // t2 wasn't carried since day 0: forgotten, a resend counts anew.
+        let c = SquelchLedger(file: file)
+        c.record(outcome("t1", "t2"), profileID: ws, conversation: "c", now: day0.addingTimeInterval(161 * 86_400))
+        c.flush()
+        #expect(outputs() == 3)
+
+        // A ledger.json written before: `counted` hex digests (9 bytes).
+        let legacy = UUID()
+        let hex = SHA256.hash(data: Data("c|t9".utf8)).prefix(9).map { String(format: "%02x", $0) }.joined()
+        var old = SquelchLedger.Workspace()
+        old.total = SquelchTally(outputs: 1, trimmed: 0, rawBytes: 10, keptBytes: 10)
+        old.counted = [hex]
+        try JSONEncoder().encode(SquelchLedger.Snapshot(workspaces: [legacy.uuidString: old])).write(to: file)
+        let d = SquelchLedger(file: file)
+        d.record(outcome("t9"), profileID: legacy, conversation: "c")
+        #expect(d.workspace(legacy)?.total.outputs == 1)
     }
 
     @Test("command labels name the work")

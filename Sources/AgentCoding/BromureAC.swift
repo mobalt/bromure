@@ -5964,7 +5964,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                 case "answer":
                     guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
-                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, text: text) }
+                    let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text) }
                 case "recall":
                     self.taskDispatcher.recall(id)
                 case "plan", "plan-start":   // plan-start: legacy alias
