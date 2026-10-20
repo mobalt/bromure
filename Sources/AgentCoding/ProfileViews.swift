@@ -4373,40 +4373,15 @@ struct ProfileEditorView: View {
                            info: "By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.") {
                     Toggle("Don't alert on credential exfiltration", isOn: $draft.disableExfiltrationAlerts)
                 }
-            }
-            .padding(.bottom, 8)
-        }
-        .task {
-            guard let controls = consentGrants else { return }
-            while !Task.isCancelled {
-                liveGrants = await controls.status()
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
-    }
-
-    /// The Firewall pane: the workspace's outbound-connection rules (pf-style
-    /// egress policy) and the interception switches that decide what the proxy
-    /// gets to see. Split out of Guardrails, which is about credentials.
-    @ViewBuilder
-    private var firewallSection: some View {
-        guardrailsScrollWrapper {
-            VStack(alignment: .leading, spacing: 12) {
-                // The pf-rules table editor needs the real EgressPolicy
-                // model (SandboxEngine, macOS-only). The fat client
-                // mirrors profiles but neither edits nor enforces egress
-                // rules, so the pane simply omits the table there.
-                #if os(macOS)
-                FirewallEditor(draft: $draft, onEdited: onFirewallEdited)
-                #else
-                Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                #endif
 
                 Divider().padding(.vertical, 4)
                 Text("Protections").font(.headline)
                 VStack(alignment: .leading, spacing: 10) {
+                    settingRow(caption: "The agent asks you instead of retrying or finding a way round.",
+                               info: "When the firewall or the sandbox blocks something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or “permission denied” and may keep trying. Claude Code reads it right after the command that hit the block; other agents get it when their turn ends. Until you choose, it's on while the workspace uses an OpenShell policy.") {
+                        Toggle("Tell the agent when policy blocks it",
+                               isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }))
+                    }
                     settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
                                info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {
                         Picker("Agent watchdog", selection: $draft.watchdogMode) {
@@ -4443,6 +4418,37 @@ struct ProfileEditorView: View {
                                isOn: $draft.guardrails.allowInsecureBypass)
                     }
                 }
+            }
+            .padding(.bottom, 8)
+        }
+        .task {
+            guard let controls = consentGrants else { return }
+            while !Task.isCancelled {
+                liveGrants = await controls.status()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    /// The Firewall pane: the workspace's outbound-connection rules (pf-style
+    /// egress policy) and the interception switches that decide what the proxy
+    /// gets to see. Split out of Guardrails, which is about credentials.
+    @ViewBuilder
+    private var firewallSection: some View {
+        guardrailsScrollWrapper {
+            VStack(alignment: .leading, spacing: 12) {
+                // The pf-rules table editor needs the real EgressPolicy
+                // model (SandboxEngine, macOS-only). The fat client
+                // mirrors profiles but neither edits nor enforces egress
+                // rules, so the pane simply omits the table there.
+                #if os(macOS)
+                FirewallEditor(draft: $draft, onEdited: onFirewallEdited)
+                #else
+                Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                #endif
+
             }
             .padding(.bottom, 8)
         }

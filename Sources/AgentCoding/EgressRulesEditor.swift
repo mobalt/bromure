@@ -15,6 +15,8 @@ struct EgressRulesEditor: View {
     /// The table changed (a rule added, edited, switched, timed, moved):
     /// the host puts it in force now. nil: the rules apply on Save.
     var onEdited: ((String) -> Void)? = nil
+    /// False inside a card that already names the rules.
+    var showsHeader = true
 
     @State private var rows: [EgressPolicy.EditRow] = []
     @State private var defaultAllow = true
@@ -68,10 +70,10 @@ struct EgressRulesEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 4) {
+            if showsHeader { HStack(spacing: 4) {
                 Text("Outbound connections").font(.headline)
                 InfoTip("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Timeline, and enforcement is host-side so a compromised agent can't bypass it.")
-            }
+            } }
             HStack(spacing: 4) {
                 Text(onEdited != nil
                      ? LocalizedStringKey("Rules apply as you edit them; Cancel puts them back.")
