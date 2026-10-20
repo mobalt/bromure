@@ -2372,11 +2372,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// terminal) — not started.
     private func makeMachineChatModel(_ machine: AttachedMachine, window w: Int,
                                       session s: AgentSession) -> BeautifiedSessionModel {
-        let provider = MachineTranscriptProvider(machine: machine, window: w,
+        let provider = MachineTranscriptProvider(machine: machine, window: w, sessionID: s.id,
                                                  accent: Color(hex: machine.accentHex))
         let m = BeautifiedSessionModel(provider: provider)
         let mid = machine.id
-        m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.draftKey = "machine:\(mid.uuidString):\(w):\(s.id.uuidString)"
         m.cachedTranscript = SessionTranscriptCache.loadDetached
         m.delegationStore = acDelegate?.delegationStore
         m.sessionStore = acDelegate?.homeSessionStore
