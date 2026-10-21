@@ -120,6 +120,45 @@ struct NetworkLineageTests {
         #expect(comms(try #require(sink2.flows.first)) == ["wget"])
     }
 
+    /// Finding (CWE-670): "Lineage misses the exec record when start_ns is
+    /// not the group leader's". An older module reports the probed thread's
+    /// own start time: a worker thread's flow, or a child it forked, named a
+    /// key no exec was recorded under, and the walk lost argv, the tool call,
+    /// and the parent.
+    @Test("A worker thread's flow, and a child it forked, still find the process's exec — not a reused pid's")
+    func workerThreads() async throws {
+        let sink = LineageSink(), l = store(sink), pid = UUID()
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 100, "comm": "claude", "path": "/usr/bin/node",
+                                    "argv": "node /usr/bin/claude", "chain": [["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        l.noteExec(profileID: pid, ["pid": 700, "ppid": 412, "start_ns": 200, "comm": "agent-go", "path": "/usr/bin/agent-go",
+                                    "argv": "agent-go serve", "chain": [["pid": 412, "start_ns": 100, "comm": "claude"]]])
+        // A flow from one of agent-go's threads (its own start time).
+        l.noteFlow(profileID: pid, ["pid": 700, "start_ns": 260, "proto": "tcp", "dst": "1.2.3.4", "dport": 443, "comm": "agent-go",
+                                    "chain": [["pid": 412, "start_ns": 100, "comm": "claude"]]])
+        await waitFor(sink, 1)
+        let f = try #require(sink.flows.first)
+        #expect(comms(f) == ["claude", "agent-go"])
+        guard case .array(let ps)? = f["processes"], case .object(let leaf)? = ps.last else {
+            Issue.record("no processes"); return
+        }
+        #expect(NetworkLineageTests.S(leaf["argv"]) == "agent-go serve")
+        // A child forked by that thread: its exec names the thread as parent.
+        l.noteExec(profileID: pid, ["pid": 701, "ppid": 700, "start_ns": 300, "comm": "git", "path": "/usr/bin/git",
+                                    "argv": "git fetch", "chain": [["pid": 700, "start_ns": 270, "comm": "agent-go"]]])
+        l.noteFlow(profileID: pid, ["pid": 701, "start_ns": 300, "proto": "tcp", "dst": "5.6.7.8", "dport": 22, "comm": "git",
+                                    "chain": [["pid": 700, "start_ns": 270, "comm": "agent-go"]]])
+        await waitFor(sink, 2)
+        let g = try #require(sink.flows.first { NetworkLineageTests.S($0["dst"]) == "5.6.7.8" })
+        #expect(comms(g) == ["claude", "agent-go", "git"])
+        // A thread time EARLIER than the latest exec with that pid isn't it:
+        // that pid was reused after this process started.
+        l.noteExec(profileID: pid, ["pid": 800, "ppid": 1, "start_ns": 900, "comm": "cron", "path": "/usr/sbin/cron"])
+        l.noteFlow(profileID: pid, ["pid": 800, "start_ns": 850, "proto": "tcp", "dst": "9.9.9.9", "dport": 80, "comm": "old"])
+        await waitFor(sink, 3)
+        let h = try #require(sink.flows.first { NetworkLineageTests.S($0["dst"]) == "9.9.9.9" })
+        #expect(!comms(h).contains("cron"))
+    }
+
     @Test("Repeats of one flow from one program fold; the chain comes from the frame when exec was never seen")
     func foldAndFrameChain() async throws {
         let sink = LineageSink(), l = store(sink), pid = UUID()

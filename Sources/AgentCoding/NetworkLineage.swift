@@ -235,7 +235,7 @@ public final class NetworkLineage: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let vm = vms[profileID] ?? VM()
         var chain: [Proc] = []
-        var cursor: ProcKey? = vm.procs[leaf] != nil ? leaf : (leaf.startNs == 0 ? vm.byPid[leaf.pid] : nil)
+        var cursor: ProcKey? = Self.resolve(leaf, in: vm)
         var seen = Set<ProcKey>()
         while let k = cursor, let p = vm.procs[k], seen.insert(k).inserted, chain.count < 16 {
             chain.append(p)
@@ -285,11 +285,24 @@ public final class NetworkLineage: @unchecked Sendable {
         return (processes, link)
     }
 
+    /// The exec record for `k`: the exact identity, else — a module that
+    /// reports a thread's own start time, not its group leader's (Finding
+    /// CWE-670, "Lineage misses the exec record when start_ns is not the group
+    /// leader's") — the latest process with that pid, but only one that
+    /// started no later than `k` (a thread of it; a pid reused since started
+    /// after). No start time at all: the latest with that pid, as before.
+    private static func resolve(_ k: ProcKey, in vm: VM) -> ProcKey? {
+        if vm.procs[k] != nil { return k }
+        guard let b = vm.byPid[k.pid] else { return nil }
+        if k.startNs == 0 { return b }
+        return b.startNs != 0 && b.startNs <= k.startNs ? b : nil
+    }
+
     /// The process that started `p`: the exact identity its exec recorded,
     /// else (an older sentry) the latest process with its ppid, but only one
     /// that started before `p` — a pid reused afterwards isn't its parent.
     private static func parentKey(of p: Proc, in vm: VM) -> ProcKey? {
-        if let parent = p.parent { return parent }
+        if let parent = p.parent { return resolve(parent, in: vm) ?? parent }
         guard p.ppid != 0, let k = vm.byPid[p.ppid] else { return nil }
         if k.startNs != 0, p.key.startNs != 0, k.startNs > p.key.startNs { return nil }
         return k

@@ -114,6 +114,23 @@ struct SentryModuleStoreTests {
         #expect(SentryModuleStore.sourceHash(of: dir) == "ce5871986055601b2c373551dd5915bfe18b6be62419036566a2cb194ad87a9a")
     }
 
+    /// The module CI builds (scripts/openshell-guest/sentry, Jenkinsfile.sentry's
+    /// SENTRY_DIR) and the copy the app ships and hashes (vm-setup/sentry-dist)
+    /// must be the same bytes: otherwise the app asks for a source hash nothing
+    /// is published under, and a fix to one never reaches a guest.
+    @Test("The bundled sentry source is the one CI builds")
+    func bundledSourceMatchesCI() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ci = root.appendingPathComponent("scripts/openshell-guest/sentry")
+        let bundled = root.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/sentry-dist/src")
+        for f in ["Makefile", "bromure_sentry.c", "bromure_sentry.h"] {
+            #expect(try Data(contentsOf: ci.appendingPathComponent(f)) == Data(contentsOf: bundled.appendingPathComponent(f)),
+                    "\(f) differs")
+        }
+        #expect(SentryModuleStore.sourceHash(of: ci) == SentryModuleStore.sourceHash(of: bundled))
+    }
+
     @Test("Download, verify, cache, stage; a second ask doesn't hit the network")
     func downloadAndStage() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
