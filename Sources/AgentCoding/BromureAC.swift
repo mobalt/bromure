@@ -12969,6 +12969,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// automation run's slot is checked against. [] when the workspace isn't
     /// running (nothing runs there), nil when its tabs can't be told (no
     /// window has its entry).
+    /// Every worktree branch with an open tab in a running workspace: the
+    /// window's tabs and the session roster's (a detached session has no
+    /// window entry). [] when it isn't running.
+    func openWorktreeBranches(profileID: UUID) -> [String] {
+        guard let s = runningSessions[profileID] else { return [] }
+        return s.tabs.compactMap(\.worktreeBranch) + (liveWorktreeBranches(profileID: profileID) ?? [])
+    }
+
     func liveWorktreeBranches(profileID: UUID) -> [String]? {
         guard runningSessions[profileID] != nil else { return [] }
         guard let entry = unifiedWindow?.listModel.entries.first(where: { $0.id == profileID }) else { return nil }
@@ -15390,7 +15398,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 SupplyChainLog.shared.record("[worktree] \(ScheduledAutomationEngine.guestReported(message))")
                 if let slug {
                     // A claim from the guest: a run whose tab is up isn't failed.
-                    let live = self.liveWorktreeBranches(profileID: pid)
+                    let live = self.openWorktreeBranches(profileID: pid)
                     self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
                     self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
                 }
@@ -15404,7 +15412,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = NSLocalizedString("Worktree action failed", comment: "")
-                alert.informativeText = message
+                alert.informativeText = ScheduledAutomationEngine.guestReported(message)
                 alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
                 alert.beginSheetModal(for: win) { _ in }
             }

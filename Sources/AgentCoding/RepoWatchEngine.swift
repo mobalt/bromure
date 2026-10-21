@@ -241,14 +241,11 @@ final class RepoWatchEngine {
 
     func binding(profileID: UUID, branch: String?) -> Binding {
         guard let delegate, let branch, branch.hasPrefix("wt/") else { return Binding() }
-        let slugPart = String(branch.dropFirst(3))
         let autoStore = delegate.scheduledAutomationStore
-        guard let run = autoStore.runs.first(where: { run in
-            guard run.outcome == .launched, let slug = run.branchSlug else { return false }
-            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
-                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
-        }), let automation = autoStore.automation(run.automationID),
-              (run.runProfileID ?? automation.profileID) == profileID
+        // Same lookup as the automation engine's: a run failed only by a
+        // refusal the guest reported is revived by its own agent reporting.
+        guard let run = autoStore.runForBranch(branch, profileID: profileID),
+              let automation = autoStore.automation(run.automationID)
         else { return Binding() }
         let watch = automation.watchID.flatMap { store.watch($0) }
         return Binding(run: run, watch: watch)

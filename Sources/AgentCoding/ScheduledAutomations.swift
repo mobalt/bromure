@@ -617,6 +617,27 @@ final class ScheduledAutomationStore {
     /// fetched, its checkout is gone, no tab opened): failed, with why —
     /// not a green "launched" in Done. Only a run still launched and not done.
     @discardableResult
+    /// The run behind a worktree branch (`wt/<slug>`, or with the guest's -N
+    /// dedup suffix) whose session runs in `profileID`, newest first: a
+    /// launched one, or one failed only by a refusal the guest reported —
+    /// which its own tab speaking (a done, findings) revives first.
+    func runForBranch(_ branch: String, profileID: UUID) -> AutomationRunRecord? {
+        guard branch.hasPrefix("wt/") else { return nil }
+        let slugPart = String(branch.dropFirst(3))
+        guard let run = runs.first(where: { run in
+            guard run.outcome == .launched
+                    || (run.outcome == .failed && run.refusedByGuest == true && run.completedAt == nil),
+                  let slug = run.branchSlug else { return false }
+            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
+                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
+        }), let automation = automation(run.automationID),
+              (run.runProfileID ?? automation.profileID) == profileID
+        else { return nil }
+        guard run.outcome == .failed else { return run }
+        guard revive(run.id) else { return nil }
+        return runs.first { $0.id == run.id }
+    }
+
     /// `markFailed`, for a refusal the guest reported: revivable (`revive`).
     func markRefused(_ runID: UUID, reason: String) -> Bool {
         guard markFailed(runID, reason: reason),
@@ -2248,25 +2269,11 @@ final class ScheduledAutomationEngine {
     /// `profileID` (a clone-first run's clone, else the automation's own).
     private func launchedRun(profileID: UUID, branch: String)
         -> (run: AutomationRunRecord, automation: ScheduledAutomation)? {
-        guard branch.hasPrefix("wt/"), !finishSent.contains(branch) else { return nil }
-        let slugPart = String(branch.dropFirst(3))
-        guard var run = store.runs.first(where: { run in
-            guard run.completedAt == nil,
-                  run.outcome == .launched || (run.outcome == .failed && run.refusedByGuest == true),
-                  let slug = run.branchSlug else { return false }
-            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
-                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
-        }),
-            let automation = store.automation(run.automationID),
-            (run.runProfileID ?? automation.profileID) == profileID
-        else { return nil }
-        // Its own tab is talking: a refusal the guest reported for it was
-        // wrong (or another process wrote it), so it's running after all.
-        if run.outcome == .failed {
-            guard store.revive(run.id), let fresh = store.runs.first(where: { $0.id == run.id }) else { return nil }
-            BACDebug.log("automation", "run \(run.branchSlug ?? "?") revived: its tab is live")
-            run = fresh
-        }
+        // A run the guest reported refused comes back here: its own tab is
+        // talking, so the report was wrong (or another process wrote it).
+        guard !finishSent.contains(branch),
+              let run = store.runForBranch(branch, profileID: profileID),
+              let automation = store.automation(run.automationID) else { return nil }
         return (run: run, automation: automation)
     }
 

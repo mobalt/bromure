@@ -80,12 +80,27 @@ struct AutomationRunRefusedTests {
         #expect(engine.runDeclaredDone(profileID: pid, worktreeBranch: "wt/review-start"))
         let revived = store.runs.first { $0.id == starting.id }
         #expect(revived?.outcome == .launched && revived?.refusedByGuest == nil && revived?.detail == "")
+        // The findings_done path (RepoWatchEngine.binding) looks runs up the
+        // same way: a refused run is revived by its own agent reporting.
+        let watchRun = AutomationRunRecord(automationID: a.id, firedAt: Date(), outcome: .launched,
+                                           detail: "commit 4", branchSlug: "review-watch")
+        store.record(watchRun)
+        engine.runRefused(profileID: pid, slug: "review-watch", reason: "forged", liveBranches: [])
+        #expect(store.runs.first { $0.id == watchRun.id }?.outcome == .failed)
+        #expect(store.runForBranch("wt/review-watch-2", profileID: UUID()) == nil)   // another workspace
+        let bound = store.runForBranch("wt/review-watch", profileID: pid)
+        #expect(bound?.id == watchRun.id && bound?.outcome == .launched)
+        let src = (try? String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/RepoWatchEngine.swift"), encoding: .utf8)) ?? ""
+        #expect(src.contains("autoStore.runForBranch(branch, profileID: profileID)"))
         // A run that failed for any other reason stays failed.
         let other = AutomationRunRecord(automationID: a.id, firedAt: Date(), outcome: .launched,
                                         detail: "commit 3", branchSlug: "review-other")
         store.record(other)
         _ = store.markFailed(other.id, reason: "the workspace did not boot in time")
         #expect(!engine.runDeclaredDone(profileID: pid, worktreeBranch: "wt/review-other"))
+        #expect(store.runForBranch("wt/review-other", profileID: pid) == nil)
         #expect(store.runs.first { $0.id == other.id }?.outcome == .failed)
     }
 }
