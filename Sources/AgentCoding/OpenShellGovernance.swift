@@ -225,3 +225,13 @@ enum OpenShellManagedPolicySync {
         return empty ? nil : m
     }
 }
+
+extension OpenShellGovernance {
+    /// The organization's minimum kernel sentry (bromure.io managed policy):
+    /// the lowest a workspace may run with — `.off` when none is set. A
+    /// workspace's own setting below it is raised to it
+    /// (`Profile.effectiveKernelSentry`), so "turning it off" goes to this.
+    var kernelSentryFloor: KernelSentryMode {
+        managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
+    }
+}
