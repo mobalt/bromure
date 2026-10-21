@@ -27,16 +27,22 @@ enum CommandLineRedactor {
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
     /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
-    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// A password never starts with `/` or `~`: `rsync -u host:/var/data`
+    /// is a remote path (Finding CWE-670, "Command redaction erases rsync
+    /// paths, PWD, and token: URLs that are not secrets").
+    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):(?![/~])[^\s'"]+"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
     /// `--password value`, `--token value`, …
     private static let secretFlag = re(
         #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token)(?:\s+|=))(['"]?)[^\s'"]+"#)
-    /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`
+    /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`. The key
+    /// is taken whole, and the secret word ends it or a `_`/`-`/`.` follows
+    /// (`API_TOKEN_V2`, not `tokens:list`); the shell's own `PWD` / `OLDPWD`
+    /// is a directory, not a password (`DB_PWD` still is).
     private static let keyValue = re(
-        #"([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*['"]?\s*[=:]\s*)(['"]?)[^\s'"&,}]+"#)
+        #"((?<![A-Za-z0-9_.-])(?!(?:old)?pwd['"]?\s*[=:])[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)(?:[_.-][A-Za-z0-9_.-]*)?['"]?\s*[=:]\s*)(['"]?)[^\s'"&,}]+"#)
 
     static func redact(_ s: String) -> String {
         guard !s.isEmpty else { return s }

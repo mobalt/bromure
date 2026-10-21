@@ -30,6 +30,25 @@ struct CommandLineRedactorTests {
         #expect(r("git log --author=bob -n 5") == "git log --author=bob -n 5")
     }
 
+    /// Finding (CWE-670): "Command redaction erases rsync paths, PWD, and
+    /// token: URLs that are not secrets".
+    @Test("remote paths, the working directory and token-named URLs aren't secrets; real ones still go")
+    func notSecrets() {
+        let r = CommandLineRedactor.redact
+        for kept in ["rsync -u host:/var/data dest", "rsync -u backup:~/data .",
+                     "PWD=/Users/someone/proj make -j", "OLDPWD=/tmp cd -",
+                     "curl https://api.example/v1/tokens:list", "grep -r passwordless docs/",
+                     "git push -u origin HEAD:main"] {
+            #expect(r(kept) == kept, "\(kept)")
+        }
+        #expect(r("DB_PWD=hunter2 ./run") == "DB_PWD=*** ./run")
+        #expect(r("API_TOKEN=abc API_TOKEN_V2=def ./run") == "API_TOKEN=*** API_TOKEN_V2=*** ./run")
+        #expect(r("accessToken=abc client_secret=def") == "accessToken=*** client_secret=***")
+        #expect(r(#"curl -d '{"token": "x"}' 'https://x/cb?access_token=zzz&id=1'"#)
+                == #"curl -d '{"token": "***"}' 'https://x/cb?access_token=***&id=1'"#)
+        #expect(r("curl -u alice:hunter2 https://x") == "curl -u alice:*** https://x")
+    }
+
     @Test("a net.flow's argv per process and its tool command are scrubbed; other fields aren't touched")
     func scrubFlow() {
         let data: [String: AnyJSON] = [
