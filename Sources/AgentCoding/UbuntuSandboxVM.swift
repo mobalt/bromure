@@ -1069,7 +1069,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // Read the always-present ip.txt without consuming it —
                 // the guest rewrites it every 5s.
                 let ipFile = outbox.appendingPathComponent("ip.txt")
-                if let raw = try? String(contentsOf: ipFile, encoding: .utf8) {
+                if let raw = Self.boundedText(ipFile, max: 4096) {
                     let ip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !ip.isEmpty, ip != self?.lastReportedIP {
                         self?.lastReportedIP = ip
@@ -1121,7 +1121,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 forKeys: [.fileSizeKey]).fileSize) ?? 0
                             let raw: String
                             if size > 0, size <= maxURLFileSize,
-                               let body = try? String(contentsOf: entry, encoding: .utf8) {
+                               let body = Self.boundedText(entry, max: maxURLFileSize) {
                                 raw = body.trimmingCharacters(in: .whitespacesAndNewlines)
                             } else {
                                 // Empty / oversize / unreadable —
