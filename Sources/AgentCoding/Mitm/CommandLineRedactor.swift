@@ -36,13 +36,18 @@ enum CommandLineRedactor {
     /// The command a flag at `location` belongs to is curl: a word named
     /// `curl` (any path, any case) since the start of its shell segment. The
     /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
-    /// space (or the end), a newline not escaped, `(` or a backtick — never
-    /// at `2>&1` / `&>`, a quoted `a;b` or a URL's `a=1&b=2` — so
+    /// space (or the end) or a newline not escaped — never at `2>&1`, `&>`,
+    /// `>|`, a quoted `a;b` or a URL's `a=1&b=2`; inside `(`…`)` or
+    /// backticks a segment of its own, the outer one resuming after — so
     /// `bash -c 'curl …'` and `/usr/bin/curl` count and `rsync -u` doesn't.
     /// Erring toward curl only masks more.
     private static func userFlagIsCurl(_ ns: NSString, before location: Int) -> Bool {
         let chars = Array(ns.substring(to: location).unicodeScalars)
         var start = 0
+        // `(`…`)` and backticks nest a segment; their closer resumes the
+        // outer one (`curl -o $(mktemp) -u …`, a URL's `Foo_(bar)`).
+        var outer: [Int] = []
+        var inBacktick = false
         var quote: Unicode.Scalar? = nil
         var i = 0
         func spaceOrEnd(_ j: Int) -> Bool { j >= chars.count || chars[j] == " " || chars[j] == "\t" || chars[j] == "\n" }
@@ -55,10 +60,19 @@ enum CommandLineRedactor {
                 i += 1                                   // escaped: `\&`, a backslash-newline
             } else if c == "'" || c == "\"" {
                 quote = c
-            } else if c == "\n" || c == "(" || c == "`" {
+            } else if c == "(" || (c == "`" && !inBacktick) {
+                outer.append(start)
+                start = i + 1
+                if c == "`" { inBacktick = true }
+            } else if c == ")" || c == "`" {
+                if c == "`" { inBacktick = false }
+                if let o = outer.popLast() { start = o }
+            } else if c == "\n" {
                 start = i + 1
             } else if c == ";" || c == "|" || c == "&" {
-                let redirect = c == "&" && ((i > 0 && chars[i - 1] == ">") || (i + 1 < chars.count && chars[i + 1] == ">"))
+                // Redirects, not separators: `2>&1`, `&>`, `>|` (clobber).
+                let redirect = (c == "&" && ((i > 0 && chars[i - 1] == ">") || (i + 1 < chars.count && chars[i + 1] == ">")))
+                    || (c == "|" && i > 0 && chars[i - 1] == ">")
                 if !redirect, spaceOrEnd(i + 1) || (i + 1 < chars.count && (chars[i + 1] == "&" || chars[i + 1] == "|")) {
                     start = i + 1
                 }

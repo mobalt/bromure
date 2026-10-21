@@ -66,6 +66,15 @@ struct CommandLineRedactorTests {
             ("curl -s \\\n  -u alice:/s3cret https://x", "curl -s \\\n  -u alice:*** https://x"),
             ("curl -u alice:a 'https://x?a=1&b=2' -u bob:/second", "curl -u alice:*** 'https://x?a=1&b=2' -u bob:***"),
             ("CURL -u alice:/s3cret", "CURL -u alice:***"),
+            // A substitution or a parenthesis in a URL nests; after it, the curl command resumes.
+            ("curl https://en.wikipedia.org/wiki/Foo_(bar) -u alice:/s3cret", "curl https://en.wikipedia.org/wiki/Foo_(bar) -u alice:***"),
+            ("curl -o $(mktemp) -u alice:/s3cret https://x", "curl -o $(mktemp) -u alice:*** https://x"),
+            ("curl `date` -u alice:/s3cret https://x", "curl `date` -u alice:*** https://x"),
+            ("curl <(echo x) -u alice:/s3cret", "curl <(echo x) -u alice:***"),
+            ("curl -o >(tee /tmp/x) -u alice:/s3cret https://x", "curl -o >(tee /tmp/x) -u alice:*** https://x"),
+            ("curl >| /tmp/out -u alice:/s3cret", "curl >| /tmp/out -u alice:***"),
+            ("echo $(rsync -u host:src/file x) done", "echo $(rsync -u host:src/file x) done"),
+            ("curl $(rsync -u host:src/file x)", "curl $(rsync -u host:src/file x)"),
             ("curl -u alice:secret && rsync -u host:src/file", "curl -u alice:*** && rsync -u host:src/file"),
         ] {
             #expect(r(cmd) == out, "\(cmd)")
