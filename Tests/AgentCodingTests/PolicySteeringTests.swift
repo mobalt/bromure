@@ -392,6 +392,36 @@ struct PolicyNoteInjectionTests {
             "host": .string("evil.example"), "ip": .string("203.0.113.9"), "port": .int(443)])
         #expect(sink.notes.first?.window == 1)
     }
+
+    /// Finding (CWE-345): "A guest line can clear a live agent's pid pin and
+    /// keep its policy notes" — a line naming another pid for the agent's
+    /// window freed the agent's pid, which a second line then claimed for
+    /// another tab (and the agent's own hook couldn't take back).
+    @Test("A pid displaced from its window by a forged line can't be claimed elsewhere; the agent takes it back")
+    func displacedPidStaysPinned() {
+        let sink = SteeringSink(), s = steering(sink), ws = UUID()
+        s.noteAgent(profileID: ws, pid: 500, window: 1)          // the live agent
+        s.noteAgent(profileID: ws, pid: 501, window: 1)          // forged: "window 1's agent restarted"
+        s.noteAgent(profileID: ws, pid: 500, window: 2)          // forged: 500 is window 2's
+        s.noteAgent(profileID: ws, pid: 500, window: 1)          // the agent's own next hook
+        s.noteFlow(profileID: ws, dst: "203.0.113.9", dport: 443, pids: [900, 500])
+        s.observe(profileID: ws, eventType: "egress.firewall", eventData: [
+            "action": .string("deny"), "layer": .string("l4"), "proto": .string("tcp"),
+            "host": .string("evil.example"), "ip": .string("203.0.113.9"), "port": .int(443)])
+        #expect(sink.notes.first?.window == 1)
+        #expect(!s.agentWindows(profileID: ws).contains(2))
+        // Past the pin's ten minutes a displaced pid may be reused elsewhere.
+        final class Clock: @unchecked Sendable { var t = Date() }
+        let c = Clock(), s2 = steering(SteeringSink()), ws2 = UUID()
+        s2.now = { c.t }
+        s2.noteAgent(profileID: ws2, pid: 500, window: 1)
+        s2.noteAgent(profileID: ws2, pid: 501, window: 1)
+        s2.noteAgent(profileID: ws2, pid: 500, window: 2)
+        #expect(s2.agentWindows(profileID: ws2) == [1])
+        c.t += 601
+        s2.noteAgent(profileID: ws2, pid: 500, window: 2)
+        #expect(s2.agentWindows(profileID: ws2).contains(2))
+    }
 }
 
 /// Finding (CWE-362): "Claude reads the policy note before the host has
