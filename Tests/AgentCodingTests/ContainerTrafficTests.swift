@@ -197,5 +197,34 @@ struct ContainerTrafficTests {
         """
         #expect(!p.resolvedEgressPolicy.inspectedPorts.isEmpty)
         #expect(!p.effectiveContainerTrafficDirect)
+        #expect(p.containerTrafficDirectRefusal?.contains("request-level") == true)
+    }
+
+    /// Finding (CWE-693): "Container exemption on Bromure rules skips web
+    /// method checks while the pane says the firewall still applies". The
+    /// switch forwards an exempt container flow at L4: whatever needs the
+    /// MiTM is refused the exemption, and the pane says why.
+    @Test("Refused under strict credentials, the strict sandbox, the Bromure engine or a method rule — with the reason")
+    func refusals() {
+        var p = bromure_ac.Profile(name: "c", tool: .claude, authMode: .token)
+        p.containerTrafficDirect = true
+        p.kernelSentry = .bestEffort
+        #expect(p.containerTrafficDirectRefusal?.contains("OpenShell") == true)
+        // A Bromure ruleset with method limits: refused (the finding's case).
+        p.egressRules = "allow web github.com GET\ndeny web github.com POST\n"
+        #expect(!p.effectiveContainerTrafficDirect)
+        // Under OpenShell those rules aren't the policy; a method-free one applies.
+        p.networkPolicy = "version: 1\nnetwork_policies: {}\n"
+        #expect(p.effectiveContainerTrafficDirect && p.containerTrafficDirectRefusal == nil)
+        p.strictCredentials = true
+        #expect(!p.effectiveContainerTrafficDirect)
+        #expect(p.containerTrafficDirectRefusal?.contains("strict credential") == true)
+        p.strictCredentials = false
+        p.strictSandbox = true
+        #expect(!p.effectiveContainerTrafficDirect)
+        #expect(p.containerTrafficDirectRefusal?.contains("strict sandbox") == true)
+        p.strictSandbox = false
+        p.kernelSentry = .off
+        #expect(p.containerTrafficDirectRefusal?.contains("kernel sentry") == true)
     }
 }
