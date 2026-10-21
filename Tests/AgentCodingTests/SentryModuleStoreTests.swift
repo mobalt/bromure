@@ -199,6 +199,35 @@ struct SentryModuleStoreTests {
         #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash) == nil)
     }
 
+    /// Finding (CWE-670): "A failed sentry-catalog refresh is treated as
+    /// proof the kernel was never published". A cached catalog without the
+    /// kernel forces a refresh; when that failed, the cached one came back
+    /// and its missing entry was reported definitive, ending the guest's wait.
+    @Test("A kernel missing from the cached catalog is definitive only when a fresh catalog agrees")
+    func failedRefreshIsTransient() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        let k = "6.8.0-150-generic"          // published after the cached catalog
+        serveCatalog(host)
+        let s = store(host: host, root: root)
+        #expect(await s.refreshCatalog(Self.hash, force: true)?.modules.count == 2)
+        let path = "/sentry/\(Self.hash)/catalog.json"
+        // The refresh fails: a server error, a body that doesn't decode, a
+        // catalog that doesn't verify, the server gone — all retried.
+        var unsigned = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        unsigned.signature = nil
+        for (status, body) in [(503, Data()), (200, Data("<html>".utf8)),
+                               (200, try JSONEncoder().encode(unsigned)), (404, Data())] {
+            SentryStubProtocol.serve(host, path, status, body)
+            let f = await s.ensureOutcome(kernel: k, hash: Self.hash)
+            #expect(f?.definitive == false, "HTTP \(status) \(body.count) bytes: \(f?.reason ?? "nil")")
+        }
+        // The server's current catalog still doesn't list it: now it's definitive.
+        serveCatalog(host)
+        let none = await s.ensureOutcome(kernel: k, hash: Self.hash)
+        #expect(none?.definitive == true && none?.reason.contains("no module published") == true)
+    }
+
     @Test("An older catalog never replaces a newer cached one")
     func rollbackGuard() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
