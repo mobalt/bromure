@@ -325,6 +325,27 @@ struct PolicySteeringTests {
     }
 }
 
+/// Finding (CWE-670): "Unattributed policy notes are never typed into a
+/// non-Claude tab". Notes reach non-Claude agents only typed into their tab;
+/// those for blocks with no tab of their own (L7, guardrails, an
+/// unattributed sandbox denial) were typed nowhere — even for the only agent.
+@Suite("Policy notes: an unattributed block still reaches the only non-Claude agent")
+struct PolicyNoteTypedTargetTests {
+    @Test("typed into the blocked tab, or the sole non-Claude agent; never broadcast")
+    @MainActor func typedTargets() {
+        let t = ACAppDelegate.typedNoteWindows
+        // Attributed: that tab (a Claude one gets its note file instead).
+        #expect(t([(3, .codex)], true) == [3])
+        #expect(t([(3, .claude)], true) == [])
+        // Unattributed, one non-Claude agent (alone, or beside Claude): typed.
+        #expect(t([(1, .codex)], false) == [1])
+        #expect(t([(1, .claude), (2, .grok)], false) == [2])
+        // Unattributed, several: nobody's composer gets someone else's block.
+        #expect(t([(1, .codex), (2, .kimi)], false) == [])
+        #expect(t([(1, .claude), (2, .claude)], false) == [])
+    }
+}
+
 /// Finding (CWE-74): "Policy notes copy guest-controlled paths and hostnames
 /// into agent instructions". The blocked program chose part of the note's
 /// text (a path, an SNI, a request method) and could put newlines and

@@ -59,14 +59,23 @@ extension ACAppDelegate {
             }
             for await ok in group where ok { delivered = true }
         }
-        // Typed into the tab and submitted as the user's message: only for
-        // the agent whose own process was blocked, never broadcast into
-        // every other agent's composer.
-        for t in targets where t.tool != .claude && window != nil {
-            queueTypedPolicyNote(profileID: profileID, window: t.window, text: text)
+        for w in Self.typedNoteWindows(targets: targets, attributed: window != nil) {
+            queueTypedPolicyNote(profileID: profileID, window: w, text: text)
             delivered = true
         }
         return delivered
+    }
+
+    /// The non-Claude tabs a note is typed into (as the user's message — the
+    /// only way those agents learn of a block). Never broadcast into every
+    /// agent's composer: the tab whose process was blocked (`attributed`),
+    /// else the only non-Claude agent there is — an L7, guardrails or
+    /// unattributed sandbox block has no tab of its own, and that agent was
+    /// told nothing (Finding CWE-670, "Unattributed policy notes are never
+    /// typed into a non-Claude tab").
+    static func typedNoteWindows(targets: [(window: Int, tool: Profile.Tool)], attributed: Bool) -> [Int] {
+        let others = targets.filter { $0.tool != .claude }.map(\.window)
+        return attributed || others.count == 1 ? others : []
     }
 
     /// One file per note, moved into place whole, so the hook never reads
