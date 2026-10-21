@@ -799,6 +799,79 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         try? data.write(to: url, options: .atomic)
     }
 
+    // MARK: Guest outbox, bounded
+
+    /// The guest writes the outbox, so a compromised workload can make any
+    /// file in it as large as it likes: nothing there is read whole. A text
+    /// status file over this is skipped.
+    nonisolated static let maxOutboxTextFile = 1 << 20
+
+    /// The file's text, or nil when it's missing or over `max`.
+    nonisolated static func boundedText(_ url: URL, max: Int = maxOutboxTextFile) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        guard let d = try? h.read(upToCount: max + 1), d.count <= max else { return nil }
+        return String(decoding: d, as: UTF8.self)
+    }
+
+    /// An agent-tool-<win>.jsonl (the hooks append one line per tool call),
+    /// read a window at a time from where the last read stopped.
+    struct ToolLog {
+        var offset = 0
+        /// A fully read, large log renamed out of the way: its tail is read
+        /// once more (an append in flight when it moved lands there), then
+        /// it's deleted.
+        var retired: (url: URL, offset: Int)?
+
+        static let window = 64 << 10
+        /// Unread backlog past this is skipped, not loaded.
+        static let backlogCap = 1 << 20
+        static let rotateAt = 256 << 10
+        static let maxLine = 8192
+
+        /// The complete new lines (each ≤ maxLine) in `url` since the last call.
+        mutating func read(_ url: URL) -> [Data] {
+            var lines: [Data] = []
+            if let r = retired {
+                var o = r.offset
+                lines += Self.lines(at: r.url, offset: &o)
+                try? FileManager.default.removeItem(at: r.url)
+                retired = nil
+            }
+            guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue
+            else { return lines }
+            if size < offset { offset = 0 }                     // replaced under us
+            if size - offset > Self.backlogCap { offset = size } // a flood: skipped, never loaded
+            lines += Self.lines(at: url, offset: &offset)
+            if offset == size, size > Self.rotateAt {
+                // Rename, not truncate: a hook appending right now writes into
+                // the renamed file, whose tail the next call reads.
+                let moved = url.appendingPathExtension("retired")
+                try? FileManager.default.removeItem(at: moved)
+                if (try? FileManager.default.moveItem(at: url, to: moved)) != nil {
+                    retired = (moved, offset)
+                    offset = 0
+                }
+            }
+            return lines
+        }
+
+        /// Up to one window of complete lines from `offset`, advancing it.
+        static func lines(at url: URL, offset: inout Int) -> [Data] {
+            guard let h = try? FileHandle(forReadingFrom: url) else { return [] }
+            defer { try? h.close() }
+            guard (try? h.seek(toOffset: UInt64(offset))) != nil,
+                  let d = try? h.read(upToCount: window), !d.isEmpty else { return [] }
+            guard let lastNL = d.lastIndex(of: 0x0A) else {
+                // A full window with no newline is one oversized line: skip it.
+                if d.count == window { offset += d.count }
+                return []
+            }
+            offset += lastNL + 1
+            return d[...lastNL].split(separator: 0x0A).filter { $0.count <= maxLine }.map { Data($0) }
+        }
+    }
+
     static func readFingerprint(at url: URL) -> [String: String]? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
@@ -959,7 +1032,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // ~480ms cadence via the tick gate below.
             var ticks = 0
             // agent-tool-<win>.jsonl: bytes already read, per file.
-            var toolOffsets: [String: Int] = [:]
+            var toolLogs: [String: ToolLog] = [:]
             while !Task.isCancelled {
                 // FAST PATH — reboot-intent: the guest is going down for a
                 // reboot (systemd reboot.target), not a user-closed session.
@@ -982,8 +1055,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 if let mtime = try? fm.attributesOfItem(atPath: tabsFile.path)[.modificationDate] as? Date,
                    mtime != lastTabsMTime {
                     lastTabsMTime = mtime
-                    let raw = (try? String(contentsOf: tabsFile, encoding: .utf8)) ?? ""
-                    self?.onTabList?(Self.parseRoster(raw))
+                    if let raw = Self.boundedText(tabsFile) { self?.onTabList?(Self.parseRoster(raw)) }
                 }
 
                 // Throttle the heavier scan to ~every 12th tick (~480ms) so
@@ -997,7 +1069,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // Read the always-present ip.txt without consuming it —
                 // the guest rewrites it every 5s.
                 let ipFile = outbox.appendingPathComponent("ip.txt")
-                if let raw = try? String(contentsOf: ipFile, encoding: .utf8) {
+                if let raw = Self.boundedText(ipFile, max: 4096) {
                     let ip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !ip.isEmpty, ip != self?.lastReportedIP {
                         self?.lastReportedIP = ip
@@ -1027,19 +1099,11 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         && entry.pathExtension == "jsonl" {
                         let key = entry.lastPathComponent
                         let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
-                        guard let data = try? Data(contentsOf: entry) else { continue }
-                        var start = toolOffsets[key] ?? 0
-                        if start > data.count { start = 0 }   // truncated under us
-                        guard let lastNL = data.lastIndex(of: 0x0A), lastNL >= start else { continue }
-                        let chunk = data[start...lastNL]
-                        for line in chunk.split(separator: 0x0A) where line.count <= 8192 {
-                            self?.onAgentToolCall?(Data(line), window)
-                        }
-                        toolOffsets[key] = lastNL + 1
-                        if lastNL + 1 == data.count, data.count > 256 * 1024 {
-                            try? Data().write(to: entry)
-                            toolOffsets[key] = 0
-                        }
+                        // Bounded: a window per tick from the saved offset,
+                        // never the whole file (the guest can make it huge).
+                        var log = toolLogs[key] ?? ToolLog()
+                        for line in log.read(entry) { self?.onAgentToolCall?(line, window) }
+                        toolLogs[key] = log
                     }
                     for entry in entries where entry.pathExtension == "txt" {
                         let name = entry.lastPathComponent
@@ -1057,7 +1121,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 forKeys: [.fileSizeKey]).fileSize) ?? 0
                             let raw: String
                             if size > 0, size <= maxURLFileSize,
-                               let body = try? String(contentsOf: entry, encoding: .utf8) {
+                               let body = Self.boundedText(entry, max: maxURLFileSize) {
                                 raw = body.trimmingCharacters(in: .whitespacesAndNewlines)
                             } else {
                                 // Empty / oversize / unreadable —
@@ -1088,7 +1152,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // upgrade copy ("<phase> <copied> <total>"), rewritten
                         // by the guest agent ~2×/s. Read, never consumed.
                         if name == "home-migrate.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             let p = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
                             if p.count >= 3, let done = Int64(p[1]), let total = Int64(p[2]) {
                                 self?.onHomeMigrationProgress?(String(p[0]), done, total)
@@ -1107,7 +1171,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // JSON object per line (running + stopped). Rewritten
                         // atomically every ~2s; empty when there's no docker.
                         if name == "docker.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var containers: [DockerContainer] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 guard let data = line.data(using: .utf8),
@@ -1125,7 +1189,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // docker-stats.txt — `docker stats --no-stream` NDJSON;
                         // dashboard-only (gated by the .docker-watch marker).
                         if name == "docker-stats.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var stats: [(id: String, cpu: String, mem: String)] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 guard let data = line.data(using: .utf8),
@@ -1140,7 +1204,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // workspace dashboard: cpu / mem_used_kb / mem_total_kb /
                         // load / disk_used_kb / disk_total_kb (guest root FS, df).
                         if name == "vmstat.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var cpu = 0.0, used = 0, total = 0, load = 0.0
                             var diskUsed = 0, diskTotal = 0
                             for line in raw.split(whereSeparator: \.isNewline) {
@@ -1164,7 +1228,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // ports loop (~3s cadence). Parse → dashboard/API; only
                         // fire when the content actually changed.
                         if name == "ports.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             if raw != self?.lastPortsRaw {
                                 self?.lastPortsRaw = raw
                                 self?.onPortsList?(Self.parseListeningPorts(raw))
@@ -1173,7 +1237,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         }
                         // docker-images.txt — `docker images` NDJSON; dashboard-only.
                         if name == "docker-images.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var images: [DockerImage] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 guard let data = line.data(using: .utf8),
@@ -1189,7 +1253,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // docker-volumes.txt — `docker volume inspect` NDJSON
                         // (+ merged Size); dashboard-only.
                         if name == "docker-volumes.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var volumes: [DockerVolume] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 guard let data = line.data(using: .utf8),
@@ -1206,7 +1270,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // docker-binfmt.txt — space-separated qemu arch suffixes
                         // currently emulated; may be empty (probed, none).
                         if name == "docker-binfmt.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             let arches = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
                                 .map(String.init)
                             self?.onDockerBinfmt?(arches)
@@ -1214,7 +1278,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         }
                         // docker-arch.txt — "id<TAB>arch" per running container.
                         if name == "docker-arch.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             var out: [(id: String, arch: String)] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
@@ -1228,7 +1292,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // docker-run-status.txt — "state\timage\tdone\ttotal" while
                         // a detached run pulls/starts; empty when idle.
                         if name == "docker-run-status.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let raw = Self.boundedText(entry) ?? ""
                             let cols = raw.split(separator: "\t", omittingEmptySubsequences: false)
                             if cols.count >= 4, !cols[0].isEmpty {
                                 self?.onDockerRunStatus?((
@@ -1243,7 +1307,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // stderr. Read, delete, surface. (Deleting makes it fire
                         // once rather than every 40ms poll.)
                         if name == "docker-error.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                            let raw = Self.boundedText(entry)?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if !raw.isEmpty { self?.onDockerError?(raw) }
@@ -1252,7 +1316,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // worktree-error.txt — one-shot, same pattern: a failed
                         // git worktree create/merge/remove surfaced to the host.
                         if name == "worktree-error.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                            let raw = Self.boundedText(entry)?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if !raw.isEmpty { self?.onWorktreeError?(raw) }
@@ -1264,7 +1328,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // at once don't clobber each other.
                         if name.hasPrefix("agent-status-"), name.hasSuffix(".txt") {
                             let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                            let raw = Self.boundedText(entry)?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if let idx = Int(idxStr), !raw.isEmpty { self?.onAgentStatus?(idx, raw) }
