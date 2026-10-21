@@ -68,7 +68,11 @@ enum CommandLineRedactor {
         let stop = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"" + stops))
         func run(_ i: Int) -> Int {
             var j = i
-            while j < n, let u = UnicodeScalar(ns.character(at: j)), !stop.contains(u) { j += 1 }
+            // A surrogate (half a non-BMP character) is never a stop.
+            while j < n {
+                if let u = UnicodeScalar(ns.character(at: j)), stop.contains(u) { break }
+                j += 1
+            }
             return j
         }
         var end = run(start)

@@ -56,6 +56,9 @@ struct CommandLineRedactorTests {
         #expect(r("curl -b cookies.txt -c jar.txt x") == "curl -b cookies.txt -c jar.txt x")
         #expect(r("curl --cookie-jar /tmp/jar x") == "curl --cookie-jar /tmp/jar x")
         #expect(r("git checkout -b fix-login && git push") == "git checkout -b fix-login && git push")
+        // A non-BMP character inside an unquoted value doesn't end it.
+        #expect(r("deploy --token=ab🔑cd now") == "deploy --token=*** now")
+        #expect(r("curl -b s=🍪x; t=2 x") == "curl -b *** x")
         // Several in one line, each whole.
         #expect(r(#"curl -u "a:b c" -H 'Cookie: s=1; t=2' --password 'p q'"#)
                 == #"curl -u "a:***" -H 'Cookie: ***' --password '***'"#)
