@@ -278,4 +278,25 @@ struct OpenShellAdvisorTests {
         #expect(route("POST", ["proposals", id1, "approve"], [:]).status == 409)   // already rejected
         #expect(route("POST", ["proposals", "nope", "reject"], [:]).status == 404)
     }
+
+    /// Finding (CWE-284): "Drawer Allow names whichever program last used the
+    /// destination IP". The attested exe is filed under the destination IP
+    /// and then the hostname; a later connection to the same IP (a shared CDN
+    /// address, or a guest process dialing it after the deny) overwrote only
+    /// the IP key, and the newest-wins lookup put that program in the rule.
+    @Test("Allow names the program attested for the row's hostname, not a newer occupant of its IP")
+    func allowNamesTheHostsProgram() throws {
+        let pid = UUID(), ids = BinaryIdentityService.shared
+        // The blocked connection: curl to pypi.org (151.101.0.223:443).
+        ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["pypi.org"], port: 443)
+        // Afterwards, another program dials the same address.
+        Thread.sleep(forTimeInterval: 0.01)
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        let rule = OpenShellAdvisor.allowRule(profileID: pid, host: "pypi.org", port: 443, ip: "151.101.0.223")
+        #expect(rule.binaries == ["/usr/bin/curl"])
+        #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org", "151.101.0.223"], port: 443) == "/usr/bin/curl")
+        // No hostname on record (a bare-IP row): the IP's program, as before.
+        #expect(ids.recentExe(profileID: pid, destinations: ["other.example", "151.101.0.223"], port: 443) == "/tmp/evil")
+    }
 }

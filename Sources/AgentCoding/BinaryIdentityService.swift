@@ -81,13 +81,20 @@ public final class BinaryIdentityService: @unchecked Sendable {
         noteExe(identity.exe, profileID: profileID, destinations: [host], port: port)
     }
 
-    /// The program that last connected to one of `destinations` on `port`
-    /// within the hour, as the attestor reported it.
+    /// The program that connected to `destinations` on `port` within the
+    /// hour, as the attestor reported it — the FIRST destination that has
+    /// one, in the order given (a hostname, then its IP). Not the newest
+    /// across them: an IP is shared (a CDN address, or any guest process that
+    /// dials it after a deny), so a later program there must not replace the
+    /// one attested for the name on the row (Finding CWE-284, "Drawer Allow
+    /// names whichever program last used the destination IP").
     public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {
         lock.lock(); defer { lock.unlock() }
         let cutoff = Date().addingTimeInterval(-3600)
-        return destinations.compactMap { recentExes["\(profileID.uuidString)|\($0.lowercased())|\(port)"] }
-            .filter { $0.at > cutoff }.max { $0.at < $1.at }?.exe
+        for d in destinations {
+            if let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
+        }
+        return nil
     }
 
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
