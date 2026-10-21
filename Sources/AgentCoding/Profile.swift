@@ -4788,8 +4788,10 @@ public final class ProfileStore {
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
             // Stop drains them too: a note written after the blocked tool's
-            // PostToolUse ran would otherwise wait for the next message.
-            hooks["Stop"] = hookCmd("policy") + hookCmd("done") + [pqStop] + othersUnder("Stop")
+            // PostToolUse ran would otherwise wait for the next message. One
+            // `stop` command (the hooks of an event run in parallel): it
+            // reports `done` only when no note kept the turn going.
+            hooks["Stop"] = hookCmd("stop") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
             // not Stop: without it the tab sat "working" forever. A refused
@@ -4875,17 +4877,40 @@ public final class ProfileStore {
             # blocked something it did (PolicySteering), as the hook's
             # additionalContext. Each note is claimed by rename, so two hooks
             # firing at once never hand over the same one.
+            # `stop` (Claude's one Stop hook): a turn that ends with notes
+            # owed is kept going with them (`decision: block`), and then it has
+            # NOT ended: reporting `done` too would let the host type a held
+            # notice and finish a task while the agent works on. Claude runs a
+            # Stop event's hooks in parallel, so the drain and the report are
+            # one command. A `done` run for a Stop event does the same, and a
+            # `policy` one leaves the notes to it: a settings file seeded before
+            # (Claude since turned off, Grok still loading it) lists both.
+            stop_json=""
+            stop_event='"hook_\{0,1\}[eE]vent_\{0,1\}[nN]ame"[[:space:]]*:[[:space:]]*"Stop"'
+            if [ "${1:-}" = stop ] || [ "${1:-}" = done ]; then
+              if [ ! -t 0 ]; then stop_json=$(cat 2>/dev/null); fi
+              stop_read=1
+              if [ "$1" = stop ] || printf '%s' "$stop_json" | grep -q "$stop_event"; then
+                kept=$(printf '%s' "$stop_json" | BROMURE_STOP_DRAIN=1 sh "$0" policy)
+                if [ -n "$kept" ]; then printf '%s\n' "$kept"; exit 0; fi
+              fi
+              set -- done "${2:-}"
+            fi
             if [ "${1:-}" = policy ]; then
+              pol_json=""
+              if [ ! -t 0 ]; then pol_json=$(cat 2>/dev/null); fi
+              if [ -z "${BROMURE_STOP_DRAIN:-}" ] && printf '%s' "$pol_json" | grep -q "$stop_event"; then exit 0; fi
               [ -n "${TMUX_PANE:-}" ] || exit 0
               idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
               [ -n "$idx" ] || exit 0
               set -- "$HOME"/.bromure/policy-notes/w"$idx"-*.note
               [ -e "$1" ] || exit 0
-              exec python3 -c '
+              printf '%s' "$pol_json" | python3 -c '
             import json, os, sys
             event = "PostToolUse"
             try:
-                event = json.load(sys.stdin).get("hook_event_name") or event
+                e = json.load(sys.stdin)
+                event = e.get("hook_event_name") or e.get("hookEventName") or event
             except Exception:
                 pass
             notes = []
@@ -4909,6 +4934,7 @@ public final class ProfileStore {
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
                                                          "additionalContext": "\n".join(notes)}}))
             ' "$@"
+              exit 0
             fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
@@ -4924,7 +4950,8 @@ public final class ProfileStore {
             # the transcript file (kept per tab, below) and, for a
             # Notification, WHICH notification. Not a terminal → nothing to read.
             hook_json=""
-            if [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
+            if [ -n "${stop_read:-}" ]; then hook_json=$stop_json
+            elif [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
             # Claude's Notification hook fires for more than questions: an
             # idle_prompt comes after the agent has merely sat at its prompt
             # for a while. Reporting that as "needs input" made every idle
