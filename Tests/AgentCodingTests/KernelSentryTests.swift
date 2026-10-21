@@ -450,5 +450,10 @@ struct GuestSandboxAttentionTests {
         let noSentry = try status(["filesystem": "enforced", "sentry": "unavailable"])
         #expect(!noSentry.needsAttention(sentryExpected: false))
         #expect(noSentry.needsAttention(sentryExpected: true))
+        // Off with a reason: a run_as failure when a filesystem policy was
+        // asked for; nothing at all when none was.
+        let off = try status(["filesystem": "off", "degraded_reason": "run_as_user sandbox: no such user"])
+        #expect(off.needsAttention(sentryExpected: false, filesystemExpected: true))
+        #expect(!off.needsAttention(sentryExpected: false, filesystemExpected: false))
     }
 }

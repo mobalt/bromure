@@ -368,10 +368,14 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         public var filesystemFailed: Bool { filesystem == "failed" || filesystem == "degraded" }
 
         /// Anything the sandbox reported as not working as asked. The
-        /// sentry counts only when the workspace wants one.
-        public func needsAttention(sentryExpected: Bool) -> Bool {
+        /// sentry counts only when the workspace wants one; a filesystem
+        /// sandbox reported `off` only when the policy asked for one (a
+        /// run_as failure leaves it off with a reason — the same shape a
+        /// policy without a filesystem section has).
+        public func needsAttention(sentryExpected: Bool, filesystemExpected: Bool = false) -> Bool {
             filesystemFailed || strictApplied == false || !warnings.isEmpty
                 || (sentry == "unavailable" && sentryExpected)
+                || (filesystemExpected && filesystem == "off")
         }
     }
 

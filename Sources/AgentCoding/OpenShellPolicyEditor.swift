@@ -211,8 +211,10 @@ struct OpenShellPolicyEditor: View {
     /// The VM reported the sandbox or the sentry not working as asked: the
     /// Sandbox group opens by itself so it's seen.
     private var sandboxNeedsAttention: Bool {
-        GuestSandboxStatusStore.shared.status(for: draft.id)?
-            .needsAttention(sentryExpected: draft.effectiveKernelSentry != .off) ?? false
+        let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
+        return GuestSandboxStatusStore.shared.status(for: draft.id)?
+            .needsAttention(sentryExpected: draft.effectiveKernelSentry != .off,
+                            filesystemExpected: sections.filesystemPolicy != nil || sections.process != nil) ?? false
     }
 
     /// The organization boundary: where it comes from, and whether this
