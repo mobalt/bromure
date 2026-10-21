@@ -211,9 +211,10 @@ struct OpenShellPolicyEditor: View {
     /// The VM reported the sandbox or the sentry not working as asked: the
     /// Sandbox group opens by itself so it's seen.
     private var sandboxNeedsAttention: Bool {
-        guard let st = GuestSandboxStatusStore.shared.status(for: draft.id) else { return false }
-        return st.strictApplied == false || !st.warnings.isEmpty
-            || (st.sentry == "unavailable" && draft.effectiveKernelSentry != .off)
+        let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
+        return GuestSandboxStatusStore.shared.status(for: draft.id)?
+            .needsAttention(sentryExpected: draft.effectiveKernelSentry != .off,
+                            filesystemExpected: sections.filesystemPolicy != nil || sections.process != nil) ?? false
     }
 
     /// The organization boundary: where it comes from, and whether this
@@ -312,7 +313,7 @@ struct OpenShellPolicyEditor: View {
                                  + (st.degradedReason.map { " (\($0))" } ?? "")
                                  + (st.runAsUser.map { " · runs as \($0)" } ?? "")
                                  + (st.landlockABI.map { " · Landlock ABI \($0)" } ?? ""),
-                             tone: st.degradedReason == nil ? .ok : .warn)
+                             tone: st.filesystem == "failed" ? .bad : (st.filesystemFailed || st.degradedReason != nil) ? .warn : .ok)
                 if st.strictApplied == false {
                     PolicyStatus(text: NSLocalizedString("The strict sandbox didn't fully apply in the VM, so no session will start and binary rules fail closed. Restarting the VM retries it.", comment: "sandbox status"),
                                  tone: .bad)
