@@ -762,6 +762,20 @@ struct PolicyNoteDeliveryTests {
         // Nothing owed any more: an idle Stop is done again.
         #expect(try stop().isEmpty)
         #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
+        // The other way a note can't be handed over: the home can't be
+        // written (no claims folder). The mark lives in the outbox, so the
+        // idle_prompt after it still doesn't report done.
+        try fm.removeItem(at: claims)
+        chmod(home.appendingPathComponent(".bromure").path, 0o555)
+        defer { chmod(home.appendingPathComponent(".bromure").path, 0o755) }
+        let stuck = try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        try hook("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#)
+        #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"))
+        #expect(fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
+        _ = stuck
     }
 
     @Test("Under a filesystem ruleset the sandbox grants /proc (read-only) with the meta share",

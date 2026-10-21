@@ -5034,9 +5034,11 @@ public final class ProfileStore {
             # `done` for this tab — not the idle_prompt that follows a minute
             # later, not Grok's StopCancelled, not a typed one — or the host
             # finishes the task over the note.
-            owed="$HOME/.bromure/.policy-owed-$idx"
+            # Kept in the outbox, beside the status this run writes: the home
+            # may be what couldn't be written (no claims folder).
+            owed="$d/.policy-owed-$idx"
             if [ -n "${undelivered:-}" ]; then
-              mkdir -p "$HOME/.bromure" 2>/dev/null; : > "$owed" 2>/dev/null
+              : > "$owed" 2>/dev/null
             elif [ -n "${drained:-}" ] || [ "$signal" = "working" ]; then
               rm -f "$owed" 2>/dev/null
             fi
