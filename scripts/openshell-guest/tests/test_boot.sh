@@ -582,6 +582,7 @@ run_case_once() {
     sudo rm -rf "$WORK/meta" "$WORK/run" "$WORK/home" "$WORK/nosudo" "$WORK/sudo1" \
                 "$WORK/etc" "$WORK/strict-run"
     mkdir -p "$WORK/meta" "$WORK/run" "$WORK/home" "$WORK/nosudo" "$WORK/sudo1" \
+             "$WORK/workdir"
     # hostname.txt holding THIS machine's hostname, which is production's steady
     # state: the host sets the hostname at boot and stages the matching file, so
     # `task_set_hostname` returns at its first guard and writes nothing.
@@ -594,7 +595,6 @@ run_case_once() {
     # was 2 of the denials I wrongly reported as a product issue; the host
     # measured zero in a real workspace, for exactly this reason.
     hostname > "$WORK/meta/hostname.txt"
-             "$WORK/workdir"
     # The literal NONE stages no spec at all: a strict-only workspace, which is
     # the Phase-4 sandbox that predates this work and has no supervisor.
     if [ "$spec" = "NONE" ]; then
