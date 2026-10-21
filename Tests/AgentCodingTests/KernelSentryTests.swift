@@ -423,3 +423,32 @@ struct KernelSentryTests {
         #expect(tap.all.filter { $0.0 == "sandbox.activity" }.count == 3)          // interval elapsed
     }
 }
+
+/// Finding (CWE-451): "OpenShell Sandbox group stays collapsed when the
+/// filesystem sandbox failed or degraded". The Sandbox card's warning read
+/// only the strict revocation, warnings and the sentry; a Landlock failure
+/// or a best-effort degrade sets only `filesystem` and `degraded_reason`.
+@Suite("Guest sandbox status: a failed or degraded filesystem sandbox needs attention", .serialized)
+struct GuestSandboxAttentionTests {
+    func status(_ report: [String: Any]) throws -> GuestSandboxStatusStore.Status {
+        let id = UUID()
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id) }
+        GuestSandboxStatusStore.shared.update(profileID: id, report: ["event": "sandbox_status"].merging(report) { $1 })
+        return try #require(GuestSandboxStatusStore.shared.status(for: id))
+    }
+
+    @Test("failed and degraded need attention with no warning; enforced doesn't; the sentry counts only when wanted")
+    func attention() throws {
+        let failed = try status(["filesystem": "failed", "degraded_reason": "unreadable spec: bad yaml"])
+        #expect(failed.warnings.isEmpty)
+        #expect(failed.needsAttention(sentryExpected: false))
+        let degraded = try status(["filesystem": "degraded",
+                                   "degraded_reason": "Landlock filesystem sandbox unavailable: no ABI"])
+        #expect(degraded.needsAttention(sentryExpected: false))
+        let fine = try status(["filesystem": "enforced"])
+        #expect(!fine.needsAttention(sentryExpected: true))
+        let noSentry = try status(["filesystem": "enforced", "sentry": "unavailable"])
+        #expect(!noSentry.needsAttention(sentryExpected: false))
+        #expect(noSentry.needsAttention(sentryExpected: true))
+    }
+}

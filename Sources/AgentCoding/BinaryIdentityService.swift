@@ -360,6 +360,19 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         /// times (kill-server, last window closed, …).
         public var serverRestarts: Int
         public var receivedAt: Date
+
+        /// The filesystem sandbox isn't doing what was asked: Landlock failed
+        /// (an unreadable spec, an unsafe socket layout, a crashed supervisor)
+        /// or best effort degraded to nothing — the session may run
+        /// unconfined, and only these two fields say so.
+        public var filesystemFailed: Bool { filesystem == "failed" || filesystem == "degraded" }
+
+        /// Anything the sandbox reported as not working as asked. The
+        /// sentry counts only when the workspace wants one.
+        public func needsAttention(sentryExpected: Bool) -> Bool {
+            filesystemFailed || strictApplied == false || !warnings.isEmpty
+                || (sentry == "unavailable" && sentryExpected)
+        }
     }
 
     private let lock = NSLock()
