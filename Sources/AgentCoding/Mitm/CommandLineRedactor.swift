@@ -25,9 +25,13 @@ enum CommandLineRedactor {
         + #"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"#)
     /// `scheme://user:password@host`
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
-    /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
+    /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`,
+    /// and `-u` / `-U` closing a cluster of short flags (`-su user:pw`,
+    /// `-fsSLu user:pw`, `-sLuuser:pw`: Finding CWE-532, "A curl -u password
+    /// clustered with other short flags is stored and uploaded"). Case-
+    /// insensitive, so `[a-z]*u` is -u and -U alike.
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
-    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    private static let userFlag = re(#"((?:^|\s)(?:-[a-z]*u|--user|--proxy-user)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
