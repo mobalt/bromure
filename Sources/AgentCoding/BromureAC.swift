@@ -14962,23 +14962,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             Task { @MainActor [weak self] in
                 let meta = self?.runningSessions[pid]?.sandbox.sessionDisk?.metadataDirectory
                 Task.detached {
-                    var failures: [String: String] = [:]
-                    for kernel in kernels {
-                        if let why = await store.ensure(kernel: kernel, hash: hash) {
-                            failures[kernel] = why
-                            if waiting || kernel == kernels.first {
-                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): \(kernel): \(why)")
+                    // Only a workspace whose spec is active has a sentry dir.
+                    let dir = meta?.appendingPathComponent("sentry", isDirectory: true)
+                    // A waiting guest gives up after ~45 s; a transient failure
+                    // (offline, a failed download) is retried within that,
+                    // and each success is staged at once.
+                    let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
+                    var pending = kernels
+                    var attempt = 0
+                    while true {
+                        var definitive: [String: String] = [:]
+                        var retry: [String] = []
+                        for kernel in pending {
+                            guard let f = await store.ensureOutcome(kernel: kernel, hash: hash) else { continue }
+                            if f.definitive { definitive[kernel] = f.reason } else { retry.append(kernel) }
+                            if attempt == 0, waiting || kernel == kernels.first {
+                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): \(kernel): \(f.reason)")
                             }
                         }
+                        if let dir, FileManager.default.fileExists(atPath: dir.path) {
+                            // A guest waiting for a module none will come for
+                            // stops at once, with the host's reason — only
+                            // then: a transient failure leaves it waiting.
+                            store.markUnavailable(definitive, in: dir)
+                            let staged = store.stage(kernels: kernels, hash: hash, into: dir)
+                            if attempt == 0 || !staged.isEmpty {
+                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): staged \(staged) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                            }
+                        }
+                        pending = retry
+                        attempt += 1
+                        guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
+                        try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
                     }
-                    // Only a workspace whose spec is active has a sentry dir.
-                    guard let dir = meta?.appendingPathComponent("sentry", isDirectory: true),
-                          FileManager.default.fileExists(atPath: dir.path) else { return }
-                    // A guest waiting for a module none will come for stops
-                    // waiting at once, with the host's reason.
-                    store.markUnavailable(failures, in: dir)
-                    let staged = store.stage(kernels: kernels, hash: hash, into: dir)
-                    SentryModuleStore.log("\(pid.uuidString.prefix(8)): staged \(staged) into the running VM\(waiting ? " (the guest is waiting)" : "")")
                 }
             }
         }

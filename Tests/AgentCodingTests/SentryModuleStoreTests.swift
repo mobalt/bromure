@@ -170,6 +170,35 @@ struct SentryModuleStoreTests {
         #expect(await lax.ensure(kernel: "../../etc", hash: Self.hash)?.hasPrefix("not a kernel release") == true)
     }
 
+    /// Finding (CWE-670): "A transient module download failure aborts the
+    /// guest wait for good". Every failure wrote the `.unavailable` marker
+    /// that ends the guest's 45 s wait — a failed download or an offline
+    /// catalog included. Only a definitive one does now.
+    @Test("A missing or untrusted module is definitive; offline, a failed or corrupted download aren't")
+    func definitiveOrTransient() async throws {
+        let k = "6.8.0-142-generic"
+        // Offline / refused catalog: retry.
+        let off = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let s1 = store(host: off, root: tempDir())
+        #expect(await s1.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        // A kernel the signed catalog doesn't list: stop waiting.
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        serveCatalog(host)
+        let s2 = store(host: host, root: tempDir())
+        let none = await s2.ensureOutcome(kernel: "6.8.0-150-generic", hash: Self.hash)
+        #expect(none?.definitive == true && none?.reason.contains("no module published") == true)
+        #expect(await s2.ensureOutcome(kernel: "../../etc", hash: Self.hash)?.definitive == true)
+        // A failed download, then a corrupted one: retry.
+        let s3 = store(host: host, root: tempDir())
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 503, Data())
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 200, Data("module-A-bytez".utf8))
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        // …and once it's served right, the retry succeeds.
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 200, Data("module-A-bytes".utf8))
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash) == nil)
+    }
+
     @Test("An older catalog never replaces a newer cached one")
     func rollbackGuard() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
