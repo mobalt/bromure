@@ -88,15 +88,13 @@ final class BootBudget: @unchecked Sendable {
     /// Time is left. Once it isn't, the keep-awake ends.
     var remains: Bool {
         let now = clock()
+        // Sampled every check, inside the deadline too: a hold that ends on
+        // the check that first crosses it still gets its grace.
+        if extendWhile?() ?? false { lock.lock(); extendedUntil = now; lock.unlock() }
         var left = now < deadline
         if !left, now < cap {
-            if extendWhile?() ?? false {
-                lock.lock(); extendedUntil = now; lock.unlock()
-                left = true
-            } else {
-                lock.lock(); let last = extendedUntil; lock.unlock()
-                left = last.map { now < $0 + Self.settleGrace } ?? false
-            }
+            lock.lock(); let last = extendedUntil; lock.unlock()
+            left = last.map { now < $0 + Self.settleGrace } ?? false
         }
         if !left { release() }
         return left

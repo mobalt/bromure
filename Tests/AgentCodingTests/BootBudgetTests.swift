@@ -37,6 +37,15 @@ struct BootBudgetTests {
         #expect(b.remains)
         c.now += 2
         #expect(!b.remains)
+        // Loading seen just before the deadline, settled as it passes: the grace still runs.
+        let edge = Flag()
+        let atEdge = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                                extendWhile: { edge.on }, extendUpTo: 180 + 1905)
+        c.now += 178
+        #expect(atEdge.remains)
+        edge.on = false
+        c.now += 5
+        #expect(atEdge.remains)
         // A budget that never extended has no grace past its seconds.
         let plain = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
                                extendWhile: { false }, extendUpTo: 180 + 1905)
