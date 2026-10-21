@@ -22,15 +22,19 @@ struct ShellContinuationLintTests {
             || first.contains("env sh") || first.contains("/bash ") || first.contains("/sh ")
     }
 
-    /// The (1-based) number of every continued line whose next line is a comment.
+    /// The (1-based) number of every continued line (an odd run of trailing
+    /// backslashes) whose next line is a comment or blank: either ends the
+    /// command there and runs the line after it on its own.
     static func offenders(in text: String) -> [Int] {
         let lines = text.components(separatedBy: "\n")
         var out: [Int] = []
         for i in 0..<max(0, lines.count - 1) {
             let line = lines[i].trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
             let lead = line.drop(while: { $0 == " " || $0 == "\t" })
-            guard !lead.hasPrefix("#"), line.hasSuffix("\\"), !line.hasSuffix("\\\\") else { continue }
-            if lines[i + 1].drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("#") { out.append(i + 1) }
+            let slashes = line.reversed().prefix { $0 == "\\" }.count
+            guard !lead.hasPrefix("#"), slashes % 2 == 1 else { continue }
+            let next = lines[i + 1].trimmingCharacters(in: .whitespaces)
+            if next.isEmpty || next.hasPrefix("#") { out.append(i + 1) }
         }
         return out
     }
@@ -43,6 +47,11 @@ struct ShellContinuationLintTests {
                 "$WORK/workdir"
             """
         #expect(Self.offenders(in: bad) == [1])
+        // A blank line after the continuation, and an odd run of backslashes.
+        #expect(Self.offenders(in: "mkdir -p a \\\n\n    b\n") == [1])
+        #expect(Self.offenders(in: "echo x\\\\\\\n# c\nb\n") == [1])
+        // An even run is a literal backslash, not a continuation.
+        #expect(Self.offenders(in: "echo x\\\\\n# c\n").isEmpty)
         let good = """
             # a comment above
             mkdir -p "$WORK/meta" \\
