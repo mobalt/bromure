@@ -292,6 +292,21 @@ struct KernelSentryTests {
                         running: true)
         #expect(tap.alarms("tampering").count == 1)
         #expect(KernelSentryService.isLoading("waiting") && KernelSentryService.isLoading("pending"))
+
+        // A required sentry loads before the supervisor publishes: its
+        // "waiting" arrives with filesystem still "pending" (no Status
+        // recorded) and must count all the same.
+        let id2 = UUID()
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "waiting",
+        ])
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id2) }
+        #expect(GuestSandboxStatusStore.shared.status(for: id2) == nil)
+        #expect(GuestSandboxStatusStore.shared.sentryState(for: id2) == "waiting")
+        let b2 = SentryBridge(profileID: id2, requirement: .hard, restoring: false)
+        let tap2 = Tap(); b2.tap = { tap2.add($0, $1) }
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
         #expect(!KernelSentryService.isLoading("running") && !KernelSentryService.isLoading("unavailable"))
     }
 

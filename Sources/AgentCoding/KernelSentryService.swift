@@ -704,7 +704,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             // module (the host's wait, then apt and make): judge it once it
             // settles, as running, unavailable, or silent — but not past the
             // loader's own worst case, so a guest can't park on "waiting".
-            let guest = GuestSandboxStatusStore.shared.status(for: profileID)?.sentry
+            let guest = GuestSandboxStatusStore.shared.sentryState(for: profileID)
             let loading = KernelSentryService.isLoading(guest)
                 && now.timeIntervalSince(attachedAt) < KernelSentryService.bootBudget + KernelSentryService.loadBudget
             if loading {

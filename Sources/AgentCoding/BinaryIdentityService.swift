@@ -376,8 +376,18 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         return statuses[profileID]
     }
 
+    /// The sentry's own state from the latest report, including one sent while
+    /// the sandbox was still `pending` (and so not recorded as a Status): a
+    /// required sentry is loaded before the supervisor publishes, and its
+    /// `waiting` must still be seen.
+    private var sentryStates: [UUID: String] = [:]
+    public func sentryState(for profileID: UUID) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return statuses[profileID]?.sentry ?? sentryStates[profileID]
+    }
+
     public func reset(profileID: UUID) {
-        lock.lock(); statuses[profileID] = nil; lock.unlock()
+        lock.lock(); statuses[profileID] = nil; sentryStates[profileID] = nil; lock.unlock()
         onChange?(profileID)
     }
 
@@ -387,6 +397,7 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         // host to fetch its module.
         let kernels = [r["sentry_kernel"] as? String].compactMap { $0 } + (r["installed_kernels"] as? [String] ?? [])
         if !kernels.isEmpty { onKernels?(profileID, kernels, r["sentry"] as? String == "waiting") }
+        if let sentry = r["sentry"] as? String { lock.lock(); sentryStates[profileID] = sentry; lock.unlock() }
         // The guest hasn't assembled its sandbox yet: nothing to record, and
         // nothing to cross-check (an early "off" would read as an impostor).
         if r["filesystem"] as? String == "pending" { return }
