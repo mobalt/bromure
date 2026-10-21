@@ -62,10 +62,17 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// rule it adds, so the rule works at once and stays narrow.
     private var recentExes: [String: (exe: String, at: Date)] = [:]
 
-    func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int) {
+    /// `replace: false` fills only destinations with no entry inside the
+    /// hour: for names the connection is only GUESSED to be for (every DNS
+    /// name cached for its IP), which mustn't displace the program attested
+    /// for one of them.
+    func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int, replace: Bool = true) {
         lock.lock(); defer { lock.unlock() }
+        let cutoff = Date().addingTimeInterval(-3600)
         for d in destinations where !d.isEmpty {
-            recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, Date())
+            let key = "\(profileID.uuidString)|\(d.lowercased())|\(port)"
+            if !replace, let held = recentExes[key], held.at > cutoff, held.exe != exe { continue }
+            recentExes[key] = (exe, Date())
         }
         if recentExes.count > 2048 {
             let cutoff = Date().addingTimeInterval(-3600)
@@ -172,7 +179,10 @@ public final class BinaryIdentityService: @unchecked Sendable {
         let dst = EgressPolicy.ipv4String(dstIP)
         Task {
             let id = await self.identity(profileID: profileID, sport: sport, dst: dst, dport: dport)
-            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport)) }
+            // The names are every one cached for this IP — a guess at what
+            // the connection was for (a shared CDN address has many): they
+            // don't replace the program attested for any of them.
+            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport), replace: false) }
             let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
             self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, Date()); self.lock.unlock()
         }

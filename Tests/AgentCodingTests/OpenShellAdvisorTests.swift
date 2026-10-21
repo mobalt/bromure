@@ -296,6 +296,12 @@ struct OpenShellAdvisorTests {
         let rule = OpenShellAdvisor.allowRule(profileID: pid, host: "pypi.org", port: 443, ip: "151.101.0.223")
         #expect(rule.binaries == ["/usr/bin/curl"])
         #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org", "151.101.0.223"], port: 443) == "/usr/bin/curl")
+        // The L4 gate files a connection under every name cached for its IP
+        // (a guess): it fills a name with no program on record, never
+        // replaces the one attested for it.
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["pypi.org", "files.example"], port: 443, replace: false)
+        #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org"], port: 443) == "/usr/bin/curl")
+        #expect(ids.recentExe(profileID: pid, destinations: ["files.example"], port: 443) == "/tmp/evil")
         // No hostname on record (a bare-IP row): the IP's program, as before.
         #expect(ids.recentExe(profileID: pid, destinations: ["other.example", "151.101.0.223"], port: 443) == "/tmp/evil")
     }
