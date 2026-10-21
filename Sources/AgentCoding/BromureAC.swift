@@ -10788,6 +10788,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // System packages on request: an approved package is installed by
         // the guest's root supervisor (agentd → sandboxd), never by the agent.
         advisor.systemPackagesProvider = { modes.systemPackagesOn($0) }
+        advisor.enforceBinariesProvider = { [weak engine] in
+            engine?.guardrailsConfig(for: $0)?.egressPolicy?.enforceBinaries == true
+        }
         advisor.installPackages = { [weak self] pid, manager, packages in
             guard let self else { return (1, "the app is going away") }
             do {

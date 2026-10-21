@@ -4291,3 +4291,4 @@
 "Your answer is already on its way." = "Your answer is already on its way.";
 "“%@” wasn't wiped" = "“%@” wasn't wiped";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.";

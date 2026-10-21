@@ -73,6 +73,14 @@ public final class BinaryIdentityService: @unchecked Sendable {
         }
     }
 
+    /// The MiTM learned the flow's name (SNI or Host header) after asking
+    /// by IP: file the attested program under the name as well, which is
+    /// what the blocked row shows and what Allow looks it up by.
+    public func noteHost(_ identity: OpenShellPolicy.BinaryIdentity?, profileID: UUID, host: String?, port: Int) {
+        guard let identity, let host, !host.isEmpty, EgressPolicy.parseIPv4Address(host) == nil else { return }
+        noteExe(identity.exe, profileID: profileID, destinations: [host], port: port)
+    }
+
     /// The program that last connected to one of `destinations` on `port`
     /// within the hour, as the attestor reported it.
     public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {

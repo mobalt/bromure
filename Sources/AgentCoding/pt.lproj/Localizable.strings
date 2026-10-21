@@ -4257,3 +4257,4 @@
 "Your answer is already on its way." = "Sua resposta já está a caminho.";
 "“%@” wasn't wiped" = "«%@» não foi apagado";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Iniciou-se com o disco atual enquanto a pergunta estava aberta (uma automatização iniciou-o), por isso nada foi apagado e continua marcado como comprometido. Desligue-o e inicie-o novamente para o apagar.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Não foi possível saber qual programa tentou, e com «Enforce binaries» ativado uma regra deve indicar um. Tente a ligação novamente e depois permita-a.";

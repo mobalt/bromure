@@ -875,7 +875,7 @@ public final class SecurityTimeline {
             if let original = str(d, "host"), original != primary, !aliases.contains(original) {
                 aliases.insert(original, at: 0)
             }
-            e.firewall = Firewall(host: primary, ip: str(d, "ip"), port: int(d, "port"),
+            e.firewall = Firewall(host: primary, ip: str(d, "ip") ?? str(d, "dst_ip"), port: int(d, "port"),
                                   proto: str(d, "proto"), rule: rule,
                                   denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases)
             // Allowed connections are routine: repeats to one destination

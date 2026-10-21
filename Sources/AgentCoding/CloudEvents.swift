@@ -218,7 +218,8 @@ public final class BACEventEmitter: @unchecked Sendable {
             if case .int(let p)? = eventData["port"] { port = p }
             OpenShellAdvisor.shared.recordDenial(
                 profileID: profileID, layer: s("layer") ?? "l4", host: s("host") ?? s("ip") ?? "?",
-                port: port, method: s("method"), path: s("path"), reason: s("reason") ?? "no matching network policy")
+                port: port, method: s("method"), path: s("path"), reason: s("reason") ?? "no matching network policy",
+                ip: s("ip") ?? s("dst_ip"))
         }
         // Network lineage: every host decision about a flow (switch L4, MITM
         // L7, binary identity) joins the flow the sentry reports.

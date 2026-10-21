@@ -4259,3 +4259,4 @@
 "Your answer is already on its way." = "Tu respuesta ya está en camino.";
 "“%@” wasn't wiped" = "«%@» no se ha borrado";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Se inició con su disco actual mientras la pregunta estaba abierta (lo lanzó una automatización), así que no se borró nada y sigue marcado como comprometido. Apáguelo e inícielo de nuevo para borrarlo.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "No se pudo saber qué programa lo intentó, y con «Enforce binaries» activado una regla debe nombrar uno. Vuelva a intentar la conexión y luego permítala.";

@@ -264,7 +264,7 @@ struct PolicyDrawer: View {
         if isOpenShell {
             Button("Allow") { allowOpenShell(item, profile) }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-                .help(Text(BinaryIdentityService.shared.recentExe(profileID: profile.id, destinations: [item.host], port: item.port) != nil
+                .help(Text(BinaryIdentityService.shared.recentExe(profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) != nil
                            ? "Add a rule for this host and port, for the program that tried"
                            : "Add a rule for this host and port"))
         } else if let target = FirewallRuleActions.targets(for: item.fw).first,
@@ -301,9 +301,9 @@ struct PolicyDrawer: View {
 
     private func allowOpenShell(_ item: Blocked, _ profile: Profile) {
         busy.insert(item.key)
-        let pid = profile.id, host = item.host, port = item.port, key = item.key
+        let pid = profile.id, host = item.host, port = item.port, key = item.key, ip = item.fw.ip
         Task { @MainActor in
-            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port)
+            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, ip: ip)
             busy.remove(key)
             if let error { errors[key] = error } else { allowed.insert(key); errors[key] = nil }
         }
