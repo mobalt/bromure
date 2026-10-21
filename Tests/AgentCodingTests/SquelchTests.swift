@@ -421,6 +421,50 @@ struct SquelchRewriterTests {
 
 @Suite("Squelch: savings are counted once, where they happened")
 struct SquelchLedgerTests {
+    /// Finding (CWE-362): "Squelch ledger flush can replace a newer snapshot
+    /// with an older one". A flush wrote its snapshot outside the lock; the
+    /// quit flush could write a newer one first and then be overwritten by
+    /// the older in-flight rename. Flushes now run whole, one at a time.
+    @Test("a flush in flight finishes before the next one writes, so the newest snapshot is the one on disk")
+    func flushOrder() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("squelch-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let ledger = SquelchLedger(file: file)
+        let ws = UUID()
+        var o = SquelchRewriter.Outcome(body: Data())
+        o.seen = ["t1": 1000]
+        ledger.record(o, profileID: ws, conversation: nil)
+
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        final class Once: @unchecked Sendable { var first = true }
+        let once = Once()
+        ledger.beforeWrite = {
+            guard once.first else { return }
+            once.first = false
+            held.signal(); release.wait()      // the older write, paused mid-flight
+        }
+        let older = DispatchGroup()
+        DispatchQueue.global().async(group: older) { ledger.flush() }
+        held.wait()
+        // Meanwhile: more counted, then the quit flush.
+        o.seen = ["t2": 500]
+        ledger.record(o, profileID: ws, conversation: nil)
+        let quit = DispatchGroup()
+        DispatchQueue.global().async(group: quit) { ledger.flush() }
+        #expect(quit.wait(timeout: .now() + 0.3) == .timedOut)   // waits for the one in flight
+        release.signal()
+        older.wait()
+        #expect(quit.wait(timeout: .now() + 5) == .success)
+
+        let reloaded = SquelchLedger(file: file)
+        #expect(reloaded.workspace(ws)?.total.outputs == 2)
+        // Both outputs are known: resending them counts nothing more.
+        var again = SquelchRewriter.Outcome(body: Data())
+        again.seen = ["t1": 1000, "t2": 500]
+        reloaded.record(again, profileID: ws, conversation: nil)
+        #expect(reloaded.workspace(ws)?.total.outputs == 2)
+    }
+
     @Test("a result resent every turn counts once; conversations and days add up; the cloud report drains")
     func ledger() throws {
         let ledger = SquelchLedger(file: nil)

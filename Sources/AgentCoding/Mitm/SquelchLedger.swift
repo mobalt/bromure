@@ -72,6 +72,12 @@ final class SquelchLedger: @unchecked Sendable {
     private var seenDirty: Set<String> = []
     private var dirty = false
     private var saveScheduled = false
+    /// Held for a whole flush (snapshot AND write): flushes run one at a
+    /// time, in snapshot order, so an older snapshot's rename can never land
+    /// over a newer one's, and the quit flush waits for one in flight.
+    private let writeLock = NSLock()
+    /// Tests: runs between taking the snapshot and writing it.
+    var beforeWrite: (@Sendable () -> Void)?
     /// Called (off the main thread) when a workspace's numbers change.
     var onChange: (@Sendable (UUID) -> Void)?
 
@@ -371,6 +377,7 @@ final class SquelchLedger: @unchecked Sendable {
 
     /// Write now (tests, app termination).
     func flush() {
+        writeLock.lock(); defer { writeLock.unlock() }
         lock.lock()
         saveScheduled = false
         guard dirty, let file else { lock.unlock(); return }
@@ -382,8 +389,10 @@ final class SquelchLedger: @unchecked Sendable {
         }
         seenDirty = []
         let data = try? JSONEncoder().encode(state)
+        if data == nil { dirty = true }   // retried by the next flush
         lock.unlock()
         guard let data else { return }
+        beforeWrite?()
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: file, options: .atomic)
     }
