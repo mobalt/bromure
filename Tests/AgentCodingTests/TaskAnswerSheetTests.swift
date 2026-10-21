@@ -160,4 +160,27 @@ struct TaskAnswerSendTests {
         #expect(!RemoteHostController.answerAccepted(nil))
         #expect(RemoteHostController.answerAccepted(["ok": true]))
     }
+
+    /// Finding (CWE-362): "Refused task answers read the task store off the
+    /// main actor". The route's handler is typed @MainActor now, so it runs
+    /// there whatever context the closure is written in; the store read for a
+    /// refusal's reason can't leave it.
+    @Test("the answer handler runs on the main actor, called from a connection thread")
+    func answerHandlerIsMainActor() async {
+        final class Seen: @unchecked Sendable { var main = false; var error: String? }
+        let seen = Seen()
+        let handler: @MainActor (UUID, [String: Any]) async -> [String: Any] = { _, _ in
+            await Task.yield()
+            seen.main = Thread.isMainThread
+            return ["ok": false, "error": "refused"]
+        }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            Thread.detachNewThread {
+                seen.error = ACAutomationServer.awaitTaskAnswer(handler, id: UUID(), body: ["text": "x"])["error"] as? String
+                done.resume()
+            }
+        }
+        #expect(seen.main)
+        #expect(seen.error == "refused")
+    }
 }
