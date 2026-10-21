@@ -34,6 +34,14 @@ struct SandboxAptRunTests {
             """
         try fake.write(to: dir.appendingPathComponent("apt-get"), atomically: true, encoding: .utf8)
         chmod(dir.appendingPathComponent("apt-get").path, 0o755)
+        // Knows every name once the lists exist (the exact-name check), logs nothing.
+        let cache = """
+            #!/bin/sh
+            [ -f "$FAKE_DIR/lists" ] || { echo "E: No packages found"; exit 100; }
+            for n; do :; done; echo "Package: $n"; echo "Version: 1"
+            """
+        try cache.write(to: dir.appendingPathComponent("apt-cache"), atomically: true, encoding: .utf8)
+        chmod(dir.appendingPathComponent("apt-cache").path, 0o755)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         p.currentDirectoryURL = Self.vmSetup
@@ -59,12 +67,12 @@ struct SandboxAptRunTests {
         return String(decoding: data, as: UTF8.self)
     }
 
-    @Test("Missing lists: install, update, install again, all within one call",
+    @Test("Missing lists: update, then install, all within one call",
           .enabled(if: SandboxAptRunTests.runnable))
     func refreshThenInstall() throws {
         let out = try run("""
             code, text = m.apt_install(['curl'])
-            print('OK', code == 0 and 'installed' in text and calls().count('start') == 3)
+            print('OK', code == 0 and 'installed' in text and calls() == ['start', 'update', 'end', 'update', 'start', 'install', 'end', 'install'])
             """)
         #expect(out.contains("OK True"), Comment(rawValue: out))
     }

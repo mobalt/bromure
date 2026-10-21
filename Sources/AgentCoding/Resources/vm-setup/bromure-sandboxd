@@ -1755,6 +1755,13 @@ def is_descendant_of(pid, ancestor):
 # package gets installed, as root, and only by exact name: a name is
 # [a-z0-9][a-z0-9+.-]* (optionally =version or /release), never an option, a
 # path or a .deb, so nothing on the request line can change what apt does.
+#
+# The shape alone isn't enough: apt reads a name that isn't exactly a package
+# as something else. A trailing `-` removes (`python3-` uninstalls python3
+# and everything that needs it), a trailing `+` installs, and failing those
+# the name is tried as a glob, then a regex (`a.+` selects most of the
+# archive). So each name must be an exact binary package in apt's cache
+# before apt-get sees it; one that isn't is refused, never passed on.
 
 _APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$")
 
@@ -1818,11 +1825,32 @@ def _apt_step(argv, env, deadline, cancelled):
     return proc.returncode, out, why
 
 
-def apt_install(packages, cancelled=lambda: False):
+def _apt_package(spec):
+    """The package name in `spec` (before its `=version` or `/release`)."""
+    return re.split(r"[=/]", spec, 1)[0]
+
+
+def _apt_is_package(name, run):
+    """`name` is exactly one binary package's name in the apt cache.
+
+    `apt-cache show` falls back to a glob or regex as well when the name
+    isn't a package, so every record it prints must carry this very name.
+    """
+    code, out = run(["apt-cache", "show", "--no-all-versions", "--", name])
+    if code != 0:
+        return False
+    found = [line[len("Package:"):].strip() for line in out.splitlines()
+             if line.startswith("Package:")]
+    return bool(found) and all(p == name for p in found)
+
+
+def apt_install(packages, cancelled=lambda: False, run=None):
     """Install `packages` with apt-get. Returns (exit code, output tail).
 
     `cancelled()` is polled while apt runs: True = the caller has gone, and
-    apt is stopped before this returns.
+    apt is stopped before this returns. `run(argv)` -> (exit code, output)
+    runs one apt step (tests stub it); the default stops a step at the
+    call's deadline or when the caller goes.
     """
     if not isinstance(packages, list) or not packages or len(packages) > 20 \
             or not all(isinstance(p, str) and _APT_NAME.match(p) and not p.endswith(".deb")
@@ -1830,24 +1858,52 @@ def apt_install(packages, cancelled=lambda: False):
         return 2, "refused: not a list of 1 to 20 package names"
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive",
                APT_LISTCHANGES_FRONTEND="none", NEEDRESTART_MODE="a")
-    cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
     deadline = time.time() + APT_DEADLINE_S
+    stopped = []
+    if run is None:
+        def run(argv):
+            code, out, why = _apt_step(argv, env, deadline, cancelled)
+            if why:
+                stopped.append(why)
+            return code, out
+    # The exact-name checks and their list refresh run under the lock and
+    # inside the deadline too: they're apt calls like the install.
     if not _APT_LOCK.acquire(timeout=APT_DEADLINE_S):
         return 75, "another package install is still running"
     try:
         log("apt_install %s" % " ".join(packages))
-        code, out, stopped = _apt_step(cmd, env, deadline, cancelled)
-        # The image ships without package lists (or with stale ones): refresh
-        # once and retry. Not after a stop: that's the answer.
-        if not stopped and code != 0 and ("Unable to locate package" in out
-                                          or "has no installation candidate" in out
-                                          or "Failed to fetch" in out):
-            ucode, uout, stopped = _apt_step(["apt-get", "update"], env, deadline, cancelled)
+        out = ""
+        updated = False
+
+        def unknown():
+            return [p for p in packages
+                    if not stopped and not _apt_is_package(_apt_package(p), run)]
+
+        # The image ships without package lists (or with stale ones): a name
+        # apt doesn't know yet gets one refresh before it's refused.
+        missing = unknown()
+        if missing and not stopped:
+            ucode, uout = run(["apt-get", "update"])
+            out += uout
+            updated = ucode == 0 and not stopped
+            if updated:
+                missing = unknown()
+        if stopped:
+            log("apt_install %s: stopped: %s" % (" ".join(packages), stopped[0]))
+            return 1, out[-16000:]
+        if missing:
+            log("apt_install %s: refused, not package names: %s" % (" ".join(packages), " ".join(missing)))
+            return 2, (out + "\nrefused: no package is named exactly %s" % ", ".join(missing))[-16000:]
+
+        cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
+        code, out2 = run(cmd)
+        out += ("\n" if out else "") + out2
+        # Not after a stop: that's the answer.
+        if not stopped and code != 0 and not updated and "Failed to fetch" in out2:
+            ucode, uout = run(["apt-get", "update"])
             out += "\n" + uout
-            if stopped:
-                code = ucode if ucode else 1
-            elif ucode == 0:
-                code, out2, stopped = _apt_step(cmd, env, deadline, cancelled)
+            if ucode == 0 and not stopped:
+                code, out2 = run(cmd)
                 out += "\n" + out2
         if stopped and code == 0:
             code = 1
