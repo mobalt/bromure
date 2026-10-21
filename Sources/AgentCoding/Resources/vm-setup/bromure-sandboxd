@@ -1537,6 +1537,78 @@ SANDBOX_CGROUP_NAME = "bromure-sandbox"
 SENTRY_STATUS_PATH = os.path.join(RUN_DIR, "sentry.json")
 SENTRY_PHASE_PATH = "/sys/module/bromure_sentry/parameters/phase"
 SENTRY_CGROUP_PATH = "/sys/module/bromure_sentry/parameters/sandbox_cgroup"
+# The loader's unit (agentd starts it; it may wait for a module and build one).
+SENTRY_UNIT = "bromure-sentryd"
+# Its worst case: the host wait, then apt and make at 900 s each.
+SENTRY_SETTLE_S = 45 + 900 + 900 + 60
+SENTRY_UNIT_GRACE_S = 10.0
+
+
+def _unit_active(unit):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class SentryHold(object):
+    """`sentry.requirement: hard` = no workload before the sentry watches.
+
+    The loader runs in its own unit and can take minutes for a kernel the host
+    has no module staged for, so the supervisor can't simply wait for it before
+    serving: agentd needs the control socket to come up. Instead, while held,
+    the supervisor starts no tmux server and runs no `exec` -- nothing of the
+    workload's -- until the loader settles: running, or unavailable with its
+    reason (the host judges that per the requirement). A loader whose unit is
+    gone without a verdict, or one past its own worst case, releases the hold,
+    so a dead loader can't keep the workspace sessionless forever.
+    """
+
+    def __init__(self, hard, unit_active=_unit_active, now=time.time,
+                 deadline_s=SENTRY_SETTLE_S, grace_s=SENTRY_UNIT_GRACE_S,
+                 status_path=None):
+        self.hard = bool(hard)
+        self.unit_active = unit_active
+        self.now = now
+        self.started = now()
+        self.deadline_s = deadline_s
+        self.grace_s = grace_s
+        self.status_path = status_path or SENTRY_STATUS_PATH
+        self.released = not self.hard
+
+    def state(self):
+        try:
+            with open(self.status_path) as handle:
+                return (json.load(handle) or {}).get("sentry")
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def held(self):
+        """True while the workload must wait. Once released, stays released."""
+        if self.released:
+            return False
+        state = self.state()
+        elapsed = self.now() - self.started
+        if state in ("running", "unavailable", "off"):
+            why = "the sentry settled: %s" % state
+        elif elapsed > self.deadline_s:
+            why = "no sentry verdict after %.0fs" % self.deadline_s
+        elif elapsed > self.grace_s and not self.unit_active(SENTRY_UNIT):
+            why = "the sentry loader ended without a verdict (%s)" % state
+        else:
+            return True
+        self.released = True
+        log("sentry hold released after %.0fs: %s" % (elapsed, why))
+        return False
+
+    def wait(self, poll=1.0):
+        while self.held():
+            time.sleep(poll)
+
+
+WAITING_FOR_SENTRY = ("waiting for the kernel sentry to load (requirement: hard); "
+                      "the workload starts once it does")
 
 
 def mark_sentry_session():
@@ -1720,9 +1792,10 @@ def apt_install(packages):
 
 
 class Supervisor(object):
-    def __init__(self, plan, status, agentd_pid):
+    def __init__(self, plan, status, agentd_pid, sentry_hold=None):
         self.plan = plan
         self.status = status
+        self.sentry_hold = sentry_hold or SentryHold(False)
         self.agentd_pid = agentd_pid
         self.starts = 0            # supervisor-performed starts, total
         self.start_times = []
@@ -1900,6 +1973,8 @@ class Supervisor(object):
         # into a failure.
         if server_pid() is not None:
             return True, None
+        if self.sentry_hold.held():
+            return False, WAITING_FOR_SENTRY
         allowed, why = self.may_start()
         if not allowed:
             log("refusing to start the server (%s): %s" % (reason, why))
@@ -2099,6 +2174,14 @@ class Supervisor(object):
         thread: an interactive shell here lasts as long as the user's session,
         and a single-threaded supervisor would stop answering anything else.
         """
+        if self.sentry_hold.held():
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            conn.sendall((json.dumps({"ok": False, "reason": WAITING_FOR_SENTRY}) + "\n").encode())
+            return
         pid, error = exec_in_sandbox(
             self.plan, self.live_agentd_pid(),
             request.get("argv"), request.get("cwd"), request.get("env"),
@@ -2662,7 +2745,29 @@ def main():
     mark_sentry_cgroup(sandbox_cgroup)
 
     agentd_pid = _agentd_pid()
-    supervisor = Supervisor(plan, status, agentd_pid)
+    hard = ((spec.get("sentry") or {}).get("enabled")
+            and (spec.get("sentry") or {}).get("requirement") == "hard")
+    supervisor = Supervisor(plan, status, agentd_pid, SentryHold(hard))
+
+    if supervisor.sentry_hold.held():
+        # Serve the control socket now (agentd waits for it) and start the
+        # server only once the sentry has settled; until then `start` and
+        # `exec` answer that they're waiting.
+        log(WAITING_FOR_SENTRY)
+        supervisor.publish()
+
+        def _start_when_settled():
+            supervisor.sentry_hold.wait()
+            ok, why = supervisor.start("initial, after the sentry")
+            if not ok:
+                log("initial start failed: %s" % why)
+                supervisor.publish()
+            return ok
+        if os.environ.get("BROMURE_SANDBOXD_ONESHOT"):
+            return 0 if _start_when_settled() else 1
+        threading.Thread(target=_start_when_settled, daemon=True).start()
+        supervisor.serve_control()
+        return 0
 
     ok, why = supervisor.start("initial")
     if not ok:

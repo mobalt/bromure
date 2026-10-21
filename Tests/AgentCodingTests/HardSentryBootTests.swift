@@ -113,4 +113,51 @@ struct HardSentryBootTests {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
+
+    /// The supervisor is what creates the session (its initial start), and
+    /// what runs `vm exec` and interactive shells: the hold has to be there,
+    /// not only in agentd.
+    @Test("The supervisor starts no server and runs no exec while a hard sentry hasn't settled",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func supervisorHolds() throws {
+        let out = try run("""
+            import types, importlib.machinery
+            os.uname = lambda: types.SimpleNamespace(sysname='Linux', nodename='t', release='6.8', version='', machine='aarch64')
+            ld = importlib.machinery.SourceFileLoader('sandboxd', 'bromure-sandboxd')
+            sd = importlib.util.module_from_spec(importlib.util.spec_from_loader('sandboxd', ld)); ld.exec_module(sd)
+            sd.log = lambda *a: None
+            st = d + '/sentry-status.json'
+            def status(state): json.dump({'sentry': state}, open(st, 'w'))
+            started = []
+            sd.start_server = lambda plan, tgid: (started.append(1), (None, {'ok': True}))[1]
+            sd.server_pid = lambda: None
+            sd.write_status = lambda s: None
+            status('waiting')
+            hold = sd.SentryHold(True, unit_active=lambda u: True, status_path=st)
+            sup = sd.Supervisor(types.SimpleNamespace(uid=1000, gid=1000, owner_uid=1000, owner_gid=1000, sandbox_cgroup=None),
+                                {'warnings': []}, None, hold)
+            sup.publish = lambda *a, **k: None
+            ok, why = sup.start('initial')
+            print('START_HELD', not ok and why == sd.WAITING_FOR_SENTRY and not started)
+            class Conn:
+                sent = b''
+                def sendall(self, b): Conn.sent += b
+            r, w = os.pipe()
+            sup.handle_exec(Conn(), {'argv': ['/bin/true']}, [r, w])
+            closed = all(not os.path.exists('/dev/fd/%d' % fd) for fd in (r, w))
+            print('EXEC_HELD', b'waiting for the kernel sentry' in Conn.sent and closed)
+            status('running')
+            ok, why = sup.start('initial')
+            print('START_AFTER', ok and started == [1])
+            # A dead loader releases the hold; best effort never holds.
+            status('waiting')
+            dead = sd.SentryHold(True, unit_active=lambda u: False, grace_s=0, status_path=st)
+            time.sleep(0.01)
+            print('DEAD_RELEASES', not dead.held())
+            print('BEST_EFFORT', not sd.SentryHold(False, status_path=st).held())
+            """)
+        for key in ["START_HELD", "EXEC_HELD", "START_AFTER", "DEAD_RELEASES", "BEST_EFFORT"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
 }
