@@ -200,6 +200,13 @@ public final class BACEventEmitter: @unchecked Sendable {
         // Local Security Timeline — ALWAYS, before either gate below. It's an
         // on-device view of what the engines did on the user's own machine,
         // independent of the enrolled-only, cloud-bound telemetry.
+        #if os(macOS)
+        // Tell the agent its action was refused by policy (on by default
+        // under an OpenShell policy), so it asks instead of routing around.
+        // FIRST: the note races the agent's own PostToolUse hook, so it
+        // mustn't wait behind the timeline's main-actor record.
+        PolicySteering.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
+        #endif
         await SecurityTimeline.shared.record(profileID: profileID,
                                              eventType: eventType, eventData: eventData)
         #if os(macOS)
@@ -225,9 +232,6 @@ public final class BACEventEmitter: @unchecked Sendable {
                 profileID: profileID, proto: s("proto") ?? "tcp", dst: dst, dport: port,
                 action: s("action") ?? "allow", layer: layer, reason: s("reason"), host: s("host"))
         }
-        // Tell the agent its action was refused by policy (on by default
-        // under an OpenShell policy), so it asks instead of routing around.
-        PolicySteering.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
         // The agent watchdog judges the session as a whole (off by default).
         AgentWatchdog.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
         // OCSF JSONL export (SIEM) — local like the timeline; off by default.
