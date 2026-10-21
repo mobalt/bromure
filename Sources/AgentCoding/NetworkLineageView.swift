@@ -235,6 +235,7 @@ struct NetworkLineageView: View {
              title: l.tool.map { String(format: NSLocalizedString("Tool call · %@", comment: "network lineage step"), $0) }
                 ?? NSLocalizedString("Tool call", comment: "network lineage step"),
              accessory: l.confidence.map { AnyView(Chip(text: $0 == "exact" ? NSLocalizedString("exact match", comment: "network lineage")
+                                                                      : $0 == "likely" ? NSLocalizedString("likely match", comment: "network lineage")
                                                                       : $0, tint: .indigo)) },
              dimmed: l.toolUseID == nil) {
             if let c = l.command {

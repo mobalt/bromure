@@ -71,8 +71,10 @@ The existing `connect` kind can stay for the attestor cross-check, or be retired
 3. **Shell ↔ tool call.** A shell exec'd under the agent process whose argv contains the tool
    call's command (after undoing the agent's quoting: Claude Code runs
    `bash -c '… eval '"'"'<cmd>'"'"' …'`) within 30 s after the response. `confidence`:
-   `exact` (normalized command found in argv), `fuzzy` (first word + timing + agent
-   ancestry), `none`.
+   `exact` (the command's words, quotes removed, found whole and in order in the argv's,
+   at least 8 characters), `likely` (the same, shorter: `id`, `ls -la`), `fuzzy` (first
+   word + timing + agent ancestry), `none`. Of several matching calls, the longest
+   command wins (newest on a tie), so a short one never claims a longer one's shell.
 4. **Flow ↔ decision.** Match the switch's egress decision on (proto, dst, dport, and sport when
    present) within 5 s; the L7 (MITM) decision for the same 5-tuple when it was inspected.
    ICMP isn't filtered: `decision: "unfiltered"`.

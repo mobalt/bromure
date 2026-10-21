@@ -86,6 +86,32 @@ struct NetworkLineageTests {
         #expect(NetworkLineage.matchToolCall(argv: #"bash -c -l eval 'echo '"'"'hi there'"'"' | nc 1.2.3.4 80'"#, calls: q, at: t0 + 1)?.toolUseID == "q")
     }
 
+    /// Finding (CWE-670): "Tool-call matching treats a 2-character substring
+    /// as an exact link". `id` claimed any argv containing those letters, and
+    /// newest-first let it steal a longer command it sat inside.
+    @Test("A short command matches only whole words, never as exact, and never over a longer one")
+    func shortCommandMatches() {
+        let t0 = Date()
+        let idCall = NetworkLineage.ToolCall(id: "id", tool: "Bash", command: "id", reasoning: "", at: t0 + 2)
+        let curl = NetworkLineage.ToolCall(id: "curl", tool: "Bash", command: "curl -s https://api.example/valid?id=1",
+                                           reasoning: "", at: t0)
+        // Letters inside another word, a URL path or query: no link.
+        for argv in ["bash -c width", "consider --valid", "curl -s https://x.example/id/7", "printf %s idle"] {
+            #expect(NetworkLineage.matchToolCall(argv: argv, calls: [idCall], at: t0 + 3) == nil, "\(argv)")
+        }
+        // The word itself: linked, but only "likely".
+        let short = NetworkLineage.matchToolCall(argv: "/bin/bash -c -l eval 'id' < /dev/null", calls: [idCall], at: t0 + 3)
+        #expect(short?.toolUseID == "id" && short?.confidence == "likely")
+        // A newer short call doesn't steal the longer command it sits inside.
+        let both = NetworkLineage.matchToolCall(argv: "bash -c curl -s https://api.example/valid?id=1 id",
+                                                calls: [curl, idCall], at: t0 + 3)
+        #expect(both?.toolUseID == "curl" && both?.confidence == "exact")
+        // Words in order and contiguous: the same words elsewhere don't link.
+        let ping = NetworkLineage.ToolCall(id: "p", tool: "Bash", command: "ping -c1 1.1.1.1", reasoning: "", at: t0)
+        #expect(NetworkLineage.matchToolCall(argv: "ping 1.1.1.1 -c1", calls: [ping], at: t0 + 1) == nil)
+        #expect(NetworkLineage.matchToolCall(argv: "bash -c 'ping -c1 1.1.1.1'", calls: [ping], at: t0 + 1)?.confidence == "exact")
+    }
+
     /// Finding (CWE-670): "Process lineage walks parents by pid and drops
     /// start_ns". The walk followed `byPid[ppid]` — the newest process with
     /// that pid — so once the agent exited and its pid was reused, the flow
