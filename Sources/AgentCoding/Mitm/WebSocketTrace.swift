@@ -286,9 +286,14 @@ final class WSTraceCollector: @unchecked Sendable {
     /// is the only writer.
     var onMessage: (@Sendable (WSMessage) -> Void)?
 
-    init(direction: WSMessage.Direction, inflater: WSInflater? = nil) {
+    /// false: a parser that only fires `onMessage` and keeps nothing (a
+    /// socket nobody traces, whose messages are still read — Squelch).
+    let retainsMessages: Bool
+
+    init(direction: WSMessage.Direction, inflater: WSInflater? = nil, retainsMessages: Bool = true) {
         self.direction = direction
         self.inflater = inflater
+        self.retainsMessages = retainsMessages
     }
 
     /// Feed a chunk of bytes. Internally parses frames, defragments
@@ -387,7 +392,7 @@ final class WSTraceCollector: @unchecked Sendable {
             payload: payload,
             truncated: truncated,
             totalBytes: pendingTotal)
-        messages.append(msg)
+        if retainsMessages { messages.append(msg) }
         onMessage?(msg)
         pendingKind = nil
         pendingPayload = Data()
@@ -404,7 +409,7 @@ final class WSTraceCollector: @unchecked Sendable {
             payload: preview,
             truncated: payload.count > preview.count,
             totalBytes: payload.count)
-        messages.append(msg)
+        if retainsMessages { messages.append(msg) }
         onMessage?(msg)
     }
 

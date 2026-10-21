@@ -1,4 +1,5 @@
 import Darwin
+import SandboxEngine
 import Foundation
 import Testing
 @testable import bromure_ac
@@ -268,6 +269,53 @@ struct WebSocketTransformTests {
         let msg = try #require(h.serverFrames(1).first)
         let out = try #require((json(msg.payload)["input"] as? [[String: Any]])?.first?["output"] as? String)
         #expect(!out.contains("test_5 PASSED") && out.contains("FAILED tests/t.py::test_x"))
+    }
+
+    /// Finding (CWE-670): "OpenShell WebSocket policy or rewrite skips
+    /// Squelch for the whole socket". A socket with an OpenShell message
+    /// policy or rewrite runs on the per-message pump, with no guard — and
+    /// Squelch ran only in the guard.
+    @Test("On the OpenShell pump: Squelch trims client text ahead of the rewrite, and server calls are learned")
+    func squelchOnPolicyPump() throws {
+        let pid = UUID()
+        let saved = HTTPMitmConnection.squelchPolicyProvider
+        defer { HTTPMitmConnection.squelchPolicyProvider = saved }
+        HTTPMitmConnection.squelchPolicyProvider = { $0 == pid ? SquelchPolicy(enabled: true) : nil }
+        #expect(WSContentGuard.squelchApplies(host: "chatgpt.com", profileID: pid))
+        #expect(!WSContentGuard.squelchApplies(host: "example.com", profileID: pid))
+
+        // The server announces the call (a chained turn's bare result needs it):
+        // read by a parser that keeps nothing, as the pump does.
+        let learner = WSTraceCollector(direction: .upstreamToClient, retainsMessages: false)
+        learner.onMessage = { msg in
+            if msg.kind == .text { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_p","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        learner.feed(frame(0x1, done, masked: false))
+        #expect(learner.messages.isEmpty)
+
+        // The OpenShell credential rewrite runs after the trim, on its output.
+        final class Seen: @unchecked Sendable { var text = "" }
+        let seen = Seen()
+        let rewrite: (String) -> OpenShellWebSocket.MessageTransform = { t in
+            seen.text = t
+            return t.contains("PLACEHOLDER") ? .replaced(t.replacingOccurrences(of: "PLACEHOLDER", with: "real")) : .unchanged
+        }
+        let ledger = SquelchLedger(file: nil)
+        let transform = WSContentGuard.squelchingTransform(then: rewrite, profileID: pid, conversation: nil, ledger: ledger)
+        let noisy = (0..<120).map { "tests/t.py::test_\($0) PASSED" }.joined(separator: "\n") + "\nFAILED tests/t.py::test_x\n"
+        let create: [String: Any] = ["type": "response.create", "previous_response_id": "resp_1", "metadata": ["k": "PLACEHOLDER"],
+                                     "input": [["type": "function_call_output", "call_id": "call_p", "output": noisy]]]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: create), as: UTF8.self)
+        guard case .replaced(let out) = transform(text) else { Issue.record("not rewritten"); return }
+        #expect(!out.contains("test_5 PASSED") && out.contains("FAILED tests/t.py::test_x"))
+        #expect(out.contains("\"real\"") && !out.contains("PLACEHOLDER"))
+        #expect(!seen.text.contains("test_5 PASSED"))                     // the rewrite saw the trimmed text
+        #expect(ledger.workspace(pid)?.total.trimmed == 1)
+        // A rewrite's failure still fails the message.
+        let failing = WSContentGuard.squelchingTransform(then: { _ in .failed("nope", failOpen: false) },
+                                                        profileID: pid, conversation: nil, ledger: ledger)
+        guard case .failed = failing("{}") else { Issue.record("failure lost"); return }
     }
 
     @Test("Stand-ins split across delta messages come back whole; full texts restored")

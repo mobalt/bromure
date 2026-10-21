@@ -1642,10 +1642,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // An OpenShell message policy needs the opaque pump's per-message
             // gate, so it takes precedence: policy enforcement is never traded
             // for scanning.
-            let contentGuard = (insecure || messagePolicy != nil || messageTransform != nil) ? nil
-                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID,
-                                      conversation: SquelchRewriter.sessionKey(
-                                        headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self)))
+            let wsConversation = SquelchRewriter.sessionKey(
+                headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self))
+            let onPolicyPump = messagePolicy != nil || messageTransform != nil
+            let contentGuard = (insecure || onPolicyPump) ? nil
+                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID, conversation: wsConversation)
+            // Squelch on the policy pump too: client text trimmed ahead of the
+            // OpenShell rewrites, server events read for the calls a chained
+            // turn's bare results are matched with. (It has no other socket
+            // path; PII / prompt injection still skip this pump.)
+            let squelchOnPump = !insecure && onPolicyPump
+                && WSContentGuard.squelchApplies(host: host, profileID: profileID)
+            if squelchOnPump {
+                messageTransform = WSContentGuard.squelchingTransform(then: messageTransform, profileID: profileID,
+                                                                      conversation: wsConversation)
+            }
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
                 rawRequest: upgradeRequest,
@@ -1655,6 +1666,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 messageTransform: messageTransform,
                 onViolation: onViolation,
                 contentGuard: contentGuard,
+                squelchLearnFor: squelchOnPump ? profileID : nil,
                 onUpstreamMessage: realtimeTap.map { tap in
                     { @Sendable msg in tap.handle(msg) }
                 })
@@ -2689,6 +2701,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                         messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)? = nil,
                                         onViolation: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                                         contentGuard: WSContentGuard? = nil,
+                                        squelchLearnFor: UUID? = nil,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
         // This path bypasses URLSession, so it must resolve the same
         // upstream TLS material `ClientCertChallengeDelegate` supplies on
@@ -2847,7 +2860,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
         let u2cCollector = captureBody
             ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
-        u2cCollector?.onMessage = onUpstreamMessage
+        // Squelch's server side on the pump: the model's calls, learned from
+        // every server text message — through the trace collector when there
+        // is one, else a parser that keeps nothing.
+        let learn: (@Sendable (WSMessage) -> Void)? = squelchLearnFor.map { pid in
+            { msg in
+                if msg.kind == .text, !msg.truncated {
+                    SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid)
+                }
+            }
+        }
+        let u2cLearner = (u2cCollector == nil && learn != nil)
+            ? WSTraceCollector(direction: .upstreamToClient,
+                               inflater: deflate.map { WSInflater(noContextTakeover: $0.serverNoContextTakeover) },
+                               retainsMessages: false) : nil
+        u2cLearner?.onMessage = learn
+        if let learn {
+            let tap = onUpstreamMessage
+            u2cCollector?.onMessage = { msg in learn(msg); tap?(msg) }
+        } else {
+            u2cCollector?.onMessage = onUpstreamMessage
+        }
         // OpenShell per-message inspection of client text (see caller).
         let inspector = messagePolicy.map { decide in
             OpenShellWebSocket.ClientStream(compression: deflate != nil, decide: { text in
@@ -2916,7 +2949,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); u2cLearner?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
