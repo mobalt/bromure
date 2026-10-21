@@ -223,7 +223,8 @@ public final class BACEventEmitter: @unchecked Sendable {
         }
         // Network lineage: every host decision about a flow (switch L4, MITM
         // L7, binary identity) joins the flow the sentry reports.
-        if eventType == "egress.firewall" {
+        // An event without an action decides nothing (never a guessed allow).
+        if eventType == "egress.firewall", case .string(let action)? = eventData["action"] {
             func s(_ k: String) -> String? { if case .string(let v)? = eventData[k] { return v }; return nil }
             var port = 0
             if case .int(let p)? = eventData["port"] { port = p }
@@ -231,7 +232,7 @@ public final class BACEventEmitter: @unchecked Sendable {
             let dst = s("ip") ?? s("host").map { "host:\($0)" } ?? "?"
             NetworkLineage.shared.noteDecision(
                 profileID: profileID, proto: s("proto") ?? "tcp", dst: dst, dport: port,
-                action: s("action") ?? "allow", layer: layer, reason: s("reason"), host: s("host"))
+                action: action, layer: layer, reason: s("reason"), host: s("host"))
         }
         // The agent watchdog judges the session as a whole (off by default).
         AgentWatchdog.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
