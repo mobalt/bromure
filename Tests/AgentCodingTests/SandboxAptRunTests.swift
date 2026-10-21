@@ -29,11 +29,30 @@ struct SandboxAptRunTests {
               update) i=0; while [ $i -lt ${UPDATE_SLEEP:-0} ]; do sleep 1; i=$((i+1)); done
                       touch "$FAKE_DIR/lists"; echo "end update" >> "$log"; exit 0 ;;
               install) if [ ! -f "$FAKE_DIR/lists" ]; then echo "E: Unable to locate package curl"; echo "end install" >> "$log"; exit 100; fi
+                       # DPKG: start dpkg in a session of its own and wait for
+                       # it, as apt does; this apt-get dies at once on TERM.
+                       if [ -n "${DPKG:-}" ]; then python3 "$FAKE_DIR/dpkg.py" & wait $!; fi
                        sleep ${INSTALL_SLEEP:-0}; echo "end install" >> "$log"; echo "installed"; exit 0 ;;
             esac
             """
         try fake.write(to: dir.appendingPathComponent("apt-get"), atomically: true, encoding: .utf8)
         chmod(dir.appendingPathComponent("apt-get").path, 0o755)
+        let dpkg = """
+            import os, signal, sys, time
+            os.setsid()
+            def note(s):
+                with open(os.environ["FAKE_LOG"], "a") as h: h.write(s + "\\n")
+            open(os.environ["FAKE_DIR"] + "/dpkg.pid", "w").write(str(os.getpid()))
+            def term(*a):
+                if os.environ.get("DPKG") == "stubborn":
+                    note("dpkg-ignores-TERM"); return
+                note("dpkg-TERM"); time.sleep(1); note("dpkg-END"); sys.exit(0)
+            signal.signal(signal.SIGTERM, term)
+            note("dpkg-start")
+            for _ in range(600): time.sleep(0.1)
+            note("dpkg-ran-out")
+            """
+        try dpkg.write(to: dir.appendingPathComponent("dpkg.py"), atomically: true, encoding: .utf8)
         // Knows every name once the lists exist (the exact-name check), logs nothing.
         let cache = """
             #!/bin/sh
@@ -92,6 +111,36 @@ struct SandboxAptRunTests {
             """)
         #expect(out.contains("DEADLINE True"), Comment(rawValue: out))
         #expect(out.contains("CANCELLED True"), Comment(rawValue: out))
+    }
+
+    /// Finding (CWE-670): "apt stop signals only apt-get's process group,
+    /// so dpkg and maintainer scripts keep running". apt starts dpkg with
+    /// setsid; killpg of apt's group let apt die at once and returned while
+    /// dpkg went on as root (and the install lock let the next apt in).
+    @Test("A stop reaches the dpkg apt started in its own session, and returns only once it's gone",
+          .enabled(if: SandboxAptRunTests.runnable))
+    func stopsDpkgToo() throws {
+        let out = try run("""
+            import subprocess
+            def alive(p):
+                r = subprocess.run(['ps', '-o', 'stat=', '-p', str(p)], capture_output=True, text=True).stdout.strip()
+                return bool(r) and not r.startswith('Z')
+            open(D + '/lists', 'w').close()
+            os.environ['DPKG'] = '1'
+            gone = time.time() + 2.5
+            code, text = m.apt_install(['curl'], cancelled=lambda: time.time() > gone)
+            pid = int(open(D + '/dpkg.pid').read()); c = calls()
+            print('GRACEFUL', code != 0 and 'dpkg-start' in c and 'dpkg-TERM' in c and 'dpkg-END' in c and not alive(pid))
+            reset(); open(D + '/lists', 'w').close()
+            os.environ['DPKG'] = 'stubborn'; m.APT_STOP_GRACE_S = 2
+            gone = time.time() + 2.5
+            t = time.time(); code, text = m.apt_install(['curl'], cancelled=lambda: time.time() > gone)
+            pid = int(open(D + '/dpkg.pid').read()); c = calls()
+            print('KILLED', code != 0 and 'dpkg-ignores-TERM' in c and 'dpkg-ran-out' not in c
+                  and not alive(pid) and time.time() - t < 20)
+            """)
+        #expect(out.contains("GRACEFUL True"), Comment(rawValue: out))
+        #expect(out.contains("KILLED True"), Comment(rawValue: out))
     }
 
     @Test("A second install waits for the one in flight instead of running beside it",
