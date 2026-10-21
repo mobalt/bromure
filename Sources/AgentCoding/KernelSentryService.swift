@@ -68,14 +68,26 @@ public final class KernelSentryService: @unchecked Sendable {
         VMNetSwitch.shared.setContainerTrafficDirect(on, profileID: profileID)
     }
 
-    /// Egress traffic control changed in this VM after boot: stop honouring
-    /// the container mark until the VM reboots.
+    /// Egress traffic control changed in this VM (at any point of this boot,
+    /// boot phase included): stop honouring the container mark until the VM
+    /// reboots.
     func revokeContainerMark(profileID: UUID) -> Bool {
         lock.lock()
         let first = containerMarkRevoked.insert(profileID).inserted
         lock.unlock()
         refreshContainerDirect(profileID: profileID)
         return first
+    }
+
+    /// The sentry's tc probes (bromure_sentry.c `sentry_tc_probes`). The
+    /// mark can only be trusted while every one is armed: a `tc` pedit
+    /// rewrites DSCP after the sentry's hook, so watching tc is the only
+    /// guard, and a kernel missing one of these symbols can't watch it.
+    static let tcProbeSymbols: Set<String> = ["tc_modify_qdisc", "tc_new_tfilter", "tc_ctl_action"]
+
+    /// The hello's probe list names every tc probe.
+    static func watchesTrafficControl(_ hello: [String: Any]) -> Bool {
+        tcProbeSymbols.isSubset(of: Set((hello["probes"] as? [String]) ?? []))
     }
 
     /// A new boot's hello: the revocation was for the previous boot.
@@ -426,8 +438,12 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         }
         persistPin()
         if conn == 0 { KernelSentryService.shared.rearmContainerMark(profileID: profileID) }
-        KernelSentryService.shared.noteContainerMark(
-            profileID: profileID, active: (hello["container_mark"] as? Int) == Int(VMNetSwitch.containerDSCP))
+        let stamps = (hello["container_mark"] as? Int) == Int(VMNetSwitch.containerDSCP)
+        let watchesTC = KernelSentryService.watchesTrafficControl(hello)
+        KernelSentryService.shared.noteContainerMark(profileID: profileID, active: stamps && watchesTC)
+        if stamps, !watchesTC, KernelSentryService.shared.containerDirectProvider(profileID) {
+            alarm("sentry_tc_unwatched", "the kernel sentry can't watch traffic control (tc) on this kernel, so the container mark could be faked: container traffic stays intercepted", weight: 0)
+        }
         var data: [String: AnyJSON] = ["state": .string("connected")]
         if let k = info.kernel { data["kernel"] = .string(k) }
         if let m = info.module { data["module"] = .string(m) }
@@ -496,6 +512,8 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             lock.unlock()
             if nowDisarmed, !wasDisarmed {
                 alarm("tampering", "\(total - armed) of the kernel sentry's \(total) probes were disarmed", weight: 20)
+                // A disarmed probe may be a tc one: tc can't be watched now.
+                _ = KernelSentryService.shared.revokeContainerMark(profileID: profileID)
             }
             if missed > 0 {
                 alarm("sentry_overflow", "kernel probes missed \(missed) hit(s)", weight: 2)
@@ -531,10 +549,13 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
                 alarm("sentry_boot_phase", "the kernel sentry still labels events as boot-time \(Int(KernelSentryService.bootBudget))s after the VM started", weight: 0)
             }
         }
-        // Egress traffic control (`tc`) changed after boot: it can rewrite the
-        // container mark after the sentry's hook, so the mark is untrusted for
-        // the rest of this boot and container traffic goes back to the proxy.
-        if kind == "tc_change", (fields["phase"] as? String) != "boot" {
+        // Egress traffic control (`tc`) changed: it can rewrite the container
+        // mark after the sentry's hook, so the mark is untrusted for the rest
+        // of this boot and container traffic goes back to the proxy. Boot
+        // phase included: a qdisc a unit on the workspace disk installs before
+        // the session starts keeps rewriting DSCP after it, and nothing of
+        // Bromure's own boot uses tc (docker attaches qdiscs without it).
+        if kind == "tc_change" {
             let who = "\(frame["comm"] as? String ?? "?") (pid \(frame["pid"] as? Int ?? 0))"
             if KernelSentryService.shared.revokeContainerMark(profileID: profileID),
                KernelSentryService.shared.containerDirectProvider(profileID) {
