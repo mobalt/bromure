@@ -2840,8 +2840,17 @@ def docker_err(msg):
     _atomic_publish(".docker-error.tmp", "docker-error.txt", msg)
 
 
+# The automation run a refusal belongs to (set by _automation_run): its slug
+# rides on the error's first line, so the host marks that run failed rather
+# than leaving it "launched" (Finding CWE-670, "A review whose base cannot be
+# fetched is recorded as a successful launch").
+_RUN_CTX = threading.local()
+
+
 def worktree_err(msg):
-    _atomic_publish(".worktree-error.tmp", "worktree-error.txt", msg)
+    slug = getattr(_RUN_CTX, "slug", None)
+    _atomic_publish(".worktree-error.tmp", "worktree-error.txt",
+                    ("run-slug: %s\n" % slug if slug else "") + msg)
 
 
 def docker_run_status(state, image, done, total):
@@ -4666,6 +4675,14 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
 
 
 def _automation_run(cwd, slug, display, tool, prompt_b64, mode="", base=""):
+    _RUN_CTX.slug = slug
+    try:
+        _automation_run_body(cwd, slug, display, tool, prompt_b64, mode, base)
+    finally:
+        _RUN_CTX.slug = None
+
+
+def _automation_run_body(cwd, slug, display, tool, prompt_b64, mode="", base=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
     Unattended, so the agent launches in yolo mode (no trust/permission

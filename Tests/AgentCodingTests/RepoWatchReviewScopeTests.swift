@@ -502,4 +502,25 @@ struct ReviewRunAgentdTests {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
+
+    /// Finding (CWE-670): "A review whose base cannot be fetched is recorded
+    /// as a successful launch" — the refusal now names its run.
+    @Test("A run refused for its base names its slug in worktree-error.txt",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func refusalNamesRun() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            published = []
+            m._atomic_publish = lambda tmp, name, text: published.append((name, text))
+            m._resolve_run_base = lambda cwd, base: None
+            m._automation_run(repo, 'review-dead', 'Review', 'claude', '', mode='review', base='d' * 40)
+            name, text = published[-1]
+            print('NAMED', name == 'worktree-error.txt' and text.startswith('run-slug: review-dead\\n'))
+            # Outside a run, an error carries no slug (merge, pr, …).
+            m.worktree_err('merge: conflicts')
+            print('PLAIN', published[-1][1] == 'merge: conflicts')
+            """, dir: dir)
+        for key in ["NAMED", "PLAIN"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
 }
