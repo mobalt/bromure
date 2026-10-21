@@ -281,6 +281,12 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
     private let pinFile: URL?
     private var pinnedBootID: String?
     private var lastConn = 0
+    /// The boot whose container mark was revoked (tc changed, a probe went
+    /// dark), kept with the pin: a restore keeps that boot's kernel — and
+    /// the qdisc — so the reconnect mustn't trust the mark again (Finding
+    /// CWE-693, "Restoring a VM forgets a container-mark revocation while
+    /// the tc rule is still installed").
+    private var markRevokedBoot: String?
 
     init(profileID: UUID, requirement: KernelSentryMode, restoring: Bool, strict: Bool = false,
          pinFile: URL? = nil) {
@@ -297,6 +303,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
                 pinnedSecret = o["secret"] as? String
                 pinnedBootID = o["boot_id"] as? String
                 lastConn = o["conn"] as? Int ?? 0
+                markRevokedBoot = (o["mark_revoked_boot"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             }
         } else {
             // A fresh boot loads a fresh module with a fresh secret.
@@ -306,10 +313,19 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
 
     private func persistPin() {
         guard let pinFile, let secret = pinnedSecret else { return }
-        let o: [String: Any] = ["secret": secret, "boot_id": pinnedBootID ?? "", "conn": lastConn]
+        let o: [String: Any] = ["secret": secret, "boot_id": pinnedBootID ?? "", "conn": lastConn,
+                                "mark_revoked_boot": markRevokedBoot ?? ""]
         guard let d = try? JSONSerialization.data(withJSONObject: o) else { return }
         try? d.write(to: pinFile, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: pinFile.path)
+    }
+
+    /// Revoke the container mark for this boot, and remember it with the
+    /// pin so a restored VM's reconnect keeps it revoked.
+    private func revokeMark() -> Bool {
+        lock.lock(); markRevokedBoot = pinnedBootID; lock.unlock()
+        persistPin()
+        return KernelSentryService.shared.revokeContainerMark(profileID: profileID)
     }
 
     /// The reconnect proof: sha256(secret-hex || boot_id || decimal conn), hex.
@@ -421,9 +437,13 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             // can't be checked, so it can't be trusted.
             refusal = ("a sentry reconnect the host can't verify (no pinned secret for this VM)", 20)
         }
+        var revokedThisBoot = false
         if refusal == nil {
             fd = cfd
-            if conn == 0 { pinnedSecret = offered; pinnedBootID = bootID }
+            // A first hello is a new boot (the qdisc went with the old one);
+            // a reconnect of the boot whose mark was revoked stays revoked.
+            if conn == 0 { pinnedSecret = offered; pinnedBootID = bootID; markRevokedBoot = nil }
+            revokedThisBoot = markRevokedBoot != nil && markRevokedBoot == pinnedBootID
             lastConn = conn
             info = (hello["kernel"] as? String, hello["module"] as? String, hello["landlock_abi"] as? Int)
             lastFrameAt = Date()
@@ -438,6 +458,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         }
         persistPin()
         if conn == 0 { KernelSentryService.shared.rearmContainerMark(profileID: profileID) }
+        if revokedThisBoot { _ = KernelSentryService.shared.revokeContainerMark(profileID: profileID) }
         let stamps = (hello["container_mark"] as? Int) == Int(VMNetSwitch.containerDSCP)
         let watchesTC = KernelSentryService.watchesTrafficControl(hello)
         KernelSentryService.shared.noteContainerMark(profileID: profileID, active: stamps && watchesTC)
@@ -513,7 +534,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             if nowDisarmed, !wasDisarmed {
                 alarm("tampering", "\(total - armed) of the kernel sentry's \(total) probes were disarmed", weight: 20)
                 // A disarmed probe may be a tc one: tc can't be watched now.
-                _ = KernelSentryService.shared.revokeContainerMark(profileID: profileID)
+                _ = revokeMark()
             }
             if missed > 0 {
                 alarm("sentry_overflow", "kernel probes missed \(missed) hit(s)", weight: 2)
@@ -557,7 +578,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         // Bromure's own boot uses tc (docker attaches qdiscs without it).
         if kind == "tc_change" {
             let who = "\(frame["comm"] as? String ?? "?") (pid \(frame["pid"] as? Int ?? 0))"
-            if KernelSentryService.shared.revokeContainerMark(profileID: profileID),
+            if revokeMark(),
                KernelSentryService.shared.containerDirectProvider(profileID) {
                 alarm("tampering", "\(who) changed the VM's egress traffic control (tc \(frame["op"] as? String ?? "change")), which could fake the container mark: container traffic is intercepted again until the VM restarts", weight: 10)
             }

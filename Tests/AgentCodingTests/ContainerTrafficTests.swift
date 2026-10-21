@@ -94,6 +94,56 @@ struct ContainerTrafficTests {
         #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
     }
 
+    /// Finding (CWE-693): "Restoring a VM forgets a container-mark
+    /// revocation while the tc rule is still installed". The revocation
+    /// lived only in the host process; a restored VM keeps its kernel and
+    /// the qdisc, and its reconnect turned the exemption back on.
+    @Test("A restored VM's reconnect keeps the mark revoked; a fresh boot re-arms it")
+    func revocationSurvivesRestore() {
+        let k = KernelSentryTests()
+        let pid = UUID()
+        let svc = KernelSentryService.shared
+        let old = svc.containerDirectProvider
+        let pin = FileManager.default.temporaryDirectory.appendingPathComponent("sentry-\(UUID()).pin")
+        defer { svc.containerDirectProvider = old; svc.rearmContainerMark(profileID: pid)
+                svc.noteContainerMark(profileID: pid, active: false)
+                try? FileManager.default.removeItem(at: pin) }
+        svc.containerDirectProvider = { $0 == pid }
+        let marked: [String: Any] = ["container_mark": Int(VMNetSwitch.containerDSCP),
+                                     "probes": Array(KernelSentryService.tcProbeSymbols)]
+        func hello(_ extra: [String: Any]) -> Data {
+            k.frame(["type": "hello", "v": 1, "boot_id": "b", "kernel": "k", "module": "1"]
+                .merging(marked) { $1 }.merging(extra) { $1 })
+        }
+        // The first boot: the mark is honoured, then tc changes.
+        let first = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: false, pinFile: pin)
+        let (_, g0, tap) = k.connect(first, hello(["secret": KernelSentryTests.secret]))
+        tap.waitFor { VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid) }
+        #expect(VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        first.handle(["type": "event", "seq": 1, "kind": "tc_change", "phase": "session",
+                      "op": "qdisc", "tc_kind": "pedit", "comm": "tc", "pid": 77])
+        #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        close(g0); tap.waitFor { !first.snapshot().connected }
+        // Host restart: a new process (nothing revoked in memory), the VM restored.
+        svc.rearmContainerMark(profileID: pid)
+        let restored = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: true, pinFile: pin)
+        let proof = SentryBridge.reconnectProof(secret: KernelSentryTests.secret, bootID: "b", conn: 1)
+        let (_, g1, tap1) = k.connect(restored, hello(["conn": 1, "proof": proof]))
+        tap1.waitFor { restored.snapshot().connected }
+        #expect(restored.snapshot().connected && tap1.alarms().isEmpty)
+        usleep(50_000)
+        #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        close(g1); tap1.waitFor { !restored.snapshot().connected }
+        // A real reboot: a new boot's first hello trusts the mark again.
+        let rebooted = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: false, pinFile: pin)
+        let (_, g2, tap2) = k.connect(rebooted, k.frame(["type": "hello", "v": 1, "boot_id": "b2", "kernel": "k",
+                                                         "module": "1", "secret": String(repeating: "cd", count: 32)]
+                                                        .merging(marked) { $1 }))
+        tap2.waitFor { VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid) }
+        #expect(VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        close(g2)
+    }
+
     @Test("The mark is honoured only from a sentry whose hello lists every tc probe")
     func requiresTCProbes() {
         let all: [String: Any] = ["probes": ["security_bprm_check", "tc_modify_qdisc", "tc_new_tfilter", "tc_ctl_action"]]
