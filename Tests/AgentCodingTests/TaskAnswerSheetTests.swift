@@ -105,6 +105,32 @@ struct TaskAnswerSheetTests {
         #expect(old.answerRefusal == nil)
     }
 
+    /// Finding (CWE-362): "A later task-answer success clears a newer
+    /// attempt's refusal". An older answer still being delivered finished
+    /// after a newer one was withheld, and erased that refusal.
+    @Test("a success clears only what was on the card when it started")
+    func successKeepsANewerRefusal() {
+        var t = task()
+        t.lastError = TaskDispatcher.staleAnswerText          // an earlier try's note
+        let seen = TaskDispatcher.AnswerErrorSnapshot(t)
+        // While this answer is delivered, a newer one is withheld.
+        let withheld = "Your message was withheld: it reads like a prompt injection (“ignore all previous”)."
+        t.lastError = withheld
+        t.answerRefusal = withheld
+        TaskDispatcher.clearAnswerError(&t, seen: seen)
+        #expect(t.lastError == withheld && t.answerRefusal == withheld)
+        // The refusal this try saw goes; one stored since stays.
+        t.lastError = "No question is waiting for an answer."
+        t.answerRefusal = t.lastError
+        let seen2 = TaskDispatcher.AnswerErrorSnapshot(t)
+        t.answerRefusal = withheld; t.lastError = withheld
+        TaskDispatcher.clearAnswerError(&t, seen: seen2)
+        #expect(t.lastError == withheld && t.answerRefusal == withheld)
+        // Unchanged since it started: cleared, as before.
+        TaskDispatcher.clearAnswerError(&t, seen: TaskDispatcher.AnswerErrorSnapshot(t))
+        #expect(t.lastError == nil && t.answerRefusal == nil)
+    }
+
     @Test("the board answers only the question the answer was written for, and clears only that one")
     func answerTargetsItsAsk() {
         let first = UUID(), second = UUID()
