@@ -1,0 +1,116 @@
+import Foundation
+import Testing
+
+/// Finding (CWE-670): "Hard sentry wait runs inside the 60s strict boot script
+/// and kills revocation". With `requirement: hard` the sentry loader waited
+/// inline (up to 45 s) and then built a module locally (minutes) inside the
+/// strict root script agentd runs with `timeout=60`; the timeout killed it
+/// before the supervisor started and before sudo was revoked. The loader now
+/// runs in its own unit and the hard requirement holds the session instead.
+@Suite("Hard sentry: the loader never runs inside a timed root script", .serialized)
+struct HardSentryBootTests {
+    private static let python = "/usr/bin/python3"
+    private static let vmSetup = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup")
+
+    private func run(_ script: String) throws -> String {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hard-sentry-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.currentDirectoryURL = Self.vmSetup
+        p.arguments = ["-c", "\(Self.python) - '\(dir.path)' <<'PY'\n"
+            + "import importlib.util, sys, os, json, subprocess, threading, time\n"
+            + "s = importlib.util.spec_from_file_location('agentd', 'bromure-agentd.py')\n"
+            + "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+            + "d = os.path.realpath(sys.argv[1])\n"
+            + "m.OPENSHELL_SPEC = d + '/spec.json'; m.SENTRY_STATUS = d + '/sentry.json'\n"
+            + "m.log = lambda *a: None\n"
+            + script + "\nPY"]
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    @Test("The strict root script starts the loader as a unit, before the supervisor and the revocation",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func strictScriptStartsUnit() throws {
+        let out = try run("""
+            open(m.OPENSHELL_SPEC, 'w').write('{}')
+            m.strict_sandbox_requested = lambda: True
+            m.strict_sandbox_applied = lambda: False
+            m._have_sudo = lambda: True
+            seen = []
+            def spy(argv, **kw):
+                seen.append((argv, kw)); return subprocess.CompletedProcess(argv, 0, '', '')
+            m.subprocess.run = spy
+            class Exit(Exception): pass
+            def fake_exit(code): raise Exit()
+            m.os._exit = fake_exit
+            try: m.task_strict_sandbox()
+            except Exit: pass
+            argv, kw = [x for x in seen if x[0][:3] == ['sudo', '-n', 'sh']][0]
+            script = argv[-1]
+            lines = [l.strip() for l in script.splitlines()]
+            unit = [i for i, l in enumerate(lines) if l.startswith('systemd-run --unit=bromure-sentryd ')]
+            inline = [l for l in lines if 'bromure-sentryd' in l and not l.startswith(('systemd-run', 'systemctl', 'if ', '#'))]
+            sandboxd = [i for i, l in enumerate(lines) if l.startswith('systemd-run --unit=bromure-sandboxd')]
+            apply = [i for i, l in enumerate(lines) if l.endswith('apply >/dev/null 2>&1')]
+            print('UNIT', len(unit) == 1)
+            print('NOT_INLINE', inline == [])
+            print('ORDER', bool(unit and sandboxd and apply) and unit[0] < sandboxd[0] < apply[0])
+            """)
+        for key in ["UNIT", "NOT_INLINE", "ORDER"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    @Test("Without strict the loader is started as a unit too, not waited on",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func nonStrictStartsUnit() throws {
+        let out = try run("""
+            open(m.OPENSHELL_SPEC, 'w').write('{}')
+            m.strict_sandbox_requested = lambda: False
+            m.META = d
+            open(d + '/bromure-sentryd', 'w').write('')
+            seen = []
+            def spy(argv, **kw):
+                seen.append((argv, kw)); return subprocess.CompletedProcess(argv, 0, '', '')
+            m.subprocess.run = spy
+            m.task_openshell_root_helpers()
+            loader = [x for x in seen if '/usr/bin/python3' in x[0] and any(a.endswith('/bromure-sentryd') for a in x[0])]
+            print('UNIT', len(loader) == 1 and '--unit=bromure-sentryd' in loader[0][0])
+            print('SHORT', loader[0][1].get('timeout', 999) <= 120)
+            """)
+        for key in ["UNIT", "SHORT"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    @Test("A hard sentry holds the session until the loader settles; a dead loader doesn't hold it",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sessionWaitsForHard() throws {
+        let out = try run("""
+            def status(state): json.dump({'sentry': state}, open(m.SENTRY_STATUS, 'w'))
+            open(m.OPENSHELL_SPEC, 'w').write(json.dumps({'sentry': {'enabled': True, 'requirement': 'hard'}}))
+            m._unit_active = lambda unit: True
+            status('waiting')
+            threading.Timer(1.0, lambda: status('running')).start()
+            t = time.time(); r = m._await_hard_sentry(poll=0.05)
+            print('WAITED', r == 'running' and time.time() - t >= 0.9)
+            status('unavailable')
+            print('UNAVAILABLE', m._await_hard_sentry(poll=0.05) == 'unavailable')
+            status('waiting')
+            m._unit_active = lambda unit: False
+            print('DEAD_LOADER', m._await_hard_sentry(poll=0.05, grace=0.2) == 'waiting')
+            m._unit_active = lambda unit: True
+            print('BOUNDED', m._await_hard_sentry(deadline_s=0.3, poll=0.05) == 'waiting')
+            open(m.OPENSHELL_SPEC, 'w').write(json.dumps({'sentry': {'enabled': True, 'requirement': 'best_effort'}}))
+            t = time.time()
+            print('BEST_EFFORT', m._await_hard_sentry(poll=0.05) is None and time.time() - t < 0.5)
+            """)
+        for key in ["WAITED", "UNAVAILABLE", "DEAD_LOADER", "BOUNDED", "BEST_EFFORT"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+}

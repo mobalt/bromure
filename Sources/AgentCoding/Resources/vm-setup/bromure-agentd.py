@@ -159,6 +159,14 @@ OPENSHELL_SPEC = os.path.join(META, "openshell-sandbox.json")
 SANDBOX_RUN_DIR = os.environ.get("BROMURE_RUN_DIR", "/run/bromure-sandbox")
 SANDBOX_STATUS = os.path.join(SANDBOX_RUN_DIR, "status.json")
 SANDBOX_CTL = os.path.join(SANDBOX_RUN_DIR, "ctl.sock")
+# bromure-sentryd's own status (`sentry`: waiting / running / unavailable / off).
+SENTRY_STATUS = os.path.join(SANDBOX_RUN_DIR, "sentry.json")
+# The loader runs in its own unit, never inline in a root script with a short
+# timeout: for a kernel the host has no module staged for yet it waits for one
+# (up to BROMURE_SENTRY_WAIT_S), then may build one here (apt + make, minutes).
+SENTRY_UNIT = "bromure-sentryd"
+# The longest that can take: its wait, then apt and make at 900 s each.
+SENTRY_SETTLE_S = 45 + 900 + 900 + 60
 _SANDBOX = {}          # the applied status, or {} when there is no sandbox
 
 
@@ -5915,6 +5923,66 @@ def command_loop_service():
 
 
 # ── session lifecycle ───────────────────────────────────────────────────────
+def _sentry_requirement():
+    try:
+        with open(OPENSHELL_SPEC) as f:
+            spec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return ((spec.get("sentry") or {}) if isinstance(spec, dict) else {}).get("requirement")
+
+
+def _sentry_state():
+    try:
+        with open(SENTRY_STATUS) as f:
+            return (json.load(f) or {}).get("sentry")
+    except (OSError, ValueError):
+        return None
+
+
+def _unit_active(unit):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _await_hard_sentry(deadline_s=SENTRY_SETTLE_S, poll=1.0, grace=10.0):
+    """`requirement: hard` = no agent code before the sentry watches.
+
+    The loader runs in its own unit (see task_strict_sandbox); this holds the
+    session until it has settled -- running, or unavailable with its reason
+    (the host then refuses per the requirement). It stops waiting when the
+    loader's unit is gone without a verdict, and after the loader's own worst
+    case, so a dead loader can't hold the workspace forever. Meanwhile the
+    status says `waiting`, which the host shows. Returns the final state.
+    """
+    if _sentry_requirement() != "hard":
+        return None
+    started = time.time()
+    last_log = 0.0
+    while True:
+        state = _sentry_state()
+        if state in ("running", "unavailable", "off"):
+            break
+        # A few seconds' grace: the unit may not be listed active yet.
+        if time.time() - started > grace and not _unit_active(SENTRY_UNIT):
+            log("sentry", "the loader ended without a verdict (state %r); starting the "
+                          "session — the host judges the missing sentry" % state)
+            break
+        if time.time() - started > deadline_s:
+            log("sentry", "no verdict after %.0fs; starting the session" % deadline_s)
+            break
+        if time.time() - last_log >= 60:
+            last_log = time.time()
+            log("sentry", "requirement hard: holding the session until the sentry "
+                          "settles (%s)" % (state or "no status yet"))
+        time.sleep(poll)
+    log("sentry", "settled after %.0fs: %s" % (time.time() - started, state))
+    return state
+
+
 def create_session():
     """Create the single tmux session the tabs live in (startup one-shot).
 
@@ -5928,6 +5996,7 @@ def create_session():
                        "start an unconfined session")
         return
     if openshell_requested():
+        _await_hard_sentry()
         started = time.time()
         if not ensure_sandbox_server("session startup"):
             log("session", "gave up after %.0fs (%s); not starting a session"
@@ -7490,14 +7559,18 @@ if [ -r %(attestd)s ]; then
   fi
 fi
 # The kernel sentry, then the sandbox supervisor. Both are root-only and both
-# must exist before the revocation; the sentry additionally has to load before
-# it raises lockdown, after which no unsigned module loads at all.
+# must be started before the revocation; the sentry additionally has to load
+# before it raises lockdown, after which no unsigned module loads at all.
+#
+# The sentry loader runs in ITS OWN UNIT, not inline. For a kernel the host has
+# no module staged for yet it waits for one and may then build one here -- far
+# longer than this script's 60 s. Inline, the timeout killed the script before
+# the supervisor started and before the revocation below: a workspace with no
+# sandbox, no session and sudo intact. A `hard` sentry holds the SESSION
+# instead (create_session waits for the loader to finish).
 if [ -r %(spec)s ] && [ -r %(sentryd)s ]; then
-  # `env %(setenv)s`, because `sudo` strips the environment and sentryd is run
-  # directly rather than through systemd-run. Without it the BROMURE_* overrides
-  # never reach it -- which is why the sentry's own boot path could not be
-  # exercised by a test, the same gap that hid attestd's startup bug.
-  env %(plainenv)s /usr/bin/python3 %(sentryd)s >/dev/null 2>&1
+  systemctl reset-failed %(sentryunit)s >/dev/null 2>&1
+  systemd-run --unit=%(sentryunit)s --collect -p Restart=no %(setenv)s /usr/bin/python3 %(sentryd)s >/dev/null 2>&1
 fi
 if [ -r %(spec)s ] && [ -r %(sandboxd)s ]; then
   # Clear any leftover failed unit first: a unit that hit systemd's start limit
@@ -7549,7 +7622,7 @@ touch %(done)s
 [ -f /run/bromure-attestd.ready ]
 """ % {"attestd": shlex.quote(attestd), "sentryd": shlex.quote(sentryd),
        "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
-       "plainenv": _plain_setenv(),
+       "sentryunit": SENTRY_UNIT,
        "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
        "strictd": shlex.quote(strictd), "done": STRICT_DONE}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
@@ -7618,13 +7691,16 @@ def task_openshell_root_helpers():
 
     loader = os.path.join(META, "bromure-sentryd")
     if os.access(loader, os.R_OK):
-        # `env` with the overrides, because `sudo` strips the environment and
-        # this is the non-strict twin of the root script's sentry branch. In
-        # production the list is empty and this is `sudo -n env python3 loader`.
-        p = subprocess.run(["sudo", "-n", "env", *_plain_setenv_args(),
-                            "/usr/bin/python3", loader],
-                           capture_output=True, text=True, timeout=900)
-        log("sentry", "loader exit=%d %s"
+        # Its own unit, as in the strict root script: the loader's wait and
+        # local build can outlast any timeout here, and a timeout would skip
+        # starting the supervisor below. A `hard` sentry holds the session.
+        subprocess.run(["sudo", "-n", "systemctl", "reset-failed", SENTRY_UNIT],
+                       capture_output=True, timeout=30)
+        p = subprocess.run(
+            ["sudo", "-n", "systemd-run", "--unit=" + SENTRY_UNIT, "--collect",
+             "-p", "Restart=no", *_systemd_setenv_args(), "/usr/bin/python3", loader],
+            capture_output=True, text=True, timeout=120)
+        log("sentry", "loader started exit=%d %s"
             % (p.returncode, p.stderr.strip()[-200:]))
 
     launcher = os.path.join(META, "bromure-sandboxd")
