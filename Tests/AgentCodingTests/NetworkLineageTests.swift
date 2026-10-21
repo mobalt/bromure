@@ -240,14 +240,14 @@ struct NetworkLineageProxyTests {
         l.decisionWait = 0.05
         l.emit = { _, t, d in sink.add(t, d) }
         l.noteExec(profileID: pid, ["pid": 40, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl https://example.com/"])
-        l.noteProxied(profileID: pid, sport: 53111, host: "example.com", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 53111), host: "example.com", port: 443)
         // The proxy's own allow (egress.firewall, layer proxy).
         l.noteDecision(profileID: pid, proto: "tcp", dst: "host:example.com", dport: 443, action: "allow", layer: "proxy",
                        host: "example.com")
         l.noteFlow(profileID: pid, ["pid": 40, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53111])
         // A denied one: the L7 deny is keyed by hostname.
         l.noteExec(profileID: pid, ["pid": 41, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl https://evil.example/"])
-        l.noteProxied(profileID: pid, sport: 53112, host: "evil.example", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 53112), host: "evil.example", port: 443)
         l.noteDecision(profileID: pid, proto: "tcp", dst: "host:evil.example", dport: 443, action: "deny", layer: "l7",
                        reason: "no matching network policy", host: "evil.example")
         l.noteFlow(profileID: pid, ["pid": 41, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53112])
@@ -272,7 +272,7 @@ struct NetworkLineageProxyTests {
         l.proxyDecisionPolls = 6
         l.emit = { _, t, d in sink.add(t, d) }
         l.noteExec(profileID: pid, ["pid": 50, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl -X POST https://api.example/x"])
-        l.noteProxied(profileID: pid, sport: 53200, host: "api.example", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 53200), host: "api.example", port: 443)
         l.noteFlow(profileID: pid, ["pid": 50, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53200])
         // Past the first look, the L7 deny lands.
         try await Task.sleep(nanoseconds: 120_000_000)
@@ -286,7 +286,7 @@ struct NetworkLineageProxyTests {
 
         // No verdict ever: unknown, not a guessed allow.
         l.noteExec(profileID: pid, ["pid": 51, "ppid": 1, "comm": "wget", "path": "/usr/bin/wget", "argv": "wget https://quiet.example/"])
-        l.noteProxied(profileID: pid, sport: 53201, host: "quiet.example", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 53201), host: "quiet.example", port: 443)
         l.noteFlow(profileID: pid, ["pid": 51, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53201])
         for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
         let quiet = try #require(sink.flows.first { NetworkLineageTests.S($0["dst"]) == "quiet.example" })
@@ -304,19 +304,23 @@ struct NetworkLineageProxyTests {
         l.decisionWait = 0.05
         l.emit = { _, t, d in sink.add(t, d) }
         // A loopback connection to the attacker's own listener, claimed as benign.
-        l.noteProxied(profileID: pid, sport: 40001, host: "benign.example", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 40001), host: "benign.example", port: 443)
         l.noteFlow(profileID: pid, ["pid": 60, "proto": "tcp", "dst": "127.0.0.1", "dport": 9999, "sport": 40001])
-        // Two different claims for one port, in either order: neither is believed.
-        l.noteProxied(profileID: pid, sport: 40002, host: "evil.example", port: 443)     // the bridge's
-        l.noteProxied(profileID: pid, sport: 40002, host: "benign.example", port: 443)   // forged, later
+        // Two connections claiming one port, in either order: neither is believed.
+        let bridge2 = l.noteClaimant(profileID: pid, sport: 40002), forged2 = l.noteClaimant(profileID: pid, sport: 40002)
+        l.noteProxied(profileID: pid, claim: bridge2, host: "evil.example", port: 443)
+        l.noteProxied(profileID: pid, claim: forged2, host: "benign.example", port: 443)
         l.noteFlow(profileID: pid, ["pid": 61, "path": "/usr/bin/a", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40002])
-        l.noteProxied(profileID: pid, sport: 40003, host: "benign.example", port: 443)   // forged, first
-        l.noteProxied(profileID: pid, sport: 40003, host: "evil.example", port: 443)     // the bridge's
-        l.noteProxied(profileID: pid, sport: 40003, host: "benign.example", port: 443)   // refreshed: still contested
+        let forged3 = l.noteClaimant(profileID: pid, sport: 40003)
+        l.noteProxied(profileID: pid, claim: forged3, host: "benign.example", port: 443)   // forged, first
+        let bridge3 = l.noteClaimant(profileID: pid, sport: 40003)
+        l.noteProxied(profileID: pid, claim: bridge3, host: "evil.example", port: 443)     // the bridge's
+        l.noteProxied(profileID: pid, claim: forged3, host: "benign.example", port: 443)   // refreshed: still contested
         l.noteFlow(profileID: pid, ["pid": 62, "path": "/usr/bin/b", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40003])
-        // One honest claim still relabels.
-        l.noteProxied(profileID: pid, sport: 40004, host: "pypi.org", port: 443)
-        l.noteProxied(profileID: pid, sport: 40004, host: "pypi.org", port: 443)
+        // One honest claim still relabels (its target sent twice is fine).
+        let honest4 = l.noteClaimant(profileID: pid, sport: 40004)
+        l.noteProxied(profileID: pid, claim: honest4, host: "pypi.org", port: 443)
+        l.noteProxied(profileID: pid, claim: honest4, host: "pypi.org", port: 443)
         l.noteFlow(profileID: pid, ["pid": 63, "path": "/usr/bin/c", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40004])
         for _ in 0..<300 where sink.flows.count < 4 { try? await Task.sleep(nanoseconds: 10_000_000) }
         let own = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40001 })
@@ -336,8 +340,8 @@ struct NetworkLineageProxyTests {
         l.decisionWait = 0.05
         l.emit = { _, t, d in sink.add(t, d) }
         // The forged direct connection: its preamble, then its target.
-        l.noteClaimant(profileID: pid, sport: 40010)
-        l.noteProxied(profileID: pid, sport: 40010, host: "benign.example", port: 443)
+        let forged = l.noteClaimant(profileID: pid, sport: 40010)
+        l.noteProxied(profileID: pid, claim: forged, host: "benign.example", port: 443)
         // The attacker connects to the bridge from that port; agentd's line
         // arrives at once, its request is held back (no target yet).
         l.noteClaimant(profileID: pid, sport: 40010)
@@ -348,11 +352,60 @@ struct NetworkLineageProxyTests {
         #expect(NetworkLineageTests.S(f["dst"]) == "127.0.0.1")
         if case .bool(true)? = f["via_proxy"] { Issue.record("labelled from a contested port") }
         // One connection, one claim: still labelled.
-        l.noteClaimant(profileID: pid, sport: 40011)
-        l.noteProxied(profileID: pid, sport: 40011, host: "pypi.org", port: 443)
+        l.noteProxied(profileID: pid, claim: l.noteClaimant(profileID: pid, sport: 40011), host: "pypi.org", port: 443)
         l.noteFlow(profileID: pid, ["pid": 65, "path": "/usr/bin/e", "proto": "tcp", "dst": "127.0.0.1",
                                     "dport": 65534, "sport": 40011])
         for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(sink.flows.contains { NetworkLineageTests.S($0["dst"]) == "pypi.org" })
+    }
+
+    /// Finding (CWE-345): "A forged proxy preamble still relabels a flow
+    /// after its claimant record expires". A direct vsock connection held
+    /// its request past the claimant record's 120 s (and the contested
+    /// mark's), then sent it; a later connection from that port counted 1
+    /// afresh and its flow was labelled with the forged target.
+    @Test("A claim whose record aged out stores nothing, and a fresh claimant doesn't inherit an old target")
+    func expiredClaimant() async throws {
+        final class Clock: @unchecked Sendable { var t = Date() }
+        let clock = Clock()
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.now = { clock.t }
+        l.emit = { _, t, d in sink.add(t, d) }
+        // 1-2: the forged direct connection's preamble, then the attacker's
+        // bridge connection from that port (contested), closed.
+        let forged = l.noteClaimant(profileID: pid, sport: 40020)
+        l.noteClaimant(profileID: pid, sport: 40020)
+        // 3: past the record's lifetime, the held request arrives.
+        clock.t += 121
+        l.noteProxied(profileID: pid, claim: forged, host: "benign.example", port: 443)
+        // 4: a new bridge connection from the same port, request held back.
+        l.noteClaimant(profileID: pid, sport: 40020)
+        l.noteFlow(profileID: pid, ["pid": 70, "path": "/usr/bin/x", "proto": "tcp", "dst": "127.0.0.1",
+                                    "dport": 65534, "sport": 40020])
+        for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let f = try #require(sink.flows.first)
+        #expect(NetworkLineageTests.S(f["dst"]) == "127.0.0.1")
+        if case .bool(true)? = f["via_proxy"] { Issue.record("labelled from an expired claim") }
+
+        // A target stored under a live record, which then ages out: a new
+        // claimant on that port isn't labelled with it either.
+        let old = l.noteClaimant(profileID: pid, sport: 40021)
+        l.noteProxied(profileID: pid, claim: old, host: "benign.example", port: 443)
+        clock.t += 121
+        l.noteClaimant(profileID: pid, sport: 40021)
+        l.noteFlow(profileID: pid, ["pid": 71, "path": "/usr/bin/y", "proto": "tcp", "dst": "127.0.0.1",
+                                    "dport": 65534, "sport": 40021])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let g = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40021 })
+        #expect(NetworkLineageTests.S(g["dst"]) == "127.0.0.1")
+
+        // The honest bridge path, clock and all: claimed, stored, labelled.
+        let honest = l.noteClaimant(profileID: pid, sport: 40022)
+        l.noteProxied(profileID: pid, claim: honest, host: "pypi.org", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 72, "path": "/usr/bin/z", "proto": "tcp", "dst": "127.0.0.1",
+                                    "dport": 65534, "sport": 40022])
+        for _ in 0..<300 where sink.flows.count < 3 { try? await Task.sleep(nanoseconds: 10_000_000) }
         #expect(sink.flows.contains { NetworkLineageTests.S($0["dst"]) == "pypi.org" })
     }
 

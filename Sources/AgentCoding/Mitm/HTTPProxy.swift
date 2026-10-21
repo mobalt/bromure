@@ -213,9 +213,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // A preamble's claim is counted from its first line, before the
         // request is read (see NetworkLineage.noteClaimant).
         let peekedSport = Self.peekPreambleSport(fd: fd)
-        if let peekedSport {
-            NetworkLineage.shared.noteClaimant(profileID: profileID, sport: peekedSport)
-        }
+        let claim = peekedSport.map { NetworkLineage.shared.noteClaimant(profileID: profileID, sport: $0) }
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
         // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
@@ -256,7 +254,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let afterScheme = target[scheme.upperBound...]
             let authority = String(afterScheme.prefix { $0 != "/" })
             let (host, port) = parseHTTPHostPort(authority)   // default 80
-            if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
+            if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
             let originPath = String(afterScheme.dropFirst(authority.count))
             let path = originPath.isEmpty ? "/" : originPath
 
@@ -283,7 +281,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
-        if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
+        if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
 
         // Connection-layer egress verdict for the cooperative-proxy path. The
         // transparent path enforces this in acceptTransparentFlow, but proxied

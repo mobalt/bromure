@@ -48,14 +48,21 @@ public final class NetworkLineage: @unchecked Sendable {
         var toolCalls: [ToolCall] = []
         var decisions: [String: Decision] = [:]       // "proto|dst|dport"
         var folded: [String: (first: Date, count: Int, data: [String: AnyJSON])] = [:]
-        /// Guest client port → the proxied target (cooperative proxy).
-        var proxied: [Int: (host: String, port: Int, at: Date)] = [:]
+        /// Guest client port → the proxied target (cooperative proxy), and
+        /// the claimant record (`claimants[port].id`) it was stored under.
+        var proxied: [Int: (host: String, port: Int, at: Date, claim: UInt64)] = [:]
         /// Client ports claimed for two different targets, or by two
         /// connections: neither is believed (see `noteProxied`).
         var contested: [Int: Date] = [:]
         /// Connections that opened with a preamble naming each client port.
-        var claimants: [Int: (count: Int, at: Date)] = [:]
+        var claimants: [Int: (count: Int, at: Date, id: UInt64)] = [:]
     }
+
+    /// One connection's claim to a client port: the claimant record its
+    /// preamble created (`noteClaimant`), which only its own target may be
+    /// stored under (`noteProxied`).
+    public struct Claim: Sendable { public let sport: Int; let id: UInt64 }
+    private var nextClaimID: UInt64 = 0
 
     private let lock = NSLock()
     private var vms: [UUID: VM] = [:]
@@ -159,19 +166,33 @@ public final class NetworkLineage: @unchecked Sendable {
     /// line for a connection that went through it, so a forged line for
     /// that connection can only ever make its row stay "127.0.0.1:<bridge>"
     /// — never name another host.
-    public func noteProxied(profileID: UUID, sport: Int, host: String, port: Int) {
+    ///
+    /// A target is stored only under the claimant record of the connection
+    /// that sent it, while that record is still live and that connection is
+    /// the port's only claimant (Finding CWE-345, "A forged proxy preamble
+    /// still relabels a flow after its claimant record expires": a direct
+    /// connection holding its request past the record's 120 s, then sending
+    /// it, was believed again — and a later connection from the same port
+    /// counted 1 afresh and was labelled with it).
+    public func noteProxied(profileID: UUID, claim: Claim, host: String, port: Int) {
         lock.lock(); defer { lock.unlock() }
         var vm = vms[profileID] ?? VM()
         let t = now()
+        let sport = claim.sport
         vm.proxied = vm.proxied.filter { t.timeIntervalSince($0.value.at) < 120 }
         vm.contested = vm.contested.filter { t.timeIntervalSince($0.value) < 120 }
+        vm.claimants = vm.claimants.filter { t.timeIntervalSince($0.value.at) < 120 }
+        guard let live = vm.claimants[sport], live.id == claim.id, live.count == 1 else {
+            vms[profileID] = vm
+            return
+        }
         if vm.contested[sport] != nil {
             vm.contested[sport] = t
         } else if let held = vm.proxied[sport], held.host != host || held.port != port {
             vm.proxied[sport] = nil
             vm.contested[sport] = t
         } else {
-            vm.proxied[sport] = (host, port, t)
+            vm.proxied[sport] = (host, port, t, claim.id)
         }
         vms[profileID] = vm
     }
@@ -182,16 +203,24 @@ public final class NetworkLineage: @unchecked Sendable {
     /// through the bridge registers here at once; a second connection naming
     /// the same port (a forged line, however early or however long its
     /// request is held back) contests the port before the flow is resolved.
-    public func noteClaimant(profileID: UUID, sport: Int) {
+    @discardableResult
+    public func noteClaimant(profileID: UUID, sport: Int) -> Claim {
         lock.lock(); defer { lock.unlock() }
         var vm = vms[profileID] ?? VM()
         let t = now()
         vm.claimants = vm.claimants.filter { t.timeIntervalSince($0.value.at) < 120 }
         vm.contested = vm.contested.filter { t.timeIntervalSince($0.value) < 120 }
+        nextClaimID += 1
         let n = (vm.claimants[sport]?.count ?? 0) + 1
-        vm.claimants[sport] = (n, t)
+        // A fresh record (the earlier one aged out) is a new claimant: a
+        // target stored under the old one doesn't carry over to it.
+        let id = n == 1 ? nextClaimID : vm.claimants[sport]!.id
+        vm.claimants[sport] = (n, t, id)
         if n > 1 { vm.contested[sport] = t; vm.proxied[sport] = nil }
+        if n == 1, let held = vm.proxied[sport], held.claim != id { vm.proxied[sport] = nil }
         vms[profileID] = vm
+        // A second claimant's id matches no record: it can never store.
+        return Claim(sport: sport, id: nextClaimID)
     }
 
     /// The guest proxy bridge's loopback ports (agentd's listener): 65534,
@@ -334,7 +363,11 @@ public final class NetworkLineage: @unchecked Sendable {
         // Only a flow to the bridge itself: a loopback connection anywhere
         // else is never relabelled by a (guest-written) claim.
         if dst.hasPrefix("127.") || dst == "::1", Self.bridgePorts.contains(dport),
-           let sport = f["sport"] as? Int, let p = vm.proxied[sport] {
+           let sport = f["sport"] as? Int, let p = vm.proxied[sport],
+           // Only while the claimant it was stored under is the port's live,
+           // sole one.
+           let live = vm.claimants[sport], live.id == p.claim, live.count == 1,
+           t.timeIntervalSince(live.at) < 120 {
             dst = p.host; dport = p.port; viaProxy = true
         }
         var decision = viaProxy ? vm.decisions["\(proto)|host:\(dst)|\(dport)"] : vm.decisions["\(proto)|\(dst)|\(dport)"]
