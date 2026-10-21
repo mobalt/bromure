@@ -36,6 +36,36 @@ struct SecurityWindowQoLTests {
         #expect(block("Firewall", "evil.example:443 tcp", ws: ws, at: 3).searchKey == "evil.example:443 tcp")
     }
 
+    /// Finding (CWE-670): "Sandbox block counts ignore the ×N denial
+    /// multiplier". The sentry folds identical denials (×3 on the first row,
+    /// "×47 more in the last minute" on the follow-up); the group and the
+    /// tile added one per row.
+    @Test("Folded guest-sandbox denials count what they stand for, in the group, the tiles and the mirror")
+    @MainActor func sandboxDenialCounts() throws {
+        let ws = UUID()
+        func denial(_ extra: [String: AnyJSON]) throws -> SecurityTimeline.Event {
+            var d: [String: AnyJSON] = ["category": .string("sandbox_denial"), "kind": .string("file_open_denied"),
+                                        "exe": .string("python3"), "pid": .int(4242),
+                                        "op": .string("create"), "path": .string("/etc/cron.d/x")]
+            d.merge(extra) { $1 }
+            return try #require(SecurityTimeline.map(profileID: ws, eventType: "sentry.event", eventData: d, now: Date()))
+        }
+        let first = try denial(["count": .int(3)])
+        let more = try denial(["count": .int(47), "repeat": .bool(true)])
+        let single = try denial([:])
+        #expect(first.occurrences == 3 && more.occurrences == 47 && single.occurrences == 1)
+        let groups = SecurityOverview.blockGroups([first, more, single])
+        #expect(groups.count == 1)
+        #expect(groups.first?.count == 51)
+        // The tile's sum.
+        #expect([first, more, single].reduce(0) { $0 + $1.occurrences } == 51)
+        // The fat client's mirror keeps it.
+        let tl = SecurityTimeline(directory: nil)
+        tl.applyMirror([["engine": first.engine, "condition": first.condition, "decision": first.decision,
+                         "kind": "blocked", "profileID": ws.uuidString, "dn": 3]], host: "ark")
+        #expect(tl.allEvents.first { $0.machine == "ark" }?.occurrences == 3)
+    }
+
     @Test("History settings: unset means 90 days and 24 hours; 0 keeps everything")
     func settings() {
         let d = UserDefaults.standard

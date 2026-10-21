@@ -69,6 +69,10 @@ public final class SecurityTimeline {
         /// Repeats of a routine event (same credential swapped in for the same
         /// host) share this key and fold into one row with a `count` (B40).
         public var coalesceKey: String? = nil
+        /// How many refused attempts the row stands for, when the engine
+        /// folds them itself (a guest-sandbox denial: the guest's own count on
+        /// the first row; the extra denials on a "×N more" row). nil = one.
+        public var denials: Int? = nil
         /// A connection-level firewall verdict, structured — what the row's
         /// quick actions (allow / block / switch the rule off) work from.
         public var firewall: Firewall? = nil
@@ -417,6 +421,7 @@ public final class SecurityTimeline {
             if let n = e.count { r["count"] = n }
             if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
             if let ck = e.coalesceKey { r["ck"] = ck }
+            if let dn = e.denials { r["dn"] = dn }
             if let fw = e.firewall { r["fw"] = fw.wire }
             return r
         }
@@ -439,6 +444,7 @@ public final class SecurityTimeline {
                           count: r["count"] as? Int, eventType: r["type"] as? String,
                           detail: Self.anyJSON(r["detail"]))
             e.coalesceKey = r["ck"] as? String
+            e.denials = r["dn"] as? Int
             e.firewall = Firewall(wire: r["fw"] as? [String: Any])
             return e
         }
@@ -564,7 +570,11 @@ public final class SecurityTimeline {
             let who = str(d, "exe") ?? (kind == "seccomp_denied" ? str(d, "path") : nil) ?? str(d, "comm") ?? "?"
             let pid = int(d, "pid").map { " (pid \($0))" } ?? ""
             let times: String
-            if case .bool(true)? = d["repeat"] {
+            let isRepeat: Bool = { if case .bool(true)? = d["repeat"] { return true }; return false }()
+            // What the row stands for: the guest's own count on a first row,
+            // the extra denials on a folded "×N more" row.
+            let denials = max(1, int(d, "count") ?? 1)
+            if isRepeat {
                 // Folded repeats of a denial already shown.
                 let procs = int(d, "processes") ?? 1
                 times = procs > 1
@@ -583,9 +593,11 @@ public final class SecurityTimeline {
                 let op = str(d, "op") ?? (kind == "file_open_denied" ? "open" : "access")
                 what = "\(op) \(str(d, "path") ?? "?")"
             }
-            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
-                       "\(who)\(pid) — \(what)\(times)",
-                       NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+            var e = row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                        "\(who)\(pid) — \(what)\(times)",
+                        NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+            e.denials = denials > 1 ? denials : nil
+            return e
 
         case "net.flow":
             // One network flow, explained: who ran it (the process chain from

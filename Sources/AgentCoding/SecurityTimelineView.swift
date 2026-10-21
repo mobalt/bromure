@@ -51,6 +51,10 @@ extension SecurityTimeline.Event {
         guard coalesceKey != nil, let n = count, n > 1 else { return nil }
         return n
     }
+
+    /// How many occurrences the row counts for in a total: its folded
+    /// denials (guest sandbox), else its coalesced repeats, else one.
+    var occurrences: Int { denials ?? max(1, repeats ?? 1) }
 }
 
 /// What the Overview opens the Timeline on. Each click replaces every filter.
@@ -753,7 +757,7 @@ struct SecurityOverview: View {
         var order: [String] = []
         for e in events where e.kind == .blocked {
             let key = e.engine + "|" + e.searchKey
-            let n = max(1, e.repeats ?? 1)
+            let n = e.occurrences
             if var g = groups[key] {
                 g.count += n
                 g.workspaces.insert(e.profileID)
@@ -778,9 +782,9 @@ struct SecurityOverview: View {
                         .foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.count,
+                    tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
                          "hand.raised.fill", .red, engine: nil, outcome: .blocked)
-                    tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
+                    tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.reduce(0) { $0 + $1.occurrences },
                          "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
                     // Tiles carry the engine names the Protections columns use.
                     // Swaps, not rows: a coalesced row carries its repeat count.
@@ -803,7 +807,7 @@ struct SecurityOverview: View {
                     let sandboxEngine = NSLocalizedString("Guest sandbox", comment: "Security Timeline engine")
                     if postures.contains(where: \.sandbox) || recent.contains(where: { $0.engine == sandboxEngine }) {
                         tile(sandboxEngine,
-                             recent.filter { $0.engine == sandboxEngine && $0.kind == .blocked }.reduce(0) { $0 + max(1, $1.repeats ?? 1) },
+                             recent.filter { $0.engine == sandboxEngine && $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
                              "square.dashed.inset.filled", .teal, engine: sandboxEngine, outcome: .blocked)
                     }
                 }
