@@ -240,6 +240,14 @@ struct NetworkLineageProxyTests {
         _ = plain.withUnsafeBytes { write(g[1], $0.baseAddress, plain.count) }
         #expect(HTTPMitmConnection.peekPreambleSport(fd: g[0]) == nil)
     }
+
+    @Test("A connection whose preamble dodged the first-line count can't label a flow")
+    func dodgedPeekCantLabel() {
+        #expect(HTTPMitmConnection.claimedSport(parsed: 51234, peeked: 51234) == 51234)
+        #expect(HTTPMitmConnection.claimedSport(parsed: 51234, peeked: nil) == nil)    // line held back past the peek
+        #expect(HTTPMitmConnection.claimedSport(parsed: 51234, peeked: 40000) == nil)
+        #expect(HTTPMitmConnection.claimedSport(parsed: nil, peeked: nil) == nil)
+    }
 }
 
 @Suite("Network lineage from the agents' PreToolUse hooks")

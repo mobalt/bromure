@@ -173,6 +173,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
+    /// The client port a connection may label its flow with: the one its
+    /// preamble names, only when that line was seen (and counted) at once.
+    static func claimedSport(parsed: Int?, peeked: Int?) -> Int? {
+        guard let parsed, parsed == peeked else { return nil }
+        return parsed
+    }
+
     /// The preamble's client port, read without consuming the stream (the
     /// request read that follows still sees it), waiting briefly for the
     /// first bytes: agentd writes the line before any client byte.
@@ -205,8 +212,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    non-ASCII byte there must not make the whole request "malformed".
         // A preamble's claim is counted from its first line, before the
         // request is read (see NetworkLineage.noteClaimant).
-        if let sport = Self.peekPreambleSport(fd: fd) {
-            NetworkLineage.shared.noteClaimant(profileID: profileID, sport: sport)
+        let peekedSport = Self.peekPreambleSport(fd: fd)
+        if let peekedSport {
+            NetworkLineage.shared.noteClaimant(profileID: profileID, sport: peekedSport)
         }
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
@@ -214,7 +222,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // client socket this request came from, which the kernel sentry
         // reports as a loopback flow. It ties the CONNECT target to the
         // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
-        let clientSport = Self.stripClientPreamble(&connectReq)
+        // The target is only ever recorded for a connection counted above:
+        // one whose line didn't arrive at once (agentd's always does) can't
+        // label a flow, so it can't dodge the claimant count either.
+        let clientSport = Self.claimedSport(parsed: Self.stripClientPreamble(&connectReq), peeked: peekedSport)
         guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
               let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
                                         encoding: .isoLatin1) else {
