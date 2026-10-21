@@ -4255,3 +4255,5 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "Die Antwort konnte nicht gesendet werden.";
 "Your answer is already on its way." = "Ihre Antwort ist bereits unterwegs.";
+"“%@” wasn't wiped" = "„%@“ wurde nicht gelöscht";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Es wurde mit seinem bisherigen Datenträger gestartet, während die Frage offen war (eine Automation hat es gestartet). Daher wurde nichts gelöscht, und es ist weiterhin als kompromittiert markiert. Fahren Sie es herunter und starten Sie es erneut, um es zu löschen.";

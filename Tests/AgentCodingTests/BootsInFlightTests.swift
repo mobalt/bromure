@@ -147,3 +147,28 @@ import Testing
         #expect(delegate.bootsInFlight.takeStop(id) == .suspend)
     }
 }
+
+/// Finding (CWE-362): "Confirmed compromise wipe is dropped with no notice
+/// when the disk is already open". "Wipe and Launch" with a boot that began
+/// while the question was up: the wipe is (rightly) refused, but it came
+/// back as Cancel, so the dialog just closed and the launch looked done.
+@Suite("Compromise wipe: confirmed but refused is not Cancel")
+@MainActor
+struct CompromiseWipeOutcomeTests {
+    @Test("cancel, wiped, and confirmed-but-the-disk-is-open are three different answers")
+    func outcomes() {
+        final class Calls: @unchecked Sendable { var n = 0 }
+        let calls = Calls()
+        #expect(ACAppDelegate.compromiseWipe(confirmed: false, wiped: { calls.n += 1; return true }) == .cancelled)
+        #expect(calls.n == 0)                                   // Cancel never wipes
+        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { true }) == .wiped)
+        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { false }) == .diskInUse)
+    }
+
+    @Test("the notice says nothing was wiped and how to retry")
+    func notice() {
+        let (title, message) = ACAppDelegate.wipeSkippedParts("api")
+        #expect(title.contains("api") && title.contains("wasn't wiped"))
+        #expect(message.contains("still marked compromised") && message.contains("start it again"))
+    }
+}

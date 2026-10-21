@@ -4257,3 +4257,5 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "No se pudo enviar la respuesta.";
 "Your answer is already on its way." = "Tu respuesta ya está en camino.";
+"“%@” wasn't wiped" = "«%@» no se ha borrado";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Se inició con su disco actual mientras la pregunta estaba abierta (lo lanzó una automatización), así que no se borró nada y sigue marcado como comprometido. Apáguelo e inícielo de nuevo para borrarlo.";
