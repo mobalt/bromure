@@ -43,8 +43,16 @@ FAILED=$(json "$OUT/manifest.json" failed)
 echo "source $HASH — built: ${BUILT:-none}; failed: ${FAILED:-none}"
 
 if [ -z "$BUILT" ]; then
-    echo "nothing new to publish."
-    exit 0
+    # Nothing new — unless the published catalog lost its module signatures
+    # (a bucket write can strip them without breaking the catalog signature,
+    # and apps then refuse the catalog): re-sign and republish it.
+    if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --verify "$OUT/previous-catalog.json" \
+            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" >/dev/null 2>&1; then
+        echo "nothing new built, but the published catalog doesn't verify: republishing it."
+    else
+        echo "nothing new to publish."
+        exit 0
+    fi
 fi
 
 if ! enabled "$DRY_RUN"; then

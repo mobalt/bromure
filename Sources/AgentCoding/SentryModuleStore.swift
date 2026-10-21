@@ -183,8 +183,16 @@ public final class SentryModuleStore: @unchecked Sendable {
         root.appendingPathComponent(hash, isDirectory: true).appendingPathComponent("catalog.json")
     }
 
+    /// The catalog's signature doesn't cover the per-module signatures, so
+    /// whoever can write the bucket could strip them (and leave the catalog
+    /// signature valid): every module then read as unsigned and the guest
+    /// gave up on its sentry. A catalog is taken only when every module's own
+    /// signature verifies too; anything less keeps the one already cached.
     private func accept(_ c: SentryModuleCatalog, for hash: String) -> Bool {
-        c.isWellFormed(for: hash) && (!requireSignature || c.isSignatureValid(publicKeyBase64: publicKeyBase64))
+        guard c.isWellFormed(for: hash) else { return false }
+        guard requireSignature else { return true }
+        return c.isSignatureValid(publicKeyBase64: publicKeyBase64)
+            && c.modules.allSatisfy { c.isModuleSignatureValid($0, publicKeyBase64: publicKeyBase64) }
     }
 
     /// The last verified catalog for `hash` (memory, else disk, re-verified:

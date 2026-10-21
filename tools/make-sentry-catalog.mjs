@@ -123,6 +123,9 @@ const prefix = `sentry/${sourceHash}/`;
 const byKernel = new Map();
 
 const previousPath = opt("previous");
+// The previous catalog's own signature verified: its entries' kernel, path,
+// sha256 and size are vouched for by the release key.
+let previousVerified = false;
 if (previousPath && existsSync(previousPath)) {
   const prev = JSON.parse(readFileSync(previousPath, "utf8"));
   if (prev.sourceHash !== sourceHash) {
@@ -135,6 +138,7 @@ if (previousPath && existsSync(previousPath)) {
     const ok = verify(null, signingPayload(prev, prev.signature.signedAt), publicKeyFromRaw(pub),
                       Buffer.from(prev.signature.edSignature, "base64"));
     if (!ok) { console.error("make-sentry-catalog: the published catalog's signature does NOT verify — refusing to merge"); process.exit(1); }
+    previousVerified = true;
   }
   for (const m of prev.modules ?? []) byKernel.set(m.kernel, m);
   console.log(`make-sentry-catalog: kept ${byKernel.size} published module(s)`);
@@ -157,14 +161,30 @@ if (!unsigned) {
 }
 
 // Kept entries must carry a valid module signature too (a merged catalog
-// vouches for nothing it can't re-verify).
+// vouches for nothing it can't re-verify). The catalog signature doesn't
+// cover them, so a bucket write can strip them: a kept entry whose own
+// signature is gone is re-signed when the previous catalog's signature
+// vouches for its statement (ed25519 is deterministic: the same signature
+// as before, matching the published .ko.sig). A kernel rebuilt in this run
+// is replaced below, so its old entry isn't checked at all.
 const pubForModules = opt("public-key");
+const rebuilt = new Set(readdirSync(modulesDir)
+  .map((n) => /^bromure_sentry-(.+)\.ko$/.exec(n)?.[1]).filter(Boolean));
+let resigned = 0;
 if (!unsigned && pubForModules) {
   for (const m of byKernel.values()) {
+    if (rebuilt.has(m.kernel)) continue;
     const ok = m.signature && verify(null, moduleSigningPayload(sourceHash, m), publicKeyFromRaw(pubForModules),
                                      Buffer.from(m.signature, "base64"));
-    if (!ok) { console.error(`make-sentry-catalog: kept module ${m.kernel} has no valid signature — refusing to merge`); process.exit(1); }
+    if (ok) continue;
+    if (!previousVerified) {
+      console.error(`make-sentry-catalog: kept module ${m.kernel} has no valid signature and no signed catalog vouches for it — refusing to merge`);
+      process.exit(1);
+    }
+    m.signature = sign(null, moduleSigningPayload(sourceHash, m), key).toString("base64");
+    resigned++;
   }
+  if (resigned) console.log(`make-sentry-catalog: re-signed ${resigned} kept module statement(s) the bucket had lost`);
 }
 
 let added = 0;
