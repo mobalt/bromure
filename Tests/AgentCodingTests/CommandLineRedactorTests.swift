@@ -14,6 +14,18 @@ struct CommandLineRedactorTests {
         let r = CommandLineRedactor.redact
         #expect(r("curl -u alice:hunter2 https://x.example") == "curl -u alice:*** https://x.example")
         #expect(r("curl -ualice:hunter2 https://x.example") == "curl -ualice:*** https://x.example")
+        // -u closing a cluster of short flags, its argument next or glued.
+        #expect(r("curl -su alice:hunter2 https://x") == "curl -su alice:*** https://x")
+        #expect(r("curl -fsSLu alice:hunter2 https://x") == "curl -fsSLu alice:*** https://x")
+        #expect(r("curl -sLuuser:hunter2 https://x") == "curl -sLuuser:*** https://x")
+        #expect(r("curl -kU proxy:pw -x http://p:3128 https://x") == "curl -kU proxy:*** -x http://p:3128 https://x")
+        #expect(r("curl -4u alice:pw https://x") == "curl -4u alice:*** https://x")
+        #expect(r("curl -6fsSLu alice:pw https://x") == "curl -6fsSLu alice:*** https://x")
+        #expect(r("curl -0u alice:pw https://x") == "curl -0u alice:*** https://x")
+        #expect(r("curl -#u alice:pw https://x") == "curl -#u alice:*** https://x")
+        // A cluster without -u, or -u not last, is something else.
+        #expect(r("curl -fsSL https://x/a:b") == "curl -fsSL https://x/a:b")
+        #expect(r("tar -uvf a.tar b:c") == "tar -uvf a.tar b:c")
         #expect(r("mkdir -p a:b && ssh -p 22 host") == "mkdir -p a:b && ssh -p 22 host")
         #expect(r(#"curl -H "Authorization: Bearer abc.def.ghi" https://api.example"#)
                 == #"curl -H "Authorization: Bearer ***" https://api.example"#)

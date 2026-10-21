@@ -25,14 +25,19 @@ enum CommandLineRedactor {
         + #"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"#)
     /// `scheme://user:password@host`
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
-    /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
+    /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`,
+    /// and `-u` / `-U` closing a cluster of short flags (`-su user:pw`,
+    /// `-fsSLu user:pw`, `-sLuuser:pw`: Finding CWE-532, "A curl -u password
+    /// clustered with other short flags is stored and uploaded"). Case-
+    /// insensitive, so `[a-z0-9#]*u` is -u and -U alike; curl's -0 -4 -6 -#
+    /// cluster too (`-4u user:pw`).
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
     /// Short `-u` / `-U` mean user:password only to curl (`rsync -u` is
     /// "update", its `host:path` a remote path; Finding CWE-670, "Command
     /// redaction erases rsync paths, PWD, and token: URLs that are not
-    /// secrets"): `userFlagIsCurl` checks the command. The long forms are
-    /// always userinfo.
-    private static let userFlag = re(#"((?:^|\s)(-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// secrets"): `userFlagIsCurl` checks the command — a cluster ending in
+    /// u (`-fsSLu`) included. The long forms are always userinfo.
+    private static let userFlag = re(#"((?:^|\s)(-[a-z0-9#]*u|--user|--proxy-user)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
     /// The command a flag at `location` belongs to is curl: a word named
     /// `curl` (any path, any case) since the start of its shell segment. The
     /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
