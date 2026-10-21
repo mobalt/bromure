@@ -547,7 +547,8 @@ struct ReviewRunAgentdTests {
             meta = d + '/meta'; os.makedirs(meta)
             open(meta + '/proxy.env', 'w').write(
                 'export HTTPS_PROXY=http://127.0.0.1:3128\\nexport NO_PROXY=localhost,127.0.0.1\\n'
-                'export OPENAI_API_KEY=sk-not-for-git\\n')
+                'export OPENAI_API_KEY=sk-not-for-git\\n'
+                "export NO_PROXY='localhost,127.0.0.1'\\n")      # a profile's own, shell-quoted
             m.META = meta
             calls = []
             def fake_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):

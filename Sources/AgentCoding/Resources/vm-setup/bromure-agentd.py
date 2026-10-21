@@ -4739,9 +4739,17 @@ def _meta_proxy_env():
     try:
         with open(os.path.join(META, "proxy.env")) as f:
             for line in f:
-                m = re.match(r"^export ([A-Za-z_]+)=(\S*)$", line.strip())
-                if m and m.group(1) in _FETCH_PROXY_KEYS:
-                    out[m.group(1)] = m.group(2)
+                # Read as the shell would: a later line wins, and a
+                # profile's own (shell-quoted) export loses its quotes.
+                m = re.match(r"^export ([A-Za-z_]+)=(.*)$", line.strip())
+                if not m or m.group(1) not in _FETCH_PROXY_KEYS:
+                    continue
+                try:
+                    words = shlex.split(m.group(2))
+                except ValueError:
+                    continue
+                if len(words) == 1:
+                    out[m.group(1)] = words[0]
     except OSError:
         pass
     return out
