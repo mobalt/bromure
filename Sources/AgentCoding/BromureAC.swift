@@ -15387,10 +15387,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // An automation (or task) run's refusal names its slug on the
                 // first line: that run failed — it isn't left "launched".
                 let (slug, message) = Self.splitWorktreeError(raw)
-                SupplyChainLog.shared.record("[worktree] \(message)")
+                SupplyChainLog.shared.record("[worktree] \(ScheduledAutomationEngine.guestReported(message))")
                 if let slug {
-                    self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message)
-                    self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message)
+                    // A claim from the guest: a run whose tab is up isn't failed.
+                    let live = self.liveWorktreeBranches(profileID: pid)
+                    self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
+                    self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
                 }
                 // NON-BLOCKING. A modal runModal() here froze the main run loop
                 // — and with it the automation server that POST /sessions waits
