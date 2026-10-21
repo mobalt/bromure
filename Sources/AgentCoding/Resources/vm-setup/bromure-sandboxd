@@ -51,6 +51,7 @@ import json
 import os
 import pwd
 import re
+import select
 import signal
 import socket
 import struct
@@ -1686,8 +1687,71 @@ def is_descendant_of(pid, ancestor):
 _APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$")
 
 
-def apt_install(packages):
-    """Install `packages` with apt-get. Returns (exit code, output tail)."""
+# One deadline for the whole call -- the list refresh and the install, with
+# its retry -- and the caller (agentd, then the host) waits longer than it,
+# so nothing up the chain reports "failed" while apt is still running. A step
+# that overruns it, or whose caller hung up, is stopped as a whole process
+# group with SIGTERM first: SIGKILL mid-unpack leaves dpkg interrupted.
+APT_DEADLINE_S = 1800
+APT_STOP_GRACE_S = 120
+# One install at a time: a second approval (the same names asked again while
+# the first is still in dpkg) waits for it rather than racing a second apt.
+_APT_LOCK = threading.Lock()
+
+
+def _apt_stop(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=APT_STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+
+
+def _apt_step(argv, env, deadline, cancelled):
+    """Run one apt command. (exit code, output, stopped-why or None)."""
+    try:
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        return 1, "%s: %s" % (argv[0], exc), None
+    chunks = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    why = None
+    while True:
+        try:
+            proc.wait(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if time.time() > deadline:
+            why = "took longer than %ds" % APT_DEADLINE_S
+        elif cancelled():
+            why = "the request was abandoned"
+        if why:
+            log("apt: stopping %s: %s" % (" ".join(argv[:2]), why))
+            _apt_stop(proc)
+            break
+    reader.join(timeout=5)
+    out = b"".join(c for c in chunks if c).decode("utf-8", "replace")
+    if why:
+        out += "\n%s stopped: %s" % (argv[0], why)
+    return proc.returncode, out, why
+
+
+def apt_install(packages, cancelled=lambda: False):
+    """Install `packages` with apt-get. Returns (exit code, output tail).
+
+    `cancelled()` is polled while apt runs: True = the caller has gone, and
+    apt is stopped before this returns.
+    """
     if not isinstance(packages, list) or not packages or len(packages) > 20 \
             or not all(isinstance(p, str) and _APT_NAME.match(p) and not p.endswith(".deb")
                        for p in packages):
@@ -1695,28 +1759,41 @@ def apt_install(packages):
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive",
                APT_LISTCHANGES_FRONTEND="none", NEEDRESTART_MODE="a")
     cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
-    log("apt_install %s" % " ".join(packages))
+    deadline = time.time() + APT_DEADLINE_S
+    if not _APT_LOCK.acquire(timeout=APT_DEADLINE_S):
+        return 75, "another package install is still running"
+    try:
+        log("apt_install %s" % " ".join(packages))
+        code, out, stopped = _apt_step(cmd, env, deadline, cancelled)
+        # The image ships without package lists (or with stale ones): refresh
+        # once and retry. Not after a stop: that's the answer.
+        if not stopped and code != 0 and ("Unable to locate package" in out
+                                          or "has no installation candidate" in out
+                                          or "Failed to fetch" in out):
+            ucode, uout, stopped = _apt_step(["apt-get", "update"], env, deadline, cancelled)
+            out += "\n" + uout
+            if stopped:
+                code = ucode if ucode else 1
+            elif ucode == 0:
+                code, out2, stopped = _apt_step(cmd, env, deadline, cancelled)
+                out += "\n" + out2
+        if stopped and code == 0:
+            code = 1
+        log("apt_install %s: exit %d" % (" ".join(packages), code))
+        return code, out[-16000:]
+    finally:
+        _APT_LOCK.release()
 
-    def run(argv):
-        try:
-            p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               timeout=840)
-            return p.returncode, p.stdout.decode("utf-8", "replace")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return 1, "apt-get: %s" % exc
 
-    code, out = run(cmd)
-    # The image ships without package lists (or with stale ones): refresh
-    # once and retry.
-    if code != 0 and ("Unable to locate package" in out or "has no installation candidate" in out
-                      or "Failed to fetch" in out):
-        ucode, uout = run(["apt-get", "update"])
-        out += "\n" + uout
-        if ucode == 0:
-            code, out2 = run(cmd)
-            out += "\n" + out2
-    log("apt_install %s: exit %d" % (" ".join(packages), code))
-    return code, out[-16000:]
+def _peer_gone(conn):
+    """The client end of `conn` has closed (or errored)."""
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+        if not ready:
+            return False
+        return conn.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
 
 
 class Supervisor(object):
@@ -2073,7 +2150,8 @@ class Supervisor(object):
             # Only agentd gets here (the peer checks above), and only for a
             # package the user approved on the host. Long: no socket timeout.
             conn.settimeout(None)
-            code, output = apt_install(request.get("packages"))
+            code, output = apt_install(request.get("packages"),
+                                       cancelled=lambda: _peer_gone(conn))
             conn.sendall((json.dumps({"ok": code == 0, "exit_code": code,
                                       "output": output}) + "\n").encode())
         elif op == "poweroff":

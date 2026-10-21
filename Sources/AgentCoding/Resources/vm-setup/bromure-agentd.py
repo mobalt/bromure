@@ -228,6 +228,10 @@ def _tmux_argv():
     return ["tmux", "-S", socket_path] if socket_path else ["tmux"]
 
 
+# bromure-sandboxd's APT_DEADLINE_S (1800) + APT_STOP_GRACE_S (120), and a margin.
+APT_REPLY_WAIT_S = 1800 + 120 + 60
+
+
 def _sandbox_ctl_request(request, timeout=20.0):
     """One JSON request to bromure-sandboxd; its reply, or None. The reply may
     be larger than one recv (an install's output), so read to the newline."""
@@ -1379,9 +1383,12 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         # strict sandbox, and the sandboxed agent can't reach the supervisor.
         apt = req.get("apt_install")
         if isinstance(apt, dict):
+            # Longer than the supervisor's own deadline for the whole install
+            # (APT_DEADLINE_S plus its stop grace), so "no reply" never means
+            # "apt is still running": the supervisor always answers first.
             reply = _sandbox_ctl_request({"op": "apt_install",
                                           "packages": apt.get("packages") or []},
-                                         timeout=900.0)
+                                         timeout=APT_REPLY_WAIT_S)
             if reply is None:
                 resp = {"exit_code": 1, "output": "no reply from the sandbox supervisor"}
             else:

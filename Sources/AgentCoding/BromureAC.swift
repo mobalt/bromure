@@ -10794,8 +10794,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         advisor.installPackages = { [weak self] pid, manager, packages in
             guard let self else { return (1, "the app is going away") }
             do {
+                // No reply deadline here (guestJSONRequest waits for agentd):
+                // the guest answers only once apt has finished or been
+                // stopped, so a failure shown is never one still running.
                 let reply = try await self.guestJSONRequest(
-                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 900])
+                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 2000])
                 return (reply["exit_code"] as? Int ?? 1, reply["output"] as? String ?? "")
             } catch {
                 return (1, "\(error)")
