@@ -733,10 +733,35 @@ struct PolicyNoteDeliveryTests {
         #expect(try stop().isEmpty)
         #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
         #expect(!fm.fileExists(atPath: claims.appendingPathComponent(owed.lastPathComponent).path))   // still owed
-        // Once the table is readable, the same note goes through.
+        // …and stays so: the idle_prompt a minute later, Grok's
+        // StopCancelled, a typed done — none reports done over the note.
+        func hook(_ arg: String, _ json: String) throws {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = [script.path, arg]
+            proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
+            let input = Pipe()
+            proc.standardInput = input; proc.standardOutput = FileHandle.nullDevice
+            try proc.run()
+            input.fileHandleForWriting.write(Data(json.utf8))
+            try input.fileHandleForWriting.close()
+            proc.waitUntilExit()
+        }
+        for (arg, json) in [("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#),
+                            ("done", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#),
+                            ("done", "")] {
+            try hook(arg, json)
+            #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
+        }
+        // New activity clears it; the next Stop tries again, and once the
+        // table is readable the same note goes through.
+        try hook("working", #"{"hook_event_name":"UserPromptSubmit","session_id":"abc-1"}"#)
         try installed.shareLine.write(to: installed.mountinfo, atomically: true, encoding: .utf8)
         let later = try #require(try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])
         #expect(later["decision"] as? String == "block")
+        // Nothing owed any more: an idle Stop is done again.
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
     }
 
     @Test("Under a filesystem ruleset the sandbox grants /proc (read-only) with the meta share",

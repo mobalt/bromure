@@ -4885,7 +4885,7 @@ public final class ProfileStore {
                 # writable). Not "the turn ended": done would let the host
                 # type a held notice and finish the task over an undelivered
                 # note — the tab says it needs you instead.
-                [ "$rc" = 3 ] && undelivered=1
+                if [ "$rc" = 3 ]; then undelivered=1; else drained=1; fi
               fi
               if [ -n "${undelivered:-}" ]; then set -- needsInput "${2:-}"; else set -- done "${2:-}"; fi
             fi
@@ -5029,6 +5029,18 @@ public final class ProfileStore {
                 *) exit 0 ;;
               esac
             fi
+            # A policy note owed to this tab that its Stop couldn't hand over
+            # (see `stop`): until new activity or a Stop that drains, no
+            # `done` for this tab — not the idle_prompt that follows a minute
+            # later, not Grok's StopCancelled, not a typed one — or the host
+            # finishes the task over the note.
+            owed="$HOME/.bromure/.policy-owed-$idx"
+            if [ -n "${undelivered:-}" ]; then
+              mkdir -p "$HOME/.bromure" 2>/dev/null; : > "$owed" 2>/dev/null
+            elif [ -n "${drained:-}" ] || [ "$signal" = "working" ]; then
+              rm -f "$owed" 2>/dev/null
+            fi
+            if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
             # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
             # agent-tool-<idx>.jsonl — the call's id, tool, command and the
             # agent's pid, written BEFORE the tool runs. The host ties the
