@@ -71,6 +71,54 @@ struct ContainerTrafficTests {
         #expect(VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
     }
 
+    /// Finding (CWE-693): "A boot-phase tc change is ignored, so a pedit rule
+    /// keeps forging the container mark". A unit on the workspace disk that
+    /// installs a pedit before the session starts kept the exemption armed.
+    @Test("A tc change revokes the exemption in the boot phase too")
+    func tcRevokesDuringBoot() {
+        let pid = UUID()
+        let svc = KernelSentryService.shared
+        let old = svc.containerDirectProvider
+        defer { svc.containerDirectProvider = old; svc.rearmContainerMark(profileID: pid)
+                svc.noteContainerMark(profileID: pid, active: false) }
+        svc.containerDirectProvider = { $0 == pid }
+        svc.noteContainerMark(profileID: pid, active: true)
+        #expect(VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        let bridge = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: false)
+        bridge.handle(["type": "event", "seq": 1, "kind": "tc_change", "phase": "boot",
+                       "op": "filter", "tc_kind": "u32", "comm": "tc", "pid": 412])
+        #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        // The session starting doesn't bring it back; only the next boot does.
+        bridge.handle(["type": "heartbeat", "seq": 2, "phase": "session"])
+        svc.noteContainerMark(profileID: pid, active: true)
+        #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+    }
+
+    @Test("The mark is honoured only from a sentry whose hello lists every tc probe")
+    func requiresTCProbes() {
+        let all: [String: Any] = ["probes": ["security_bprm_check", "tc_modify_qdisc", "tc_new_tfilter", "tc_ctl_action"]]
+        #expect(KernelSentryService.watchesTrafficControl(all))
+        #expect(!KernelSentryService.watchesTrafficControl(["probes": ["tc_modify_qdisc", "tc_new_tfilter"]]))
+        #expect(!KernelSentryService.watchesTrafficControl(["probes": [String]()]))
+        #expect(!KernelSentryService.watchesTrafficControl([:]))
+    }
+
+    @Test("Disarmed probes revoke the exemption: tc may no longer be watched")
+    func disarmedProbesRevoke() {
+        let pid = UUID()
+        let svc = KernelSentryService.shared
+        let old = svc.containerDirectProvider
+        defer { svc.containerDirectProvider = old; svc.rearmContainerMark(profileID: pid)
+                svc.noteContainerMark(profileID: pid, active: false) }
+        svc.containerDirectProvider = { $0 == pid }
+        svc.noteContainerMark(profileID: pid, active: true)
+        let bridge = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: false)
+        bridge.handle(["type": "heartbeat", "seq": 1, "probes": ["armed": 30, "total": 30, "missed": 0]])
+        #expect(VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+        bridge.handle(["type": "heartbeat", "seq": 2, "probes": ["armed": 27, "total": 30, "missed": 0]])
+        #expect(!VMNetSwitch.shared.isContainerTrafficDirect(profileID: pid))
+    }
+
     @Test("Not applied without the sentry, or under a policy with request-level rules")
     func effective() {
         var p = bromure_ac.Profile(name: "c", tool: .claude, authMode: .token)
