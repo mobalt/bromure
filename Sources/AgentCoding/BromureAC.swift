@@ -14968,29 +14968,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // (offline, a failed download) is retried within that,
                     // and each success is staged at once.
                     let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
-                    var pending = kernels
-                    var attempt = 0
-                    while true {
-                        var definitive: [String: String] = [:]
-                        var retry: [String] = []
-                        for kernel in pending {
-                            guard let f = await store.ensureOutcome(kernel: kernel, hash: hash) else { continue }
-                            if f.definitive { definitive[kernel] = f.reason } else { retry.append(kernel) }
-                            if attempt == 0, waiting || kernel == kernels.first {
-                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): \(kernel): \(f.reason)")
-                            }
+                    let short = String(pid.uuidString.prefix(8))
+                    // Each kernel on its own, in parallel, staged (or marked
+                    // unavailable) the moment ITS answer is in: the guest
+                    // reports the running kernel first and then every
+                    // installed one, and a slow download for another kernel
+                    // must not hold back the one it's waiting for.
+                    @Sendable func settle(_ kernel: String, attempt: Int) async -> Bool {
+                        let f = await store.ensureOutcome(kernel: kernel, hash: hash)
+                        if let f, attempt == 0, waiting || kernel == kernels.first {
+                            SentryModuleStore.log("\(short): \(kernel): \(f.reason)")
                         }
                         if let dir, FileManager.default.fileExists(atPath: dir.path) {
-                            // A guest waiting for a module none will come for
-                            // stops at once, with the host's reason — only
-                            // then: a transient failure leaves it waiting.
-                            store.markUnavailable(definitive, in: dir)
-                            let staged = store.stage(kernels: kernels, hash: hash, into: dir)
-                            if attempt == 0 || !staged.isEmpty {
-                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): staged \(staged) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                            if let f, f.definitive {
+                                // A guest waiting for a module none will come
+                                // for stops at once, with the host's reason —
+                                // only then: a transient failure leaves it waiting.
+                                store.markUnavailable([kernel: f.reason], in: dir)
+                            } else if f == nil, !store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
+                                SentryModuleStore.log("\(short): staged \(kernel) into the running VM\(waiting ? " (the guest is waiting)" : "")")
                             }
                         }
-                        pending = retry
+                        return f.map { !$0.definitive } ?? false     // retry?
+                    }
+                    var pending = kernels
+                    var attempt = 0
+                    while !pending.isEmpty {
+                        let round = attempt
+                        pending = await withTaskGroup(of: (String, Bool).self) { group in
+                            for kernel in pending { group.addTask { (kernel, await settle(kernel, attempt: round)) } }
+                            var retry: [String] = []
+                            for await (kernel, again) in group where again { retry.append(kernel) }
+                            return retry
+                        }
                         attempt += 1
                         guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
                         try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
