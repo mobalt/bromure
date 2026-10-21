@@ -64,7 +64,7 @@ struct ShellContinuationLintTests {
 
     @Test("no shell script in the repository continues a command into a comment")
     func repository() throws {
-        let skip: Set<String> = [".git", ".build", "vendor", "node_modules", ".swiftpm", "DerivedData"]
+        let skip: Set<String> = [".git", ".build", "vendor", "node_modules", ".swiftpm", "DerivedData", ".claude"]
         var found: [String] = []
         let fm = FileManager.default
         guard let walk = fm.enumerator(at: Self.root, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey]) else {
@@ -73,6 +73,10 @@ struct ShellContinuationLintTests {
         var scanned = 0
         for case let url as URL in walk {
             if skip.contains(url.lastPathComponent) { walk.skipDescendants(); continue }
+            // Another checkout nested in this one (a git worktree): not this tree's scripts.
+            if url != Self.root, fm.fileExists(atPath: url.appendingPathComponent(".git").path) {
+                walk.skipDescendants(); continue
+            }
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
                   Self.isShellScript(url), let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             scanned += 1
