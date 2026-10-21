@@ -49,7 +49,10 @@ extension ACAppDelegate {
         for t in targets {
             if t.tool == .claude {
                 writePolicyNote(profileID: profileID, window: t.window, text: text)
-            } else {
+            } else if window != nil {
+                // Typed into the tab and submitted as the user's message: only
+                // for the agent whose own process was blocked, never broadcast
+                // into every other agent's composer.
                 queueTypedPolicyNote(profileID: profileID, window: t.window, text: text)
             }
         }
