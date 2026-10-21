@@ -13,6 +13,8 @@ struct CommandLineRedactorTests {
     func redact() {
         let r = CommandLineRedactor.redact
         #expect(r("curl -u alice:hunter2 https://x.example") == "curl -u alice:*** https://x.example")
+        #expect(r("curl -ualice:hunter2 https://x.example") == "curl -ualice:*** https://x.example")
+        #expect(r("mkdir -p a:b && ssh -p 22 host") == "mkdir -p a:b && ssh -p 22 host")
         #expect(r(#"curl -H "Authorization: Bearer abc.def.ghi" https://api.example"#)
                 == #"curl -H "Authorization: Bearer ***" https://api.example"#)
         #expect(r("curl -H 'X-Api-Key: k123' x") == "curl -H 'X-Api-Key: ***' x")

@@ -25,8 +25,9 @@ enum CommandLineRedactor {
         + #"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"#)
     /// `scheme://user:password@host`
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
-    /// `curl -u user:password`, `--user`, `--proxy-user`
-    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
+    /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
+    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
