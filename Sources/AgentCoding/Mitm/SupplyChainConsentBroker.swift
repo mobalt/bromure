@@ -167,6 +167,10 @@ public actor SupplyChainConsentBroker {
 
     // MARK: Reputation overrides
 
+    /// How long an "always allow" answer is a grant of its own: until the
+    /// saved allowlist entry is live (a hop to the main actor).
+    static let alwaysBridge: TimeInterval = 30
+
     static func overrideScope(ecosystem: String, name: String) -> String {
         "override:\(ecosystem):\(name.lowercased())"
     }
@@ -233,8 +237,15 @@ public actor SupplyChainConsentBroker {
     /// Store an answer to the override question; true = install.
     func recordOverride(_ choice: OverrideChoice, key: String, label: String, now: Date) -> Bool {
         switch choice {
-        case .allowSession, .allowAlways:
+        case .allowSession:
             grants[key] = Grant(expiration: .distantFuture, scopeDisplayName: label, isSessionScoped: true)
+            return true
+        case .allowAlways:
+            // The workspace's list is what "always" means — taking the
+            // package off it must stop it at once — so the grant only
+            // bridges the moment until the list is saved and in force.
+            grants[key] = Grant(expiration: now.addingTimeInterval(Self.alwaysBridge), scopeDisplayName: label,
+                                isSessionScoped: false)
             return true
         case .denySession:
             denies[key] = DenyMemory(expiration: .distantFuture, scopeDisplayName: label)

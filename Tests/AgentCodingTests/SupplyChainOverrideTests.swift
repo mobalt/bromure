@@ -37,7 +37,7 @@ struct SupplyChainOverrideTests {
         #expect(SocketDevClient.isMalwareVerdict("malware") && !SocketDevClient.isMalwareVerdict("installScripts"))
     }
 
-    @Test("the answers: allow for the session or always, refuse for the session, or not now (a minute)")
+    @Test("the answers: allow for the session, always (the list), refuse for the session, or not now (a minute)")
     func answers() async {
         let b = SupplyChainConsentBroker()
         let pid = UUID(), now = Date()
@@ -51,7 +51,10 @@ struct SupplyChainOverrideTests {
         #expect(!(await b.recordOverride(.notNow, key: key("d"), label: "d", now: now)))
         let later = now.addingTimeInterval(3600)
         #expect(await b.decided(key("a"), now: later) == true)
-        #expect(await b.decided(key("b"), now: later) == true)
+        // "Always" is the workspace's list: the broker only bridges until the
+        // saved entry is live, so removing it from the list stops it.
+        #expect(await b.decided(key("b"), now: now.addingTimeInterval(5)) == true)
+        #expect(await b.decided(key("b"), now: later) == nil)
         #expect(await b.decided(key("c"), now: later) == false)          // stays quiet all session
         #expect(await b.decided(key("d"), now: now.addingTimeInterval(5)) == false)
         #expect(await b.decided(key("d"), now: later) == nil)            // asked again later

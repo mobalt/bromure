@@ -174,7 +174,7 @@ A reputation verdict is not always right for you: socket.dev flags `workerd` for
 | Choice | Effect |
 |---|---|
 | **Allow … for this session** | Installs it, and any other version of that package, until the app quits. |
-| **Always allow … in this workspace** | Installs it, and adds it to the workspace's **Trusted packages** list, so later downloads skip the OSV and socket.dev checks for it. |
+| **Always allow … in this workspace** | Installs it, and adds it to the workspace's **Trusted packages** list, so later downloads skip the OSV and socket.dev checks for it — for as long as it stays on the list. |
 | **Don't allow …, and don't ask again this session** | Keeps the 451; the same install stays blocked without asking again until the app quits. |
 | **Not now** | Keeps the 451 for now; asked again after a minute. No answer means this. |
 
