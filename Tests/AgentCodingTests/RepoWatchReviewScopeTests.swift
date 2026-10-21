@@ -414,4 +414,29 @@ struct ReviewRunAgentdTests {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
+
+    /// Finding (CWE-670): "SSH origin fetch still runs /bin/false, so
+    /// automation bases stay on HEAD". Every git call is hardened with
+    /// core.sshCommand=/bin/false, so the base fetch from an ssh origin ran
+    /// /bin/false and quietly exited 128.
+    @Test("The base fetch from an ssh origin runs a config-less ssh, not /bin/false or the environment's",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sshOriginFetch() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            trace = d + '/trace'
+            g('remote', 'add', 'origin', 'ssh://git@127.0.0.1:1/nope.git')   # refused at once
+            os.environ['GIT_TRACE'] = trace
+            os.environ['GIT_SSH_COMMAND'] = 'touch ' + d + '/hijacked'
+            m._resolve_run_base(repo, 'f' * 40)
+            t = open(trace).read() if os.path.exists(trace) else ''
+            print('SSH', '/usr/bin/ssh -F /dev/null -o BatchMode=yes' in t)
+            print('NOT_FALSE', '/bin/false' not in t)
+            print('NOT_ENV', not os.path.exists(d + '/hijacked'))
+            """, dir: dir)
+        for key in ["SSH", "NOT_FALSE", "NOT_ENV"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
 }

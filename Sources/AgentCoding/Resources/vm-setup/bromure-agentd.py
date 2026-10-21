@@ -4665,6 +4665,11 @@ def _commit_exists(cwd, ref):
                           stderr=_DEVNULL).returncode == 0
 
 
+# The ssh a network fetch uses: no config files (no ProxyCommand from the
+# workspace), never interactive.
+_FETCH_SSH_COMMAND = "/usr/bin/ssh -F /dev/null -o BatchMode=yes"
+
+
 def _resolve_run_base(cwd, base):
     """The start point a review run is pinned to, if the checkout has it —
     fetching once when it doesn't (a checkout cloned weeks ago lags the
@@ -4679,10 +4684,20 @@ def _resolve_run_base(cwd, base):
         # The only network git call in this file, so the only one that needs a
         # transport beyond `file`. ssh as well as https: a workspace's `origin`
         # may be either, and which one is not ours to assume.
-        _ws_run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
-                       stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
-                       git_protocols="https:ssh",
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        # GIT_SSH_COMMAND, because `_harden_argv` pins core.sshCommand to
+        # /bin/false for every git call (so a repository can't name its own
+        # ssh): without it an ssh origin's fetch ran /bin/false and exited
+        # 128, quietly. It overrides that config and any GIT_SSH_COMMAND in
+        # agentd's environment; `-F /dev/null` skips user and system ssh
+        # config, so a workspace ProxyCommand / LocalCommand can't run;
+        # BatchMode never prompts.
+        p = _ws_run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
+                    stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
+                    git_protocols="https:ssh",
+                    env=dict(os.environ, GIT_TERMINAL_PROMPT="0",
+                             GIT_SSH_COMMAND=_FETCH_SSH_COMMAND))
+        if getattr(p, "returncode", 0) != 0:
+            log("automation", "fetch for %s exited %s" % (base, p.returncode))
     except Exception as e:
         log("automation", "fetch for %s failed: %s" % (base, e))
     if _commit_exists(cwd, base):
