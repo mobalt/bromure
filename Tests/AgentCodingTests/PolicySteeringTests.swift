@@ -532,10 +532,10 @@ struct PolicyNoteDeliveryTests {
         try fm.createDirectory(at: notes, withIntermediateDirectories: true)
         let status = outbox.appendingPathComponent("agent-status-3.txt")
 
-        func stop() throws -> String {
+        func stop(_ arg: String = "stop") throws -> String {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = [script.path, "stop"]
+            proc.arguments = [script.path, arg]
             proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
             let input = Pipe(), output = Pipe()
             proc.standardInput = input; proc.standardOutput = output
@@ -554,6 +554,19 @@ struct PolicyNoteDeliveryTests {
 
         // The continued turn's own Stop, with nothing owed: over now.
         #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
+        // A settings file seeded before this (Claude since turned off, Grok
+        // still loading it) runs `policy` and `done` side by side: `policy`
+        // leaves a Stop's notes alone, and `done` drains them as `stop` does.
+        try fm.removeItem(at: status)
+        try "curl to evil.example was blocked".write(to: notes.appendingPathComponent("w3-2.note"), atomically: true, encoding: .utf8)
+        #expect(try stop("policy").isEmpty)
+        #expect(fm.fileExists(atPath: notes.appendingPathComponent("w3-2.note").path))
+        let legacy = try #require(try JSONSerialization.jsonObject(with: Data(try stop("done").utf8)) as? [String: Any])
+        #expect(legacy["decision"] as? String == "block")
+        #expect(!fm.fileExists(atPath: status.path))
+        #expect(try stop("done").isEmpty)
         #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
     }
 }
