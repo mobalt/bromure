@@ -74,6 +74,21 @@ struct NetworkLineageTests {
         #expect(Self.S(nc["decision"]) == "unknown")
     }
 
+    @Test("A raw packet-socket send: no destination, its interface, a raw decision, no policy note")
+    func packetSocket() async throws {
+        let sink = LineageSink(), l = store(sink), pid = UUID()
+        l.noteExec(profileID: pid, ["pid": 70, "ppid": 1, "comm": "python3", "path": "/usr/bin/python3", "argv": "python3 raw.py"])
+        // The module's real shape: dst/dport present but empty, family AF_PACKET.
+        l.noteFlow(profileID: pid, ["pid": 70, "proto": "packet", "ip_proto": 0, "family": 17, "dst": "",
+                                    "dport": 0, "sport": 0, "count": 1, "dev": "eth0", "comm": "python3"])
+        await waitFor(sink, 1)
+        let f = try #require(sink.flows.first)
+        #expect(Self.S(f["decision"]) == "raw" && Self.S(f["dev"]) == "eth0" && Self.S(f["proto"]) == "packet")
+        let row = try #require(SecurityTimeline.map(profileID: pid, eventType: "net.flow", eventData: f, now: Date()))
+        #expect(row.condition == "python3 → raw frames on eth0")
+        #expect(row.decision == "raw socket")
+    }
+
     @Test("A shell started long after the tool call, or running another command, isn't linked")
     func noFalseLinks() {
         let t0 = Date()

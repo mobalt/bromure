@@ -114,9 +114,6 @@ public final class VMNetSwitch: @unchecked Sendable {
         public let proto: UInt8          // 6 = TCP, 17 = UDP
         public let port: UInt16
         public let denied: Bool          // true = blocked by the policy
-        /// Container traffic the workspace exempts from interception (the
-        /// guest sentry's DSCP mark): firewall applied, MiTM skipped.
-        public var containerDirect: Bool = false
         /// The rule that decided (its `EgressPolicy.Rule.text`); nil when the
         /// default action did, or for a transport drop (`byPolicy` false).
         public var rule: String? = nil
@@ -1079,47 +1076,6 @@ public final class VMNetSwitch: @unchecked Sendable {
     private var quarantinedPorts: Set<Int> = []
     private var egressByteCounts: [Int: UInt64] = [:]
 
-    /// DSCP value the guest kernel sentry stamps on traffic the guest
-    /// FORWARDS (containers: Docker bridges, pods, anything behind a veth) and
-    /// clears from everything the guest originates, so only real container
-    /// traffic carries it. Lockdown keeps the module loaded, so root can't
-    /// forge it.
-    public static let containerDSCP: UInt8 = 43
-    /// Workspaces whose container traffic skips the MiTM. Set only while the
-    /// VM's sentry is attested running with the container mark (fail closed:
-    /// without the sentry the mark could be forged, so it's not honoured).
-    private var containerDirectProfiles: Set<UUID> = []
-
-    public func setContainerTrafficDirect(_ enabled: Bool, profileID: UUID) {
-        lock.lock(); defer { lock.unlock() }
-        if enabled { containerDirectProfiles.insert(profileID) } else { containerDirectProfiles.remove(profileID) }
-    }
-
-    public func isContainerTrafficDirect(profileID: UUID) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return containerDirectProfiles.contains(profileID)
-    }
-
-    /// Read and strip the container DSCP mark from an IPv4 header at `ip`
-    /// (fixing the header checksum incrementally, RFC 1624), so it never leaves
-    /// the host. Returns whether the mark was present.
-    public static func takeContainerMark(_ buf: UnsafeMutablePointer<UInt8>, ip: Int) -> Bool {
-        let tos = buf[ip + 1]
-        guard tos >> 2 == containerDSCP else { return false }
-        let newTOS = tos & 0x03                        // keep ECN, clear DSCP
-        let oldWord = UInt16(buf[ip]) << 8 | UInt16(tos)
-        let newWord = UInt16(buf[ip]) << 8 | UInt16(newTOS)
-        let oldSum = UInt16(buf[ip + 10]) << 8 | UInt16(buf[ip + 11])
-        // HC' = ~(~HC + ~m + m')
-        var sum = UInt32(~oldSum) + UInt32(~oldWord) + UInt32(newWord)
-        sum = (sum & 0xFFFF) + (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16)
-        let newSum = ~UInt16(sum & 0xFFFF)
-        buf[ip + 1] = newTOS
-        buf[ip + 10] = UInt8(newSum >> 8); buf[ip + 11] = UInt8(newSum & 0xFF)
-        return true
-    }
-
     /// The connection verdict a port's CURRENT policy gives a flow — the exact
     /// snapshot `handleEgress` uses (tests).
     func egressVerdict(portID: Int, ip: UInt32, hostnames: [String], proto: EgressPolicy.Proto,
@@ -1198,13 +1154,8 @@ public final class VMNetSwitch: @unchecked Sendable {
         // separate control (bridgePeers), not this firewall.
         guard (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return false }
 
-        var g = portGovernance(srcPortID)
+        let g = portGovernance(srcPortID)
         guard let pid = g.pid else { return false }          // non-session → native
-        // Container traffic: strip the sentry's mark always (it must never
-        // leave the host), and skip the MiTM when the workspace allows it.
-        // The firewall below still applies.
-        let containerDirect = Self.takeContainerMark(buf, ip: 14) && isContainerTrafficDirect(profileID: pid)
-        if containerDirect { g.interceptor = nil; g.interceptPorts = [] }
 
         // Outbound volume per VM, for the watchdog's exfiltration signal
         // (counted here, independent of the proxy's own accounting).
@@ -1318,13 +1269,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         // Allow verdicts are only worth a log line / Timeline row when the
         // firewall is actually on: with no rules (allow-all) every flow would
         // otherwise be reported as "allowed" by a firewall that's off (B25).
-        // Container traffic the workspace exempts from the MiTM is always
-        // reported: that it skipped interception is the point of the row.
-        if containerDirect || Self.reportsAllowedFlows(g.policy) {
+        if Self.reportsAllowedFlows(g.policy) {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
                        proto: proto, port: dport, denied: false, policy: g.policy, ep: ep, now: now,
-                       newConnection: Self.denyReset(tcpFlags: tcpFlags) == .syn,
-                       containerDirect: containerDirect)
+                       newConnection: Self.denyReset(tcpFlags: tcpFlags) == .syn)
         }
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
@@ -1391,8 +1339,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, port: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
-                            midFlow: Bool = false, newConnection: Bool = false,
-                            containerDirect: Bool = false) {
+                            midFlow: Bool = false, newConnection: Bool = false) {
         let name = hostnames.first ?? ""
         let key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
                             // A dying flow's trailing segments dedupe apart from
@@ -1423,7 +1370,6 @@ public final class VMNetSwitch: @unchecked Sendable {
         var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                                 proto: proto, port: port, denied: denied)
         event.midFlow = midFlow
-        event.containerDirect = containerDirect
         if let policy {
             event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
                                            port: port, now: now)?.text

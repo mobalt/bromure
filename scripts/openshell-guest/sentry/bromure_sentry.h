@@ -67,52 +67,37 @@ enum bromure_sentry_kind {
 	 * the agent that caused it even for processes that started before this
 	 * module loaded. */
 	BSK_NET_FLOW = 19,
-	/* A locally originated packet carried the container mark, so something
-	 * in the guest tried to pass its own traffic off as a container's. The
-	 * mark was cleared before the packet left; this says who tried.
-	 *
-	 * Only emitted when the hook runs in TASK context. On a softirq --
-	 * a TCP retransmit, a delayed ACK -- `current` is whatever thread was
-	 * interrupted, and naming it would accuse an innocent process. The
-	 * tally counts every clearing either way, so the count is complete and
-	 * the attribution is never invented. */
-	BSK_CONTAINER_MARK_FORGED = 20,
+	/* Retired with the container mark itself, which was withdrawn: a DSCP
+	 * value cannot attest anything when guest root is in the threat model.
+	 * The stamp lived in a POSTROUTING hook, and AF_PACKET SOCK_RAW reaches
+	 * the driver without entering netfilter at all -- measured, a forged
+	 * DSCP 43 left the NIC intact while the same byte on an ordinary socket
+	 * was cleared. `PACKET_QDISC_BYPASS` goes further and skips
+	 * `__dev_queue_xmit`, so tc egress and NF_NETDEV_EGRESS miss it too;
+	 * only the driver transmit entry sees every frame. The host no longer
+	 * reads DSCP. Kept so the number is never reused. */
+	BSK_CONTAINER_MARK_UNUSED = 20,
 	/* Something installed or changed a traffic-control qdisc, filter or
-	 * action. Reported because `tc` is the one way left to forge the
-	 * container mark: an egress qdisc action runs inside
-	 * `__dev_queue_xmit`, AFTER netfilter has finished, so there is no
-	 * later hook for the sentry to take. Measured: a `pedit` filter stamps
-	 * DSCP 43 on local traffic and the POSTROUTING hook cannot undo it.
+	 * action. This began as a defence for the container mark; the mark is
+	 * gone and the signal is kept, because egress `tc` is general packet
+	 * rewriting on a path no netfilter hook can follow -- an action runs
+	 * inside `__dev_queue_xmit`, after netfilter has finished. So this
+	 * makes the attempt VISIBLE rather than stopping it, and the host
+	 * weighs it as tampering.
 	 *
-	 * So this kind makes the attempt VISIBLE rather than stopping it, and
-	 * the host revokes the container exemption on seeing one. Measured as
-	 * safe to act on: nothing on this image calls these paths legitimately
-	 * -- not idle, not `docker run`, not `docker network create`, not a
-	 * dockerd restart. Docker attaches a veth's default qdisc without
-	 * going through tc's netlink interface. */
+	 * Measured as free of false positives on this image: nothing calls
+	 * these paths legitimately -- not idle, not `docker run`, not `docker
+	 * network create`, not a dockerd restart. Docker attaches a veth's
+	 * default qdisc without going through tc's netlink interface. */
 	BSK_TC_CHANGE = 21,
 	BSK_MAX
 };
 
-/* The DSCP the sentry stamps on forwarded (container) traffic, and strips from
- * anything locally originated that carries it.
- *
- * 43 = 0b101011, in the local/experimental pool (RFC 2474 §6: xxxx11), so it
- * collides with no standard class -- EF is 46, the AFxy classes are 10..38, CS0..7
- * are multiples of 8. A workspace that genuinely marks its own traffic for QoS
- * is untouched unless it picks exactly this value.
- *
- * Why a kernel module and not an iptables rule, an alias IP or a port range:
- * every one of those is settable by guest root, and the host has to be able to
- * BELIEVE the label. The sentry's hooks sit outside iptables (so `iptables -F`
- * and Docker's own chain rewrites cannot remove them) and lockdown keeps the
- * module loaded, so the mark is the one property of a packet the guest cannot
- * forge. The host still only trusts it when the sentry is attested running and
- * announced this exact value in its hello.
- */
-#define BROMURE_SENTRY_CONTAINER_DSCP 43
 
-/* `proto` on a BSK_NET_FLOW. The host renders the string. */
+/* `proto` on a BSK_NET_FLOW. The MODULE renders the string, in
+ * `sentry_proto_name` -- a new value needs a case added there too, or it goes
+ * out as "other". (This comment used to say the host renders it. It does not,
+ * and believing it is how BSPR_PACKET first shipped as "other".) */
 enum bromure_sentry_proto {
 	BSPR_NONE = 0,
 	BSPR_TCP,
@@ -120,6 +105,16 @@ enum bromure_sentry_proto {
 	BSPR_ICMP,
 	BSPR_ICMPV6,
 	BSPR_RAW,
+	/* An AF_PACKET send: a frame handed to the device with its own link and
+	 * IP headers, so the IP stack -- and every netfilter hook in it -- is
+	 * bypassed entirely. Needs CAP_NET_RAW. Distinct from BSPR_RAW, which
+	 * is an AF_INET SOCK_RAW socket and still traverses `ip_output`.
+	 *
+	 * This is the path that withdrew the container mark: a forged DSCP
+	 * survived to the wire here while the same byte on an ordinary socket
+	 * was cleared. The sentry cannot stamp or clear anything on it, so it
+	 * reports WHO sent one instead. */
+	BSPR_PACKET,
 	BSPR_MAX
 };
 
@@ -255,13 +250,6 @@ enum bromure_sentry_tally {
 	 * datagram connects to 127.0.0.53, the systemd-resolved stub -- three
 	 * per `sudo`, each from a short-lived pid the dedup cannot fold. */
 	BST_FLOW_LOCAL,
-	/* Forwarded packets stamped with the container mark. Per PACKET, not per
-	 * flow: this is the one counter in the module on a true data path, and
-	 * it is what tells the host "containers are actually running here". */
-	BST_CONTAINER_MARKED,
-	/* Locally originated packets whose container mark was stripped. Above
-	 * zero means a guest process tried to impersonate container traffic. */
-	BST_MARK_FORGED,
 	BST_MAX
 };
 

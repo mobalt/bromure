@@ -1935,131 +1935,103 @@ smaller. The allowed path of the hot denial hook pays nothing — the staging
 buffer is claimed *after* the early returns, so an allowed `security_file_open`
 does not touch it.
 
-### 4.3d The container mark
+### 4.3d The container mark — withdrawn, and why
 
-A workspace can opt out of MITM interception for *container* traffic. That is
-only offerable if the host can tell a container's packets from the guest's own,
-and every label the guest could apply — an alias IP, a port range, an iptables
-mark — is settable by guest root. So the sentry applies it, from a netfilter
-hook outside iptables, in a module lockdown keeps loaded. **DSCP 43**
-(`0b101011`, in RFC 2474's local/experimental pool, so it collides with no
-standard class — EF is 46, the AF classes 10–38, CS0–7 multiples of 8).
+A workspace could opt out of MITM interception for *container* traffic. The
+sentry stamped forwarded packets **DSCP 43** from a POSTROUTING hook at
+`NF_IP_PRI_LAST`, cleared that value from anything locally originated, and the
+host skipped interception for marked flows. The whole design rested on one
+claim: that guest root could not produce the mark.
 
-#### "Forwarded" is the container test, measured
-
-In a Bromure VM the guest forwards only for containers. One capture on the
-egress interface, with a mangle rule standing in for the hook, a container ping
-and a guest curl running together:
-
-```
-172.28.66.5 -> 1.1.1.1   DSCP 43 (tos 0xac)  x3    container, forwarded + MASQUERADEd
-172.28.66.5 -> 1.1.1.1   DSCP 0  (tos 0x00)  x11   the guest's own curl
-```
-
-Three facts at once: NAT does not touch TOS, so the mark survives MASQUERADE;
-the guest's own traffic is unmarked even with the hook active; and **both leave
-with the same source address**, which is why a label is needed at all — after
-NAT the host has nothing else to tell them apart by.
-
-#### One hook, on POSTROUTING, and why the obvious design was wrong
-
-The first design marked on `NF_INET_FORWARD` and cleared forgeries on
-`NF_INET_LOCAL_OUT`, both at `NF_IP_PRI_LAST`. **That had a forgery hole.**
-LOCAL_OUT runs *before* POSTROUTING, so root could add
+**That claim was false, and the hole is not a netfilter priority.** It is
+transmit paths that never enter netfilter at all. `AF_PACKET` `SOCK_RAW` is
+one: `packet_snd` goes to `dev_queue_xmit` and no `NF_HOOK` runs, so root
+(`CAP_NET_RAW`) can write an Ethernet + IPv4 frame whose TOS byte is already
+`43 << 2`. Measured on this image, same forged byte, two paths, sniffed on the
+egress NIC:
 
 ```
-iptables -t mangle -A POSTROUTING -j DSCP --set-dscp 43
+ordinary UDP socket (IP_TOS)    TOS on the wire 0x00 -> DSCP 0    cleared
+AF_PACKET SOCK_RAW              TOS on the wire 0xAC -> DSCP 43   SURVIVED
 ```
 
-which runs after the clear and stamps the mark back on its own traffic. "Last
-in the chain we chose" is not the same as last.
+The socket path also produced a `container_mark_forged` event naming the
+sender; the `AF_PACKET` path produced **no event of any kind**. A silent
+bypass.
 
-One hook on **POSTROUTING** at `NF_IP_PRI_LAST` is after nat (priority 100) and
-after every iptables rule anyone can add. It decides from the **ingress
-device**, the one property of a packet iptables cannot rewrite:
+**The obvious repair does not work either.** A hook in `__dev_queue_xmit` — tc
+egress, or `NF_NETDEV_EGRESS` — catches a plain `AF_PACKET` send, but
+`PACKET_QDISC_BYPASS` routes through `packet_direct_xmit`, which skips
+`__dev_queue_xmit` entirely. Measured with a clsact egress filter counting
+matching packets: 5 of 5 counted without the option, **0 of 5** with it, and
+the frames still transmitted (NIC TX counter +20 for 20 frames). They are not
+visible to `AF_PACKET` taps either, because `dev_direct_xmit` skips
+`dev_queue_xmit_nit`. The first point every frame passes is
+`dev_hard_start_xmit`.
 
-| `skb_iif` | verdict |
-|---|---|
-| 0 — originated here | clear |
-| a bridge, a bridge port, or a veth | mark |
-| anything else | clear |
+So the feature was removed rather than patched. The deeper reason is worth
+stating plainly: **with guest root in the threat model, no in-band packet field
+can be attestation.** A stamp at the driver entry would close `AF_PACKET`, but
+root also has eBPF/XDP, module loading and `/dev/mem`, so the guarantee would
+rest on lockdown and module integrity rather than on the stamp — which is not
+what "unforgeable" claimed. If the exemption returns, it should be bound to the
+*authenticated vsock channel* instead: the host would skip interception only
+for flows the sentry independently attested, which it already reports with
+container lineage, and match them host-side.
 
-The device *type* check closes a second hole: **a TUN device**. Root can create
-a tun, route its own traffic into it and write packets back from userspace, and
-those arrive with a non-zero `skb_iif` — "forwarded" by any naive test.
-Requiring a bridge or veth means the only way to earn the mark is to actually be
-behind one, which is what a container is.
+Removed with it: the POSTROUTING hook and its two `nf_hook_ops`, the DSCP
+helpers, the `container_mark` field in the hello, the `containers` object in
+the heartbeat (`marked` / `forged_cleared`), the `BSK_CONTAINER_MARK_FORGED`
+event (its number stays reserved, like `BSK_CONNECT_UNUSED`), and
+`tests/test_container_mark.sh`. Host-side the option, the DSCP read, the
+`container_mark` hello field and the `containers-direct` marker are gone, and
+containers always receive the proxy environment again.
 
-Measured which device: `-i docker0` in mangle FORWARD counted a container's
-packets, so the IP layer sees them arrive on the **bridge**, not the veth —
-hence `netif_is_bridge_master` and not only `netif_is_bridge_port`. The veth
-kind is accepted too, for CNIs that wire pods with veths and no bridge.
+#### `tc` changes are still reported
 
-Verified live, module loaded, all four at once: container → 43, guest → 0,
-`setsockopt(IP_TOS, 0xAC)` → 0, root's mangle POSTROUTING rule → 0. For the tun,
-the counters are the proof rather than a capture: `marked: 2` (only the real
-container) and `forged_cleared: 6` (every injected packet stripped). A first
-attempt at that test proved nothing — Docker sets `FORWARD policy DROP`, so the
-tun packets never reached POSTROUTING at all, and "no marked packet on the wire"
-was indistinguishable from "no packet on the wire".
-
-#### The accusation requires the socket's own TOS
-
-The forgery event first named whichever process sent a marked packet. With a
-global mangle rule active that meant `forged_cleared: 36` and events accusing
-`curl` and the coding agent itself — **neither had ever touched `IP_TOS`**. One
-root rule made every process on the box look guilty, which in a security UI is
-worse than no event at all.
-
-At POSTROUTING the packet cannot say who set the field; the socket can
-(`IP_TOS`/`IPV6_TCLASS` is recorded on it). So the **tally** counts every
-clearing — the alarm stays complete — and the **event** fires only when the
-socket itself asked for the mark. Re-measured: 24 clearings, exactly one process
-named, the one that really called `setsockopt`.
-
-The same principle governs context: the event is emitted only `in_task()`. On a
-softirq — a retransmit, a delayed ACK — `current` is whatever thread was
-interrupted, and naming it would accuse a process that did nothing.
-
-#### `tc` can defeat it, so `tc` is reported
-
-An egress qdisc action runs inside `__dev_queue_xmit`, **after** netfilter has
-finished, so there is no later hook to take. Measured, with the hook active:
+`BSK_TC_CHANGE` began as a defence for the mark and is kept without it, because
+egress `tc` is general packet rewriting on a path no netfilter hook can follow.
+An action runs inside `__dev_queue_xmit`, **after** netfilter has finished.
+Measured back when the hook was live:
 
 ```
 tc filter add dev enp0s1 ... action pedit ex munge ip dsfield set 0xac
 guest curl -> DSCP 43 on the wire        (DSCP 0 immediately before and after)
 ```
 
-This is not a priority that can be out-bid. So `BSK_TC_CHANGE` reports the
-attempt instead — `tc_modify_qdisc`, `tc_new_tfilter` and `tc_ctl_action`, with
-`op` ∈ {qdisc, filter, action}, the `dev` resolved from the message's
-`tcm_ifindex` and the `kind` from its `TCA_KIND` attribute. The netlink message
-is already kernel memory, so parsing needs no faulting copy — which is what made
-`kind` cheap enough to include. Emitted unfolded and immediately, because the
-host revokes the container exemption on the first one.
+This is not a priority that can be out-bid, so the sentry reports the attempt
+instead — `tc_modify_qdisc`, `tc_new_tfilter` and `tc_ctl_action`, with `op` ∈
+{qdisc, filter, action}, the `dev` resolved from the message's `tcm_ifindex` and
+the `kind` from its `TCA_KIND` attribute. The netlink message is already kernel
+memory, so parsing needs no faulting copy — which is what made `kind` cheap
+enough to include. Emitted unfolded and immediately. The host weighs it as
+tampering rather than revoking anything, since there is no longer an exemption
+to revoke.
 
-**Measured safe to act on**, which matters when the consequence is a revocation:
-nothing on this image calls those paths legitimately — not 12 s idle, not
-`docker run`, not `docker network create` with a container on that network, not
-a dockerd restart. Docker attaches a veth's default qdisc without going through
-tc's netlink interface. Not tested: kind/k8s, where a CNI that installs an
-egress qdisc (Cilium's bandwidth manager, for one) *would* trip it.
+**Measured free of false positives**: nothing on this image calls those paths
+legitimately — not 12 s idle, not `docker run`, not `docker network create` with
+a container on that network, not a dockerd restart. Docker attaches a veth's
+default qdisc without going through tc's netlink interface. Not tested: kind/k8s,
+where a CNI that installs an egress qdisc (Cilium's bandwidth manager, for one)
+*would* trip it.
 
-#### The agentd half
+#### `AF_PACKET` sends are reported
 
-With `$META/containers-direct` staged, `_docker_run` withholds the proxy
-variables from containers so they connect out directly — otherwise they would
-still reach the MITM at `host.docker.internal:65534` and the option would do
-nothing while appearing to work. **dockerd's own proxy drop-in is untouched**,
-deliberately: image pulls stay inspected, so the supply-chain checks still see
-every layer entering the VM. Only the containers' own traffic goes direct.
+The blind spot the withdrawal exposed is now covered: `packet_sendmsg` is
+probed, so a raw frame handed to a device produces a `net_flow` with
+`proto: "packet"` and the sender's chain. It reports **who**, not a
+destination — there is none to read, since the frame carries its own headers.
+It fires for `PACKET_QDISC_BYPASS` too, because the probe sits at the socket
+layer, above every transmit path.
 
-Exactly six variables are withheld (`http_proxy`, `https_proxy`, `no_proxy` and
-their upper-case forms); the nine CA/SSL variables are kept, since they cost
-nothing unused and an image may expect the bundle for its own reasons. The
-marker is read on every call rather than cached, so the host can turn the option
-on or off while the workspace runs.
+`packet_sendmsg` is a `struct proto_ops` method, so arg0 is a `struct socket *`
+and not the `struct sock *` every other flow probe passes — it has its own
+handler for that reason, and because there is no destination to fill, which the
+shared path would treat as "nothing to report". The device comes from the
+message's `sockaddr_ll` when there is one; a socket that bound to an interface
+and sends with no `msg_name` leaves it empty, because the ifindex then lives in
+`struct packet_sock`, which no header exports. Repeated sends from one process
+fold into one event with a count.
 
 ### 4.4 Tamper resistance
 
@@ -2376,7 +2348,6 @@ on its own merits, but nothing here waits on it.
 | `tests/test_idmap.py` | idmapped mount remap, namespace privacy, honest degradation |
 | `tests/test_sandbox.sh` §26 | the HTTP bridge's client preamble, over a **real** vsock on `VMADDR_CID_LOCAL`: the exact line, the newline and version, docker peers, the kill switch, a malformed `accept()` address, that it is the first thing the host reads and the client's bytes follow it byte for byte, that ssh is *not* prefixed, and that sentryd and agentd read the same proxy port from the same file |
 | `tests/test_net_flow.sh` | **fresh VM only.** Drives `ping`, a bound ping socket with a known echo id, a raw-socket echo request, `curl`, a bare TCP connect, connected and unconnected UDP, `dig`/`nc` when installed, IPv6 when routable — and asserts a `net_flow` for each whose `chain` names the shell that spawned it. Also: no event per packet, loopback counted not emitted, a ping socket reporting its send rather than its connect, `argv` and its truncation flag, `start_ns` against `/proc`, chain order and depth, no stack-frame warning in the build, and the per-connect/send cost with the module loaded against unloaded. Since the first live run it also asserts that **one process's three destinations are three events** (the dedup-key regression), that a proxied `curl` to loopback *is* reported while every other loopback port stays suppressed, and that `ping`'s own UDP source-address probe is reported as what it is rather than treated as a mislabel |
-| `tests/test_container_mark.sh` | **needs a loadable module and docker.** The mark on a container's traffic and its absence on the guest's; three forgery paths (`IP_TOS`, a mangle POSTROUTING rule, a tun-injected packet) each ending at DSCP 0; `tc` qdisc/filter changes each producing one `tc_change` with its `dev` and `kind`, and `docker run`/`network create` producing none; the hello's `container_mark` and tc probes; that no innocent process is accused; and agentd's `containers-direct` handling, including that dockerd's own proxy survives |
 | `tests/test_lockdown.sh` | before/after table for ~20 kernel surfaces |
 
 ### Not proven by execution

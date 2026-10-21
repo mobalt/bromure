@@ -333,6 +333,50 @@ struct BromureAC: ParsableCommand {
                 view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
                                                     startOnTimeline: which == "timeline"))
                 size = NSSize(width: 980, height: 720)
+            case "lineage", "lineage-allowed":
+                // The lineage sheet on demo data: an agent installs a
+                // dependency; its postinstall script phones home and is denied.
+                let tl = SecurityTimeline(directory: nil)
+                let t0 = Date().addingTimeInterval(-300)
+                let reasoning: [String: AnyJSON] = [
+                    "tool_use_id": .string("toolu_01Demo"), "tool": .string("Bash"), "truncated": .bool(false),
+                    "text": .string("The health check needs an HTTP client with timeouts and retries. I'll add axios rather than hand-rolling fetch retries, then run the tests."),
+                    "prompt": .string("Add a health check that retries the payments API with a timeout."),
+                    "intent": .string("Install axios")]
+                if var r = SecurityTimeline.map(profileID: pid, eventType: "agent.reasoning", eventData: reasoning, now: t0) {
+                    r.eventType = "agent.reasoning"; r.detail = reasoning; r.workspace = "Payments API"
+                    tl.append(r)
+                }
+                let base: [(Int, String, String, String)] = [
+                    (412, "claude", "/usr/bin/node", "claude"),
+                    (980, "bash", "/usr/bin/bash", "/bin/bash -c -l eval 'npm install axios' < /dev/null"),
+                    (981, "npm", "/usr/bin/node", "npm install axios")]
+                func flow(_ chain: [(Int, String, String, String)], host: String, ip: String, decision: String,
+                          layer: String, reason: String? = nil, at: Double) -> SecurityTimeline.Event? {
+                    var d: [String: AnyJSON] = [
+                        "proto": .string("tcp"), "dst": .string(ip), "host": .string(host), "dport": .int(443),
+                        "sport": .int(41_000 + Int(at)), "decision": .string(decision), "layer": .string(layer), "count": .int(1),
+                        "processes": .array(chain.map { .object(["pid": .int($0.0), "comm": .string($0.1),
+                                                                 "exe": .string($0.2), "argv": .string($0.3)]) }),
+                        "agent": .object(["tool": .string("Bash"), "tool_use_id": .string("toolu_01Demo"),
+                                          "confidence": .string("exact")]),
+                        "command": .string("npm install axios")]
+                    if let reason { d["reason"] = .string(reason) }
+                    guard var e = SecurityTimeline.map(profileID: pid, eventType: "net.flow", eventData: d,
+                                                       now: t0.addingTimeInterval(at)) else { return nil }
+                    e.eventType = "net.flow"; e.detail = d; e.workspace = "Payments API"
+                    return e
+                }
+                let registry = flow(base, host: "registry.npmjs.org", ip: "104.16.3.35", decision: "allow", layer: "l7", at: 2)
+                let postinstall = base + [(1290, "sh", "/usr/bin/dash", "sh -c node scripts/postinstall.js"),
+                                          (1291, "node", "/usr/bin/node", "node scripts/postinstall.js")]
+                let phoneHome = flow(postinstall, host: "telemetry.example.net", ip: "203.0.113.24", decision: "deny",
+                                     layer: "l7", reason: "no matching network policy", at: 5)
+                for e in [registry, phoneHome].compactMap({ $0 }) { tl.append(e) }
+                let focus = (which == "lineage" ? phoneHome : registry)!
+                view = AnyView(NetworkLineageView(timeline: tl, focus: focus, onClose: {}, scrolls: false)
+                                  .frame(width: 760).fixedSize(horizontal: false, vertical: true))
+                size = NSSize(width: 760, height: 980)
             case "pii-settings", "pii-off":
                 // The real workspace editor, opened on PII Protection.
                 setenv("BROMURE_EDITOR_CATEGORY", EditorCategory.pii.rawValue, 1)
@@ -3700,9 +3744,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             let eventData: [String: AnyJSON] = [
                 "action": .string(action),
-                // "container": a container's flow the workspace exempts
-                // from interception (firewall applied, no MiTM).
-                "layer": .string(ev.containerDirect ? "container" : "l4"),
+                "layer": .string("l4"),
                 "proto": .string(proto),
                 "host": .of(ev.hostnames.first),
                 "ip": .string(ipString),
@@ -3926,10 +3968,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // (a paused, quarantined or suspended VM sends nothing).
             let running = KernelSentryRunState()
             KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
-            // Container-traffic exemption, as applied (thread-safe snapshot of
-            // the profiles; re-evaluated when it changes).
-            let containerDirect = KernelSentryRunState()
-            KernelSentryService.shared.containerDirectProvider = { containerDirect.isRunning($0) }
             KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
             wireSentryModules()
             // `.common` modes: the watchdog's quarantine alert is a modal, and
@@ -3941,9 +3979,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     running.set(Set(self.runningSessions.compactMap { pid, s in
                         s.sandbox.vm?.state == .running ? pid : nil
                     }))
-                    let direct = Set(self.profiles.filter(\.effectiveContainerTrafficDirect).map(\.id))
-                    let changed = containerDirect.replace(direct)
-                    for id in changed { KernelSentryService.shared.refreshContainerDirect(profileID: id) }
                 }
             }
             RunLoop.main.add(runTimer, forMode: .common)

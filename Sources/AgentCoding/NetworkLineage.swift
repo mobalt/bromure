@@ -165,9 +165,12 @@ public final class NetworkLineage: @unchecked Sendable {
         let leaf = ProcKey(pid: pid, startNs: Self.u64(f["start_ns"]))
         let snapshot = lineage(profileID: profileID, leaf: leaf, frame: f)
         // Nearest first: the policy note goes to the agent whose tree this is.
-        PolicySteering.shared.noteFlow(profileID: profileID, dst: dst, dport: dport,
-                                       pids: snapshot.processes.reversed().compactMap {
-                                           if case .int(let p)? = $0["pid"] { return p }; return nil })
+        // A raw packet-socket send has no destination to match a denial to.
+        if proto != "packet" {
+            PolicySteering.shared.noteFlow(profileID: profileID, dst: dst, dport: dport,
+                                           pids: snapshot.processes.reversed().compactMap {
+                                               if case .int(let p)? = $0["pid"] { return p }; return nil })
+        }
         let flowID = UUID().uuidString
         DispatchQueue.global().asyncAfter(deadline: .now() + decisionWait) { [weak self] in
             self?.resolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: dst,
@@ -244,6 +247,7 @@ public final class NetworkLineage: @unchecked Sendable {
             "count": .int(max(1, f["count"] as? Int ?? 1)), "processes": .array(processes.map { .object($0) }),
         ]
         if let sport = f["sport"] as? Int { data["sport"] = .int(sport) }
+        if let dev = f["dev"] as? String { data["dev"] = .string(dev) }
         if viaProxy {
             data["via_proxy"] = .bool(true)
             data["host"] = .string(dst)
@@ -252,7 +256,12 @@ public final class NetworkLineage: @unchecked Sendable {
             if decision == nil { decision = Decision(action: "allow", layer: "proxy", reason: nil, host: dst, at: t) }
         }
         if let host = decision?.host { data["host"] = .string(host) }
-        if let d = decision {
+        if proto == "packet" {
+            // A raw packet socket (AF_PACKET): frames built below the socket
+            // layer, so no destination here. The switch still filters and
+            // intercepts whatever IP they carry, under its own events.
+            data["decision"] = .string("raw")
+        } else if let d = decision {
             data["decision"] = .string(d.action == "deny" ? "deny" : d.action == "audit" ? "audit" : "allow")
             data["layer"] = .string(d.layer)
             if let r = d.reason { data["reason"] = .string(r) }

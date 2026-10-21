@@ -378,13 +378,18 @@ events = [f for f in frames if f.get("type") == "event"]
 # protocol, the source port, the start time and the ancestor chain, and folds
 # repeats instead of emitting one event per call. The probe on
 # `security_socket_connect` is gone; the ABI number stays reserved.
+# `container_mark_forged` is retired with the mark itself: the stamp lived in a
+# POSTROUTING hook and AF_PACKET SOCK_RAW reaches the driver without entering
+# netfilter, so a DSCP value could not attest anything against guest root. The
+# hook, the clear and this event are gone; the ABI number stays reserved.
 retired = {k: kinds.get(k, 0)
-           for k in ("setuid", "setgid", "capset", "connect")}
+           for k in ("setuid", "setgid", "capset", "connect",
+                     "container_mark_forged")}
 if any(retired.values()):
     print("  FAIL retired per-syscall kinds are still emitted: %s" % retired)
     sys.exit(1)
-print("  ok   setuid/setgid/capset are counted and `connect` is retired, "
-      "so none of them is emitted")
+print("  ok   setuid/setgid/capset are counted, and `connect` and "
+      "`container_mark_forged` are retired, so none of them is emitted")
 
 beats = [f for f in frames if f.get("type") == "heartbeat"]
 tallies = [b.get("tallies") for b in beats if b.get("tallies")]

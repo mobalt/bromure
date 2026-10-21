@@ -597,7 +597,11 @@ public final class SecurityTimeline {
             let proto = (str(d, "proto") ?? "ip").uppercased()
             let dst = str(d, "host") ?? str(d, "dst") ?? "?"
             let port = (int(d, "dport") ?? 0) > 0 ? ":\(int(d, "dport")!)" : ""
-            var cond = (chain + ["\(proto) \(dst)\(port)"]).joined(separator: " → ")
+            // A raw packet socket has no destination, only the interface.
+            let target = proto == "PACKET"
+                ? String(format: NSLocalizedString("raw frames on %@", comment: "network flow target"), str(d, "dev") ?? "?")
+                : "\(proto) \(dst)\(port)"
+            var cond = (chain + [target]).joined(separator: " → ")
             if case .object(let agent)? = d["agent"], let tool = Self.str(agent, "tool") {
                 cond = "\(tool)" + (str(d, "command").map { " `\($0)`" } ?? "") + ": " + cond
             }
@@ -608,6 +612,7 @@ public final class SecurityTimeline {
             case "deny": shown = str(d, "reason").map { "denied — \($0)" } ?? NSLocalizedString("denied", comment: "Security Timeline decision")
             case "audit": shown = NSLocalizedString("audited", comment: "Security Timeline decision")
             case "unfiltered": shown = NSLocalizedString("passed (not filtered)", comment: "network flow decision")
+            case "raw": shown = NSLocalizedString("raw socket", comment: "network flow decision")
             case "unknown": shown = NSLocalizedString("seen", comment: "network flow decision")
             default: shown = NSLocalizedString("allowed", comment: "Security Timeline decision")
             }

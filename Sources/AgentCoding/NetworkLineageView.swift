@@ -21,6 +21,8 @@ struct FlowLineage {
     let port: Int
     let ip: String?
     let sport: Int?
+    /// The interface a raw packet-socket send went out on.
+    let dev: String?
     let viaProxy: Bool
     let count: Int
     let decision: String
@@ -63,10 +65,11 @@ struct FlowLineage {
         let fd = flow?.detail
         self.event = flow ?? event
         proto = (Self.s(fd, "proto") ?? "").uppercased()
-        destination = Self.s(fd, "host") ?? Self.s(fd, "dst") ?? "—"
+        destination = [Self.s(fd, "host"), Self.s(fd, "dst")].compactMap { $0 }.first { !$0.isEmpty } ?? "—"
         port = Self.i(fd, "dport") ?? 0
         ip = Self.s(fd, "host") != nil ? Self.s(fd, "dst") : nil
         sport = Self.i(fd, "sport")
+        dev = Self.s(fd, "dev")
         if case .bool(true)? = fd?["via_proxy"] { viaProxy = true } else { viaProxy = false }
         count = Self.i(fd, "count") ?? 1
         decision = Self.s(fd, "decision") ?? (flow == nil ? "none" : "unknown")
@@ -305,12 +308,18 @@ struct NetworkLineageView: View {
                         Text(ip).textSelection(.enabled).monospaced()
                     }
                 }
+                if let dev = l.dev {
+                    GridRow {
+                        Text(NSLocalizedString("Interface", comment: "network lineage")).foregroundStyle(.secondary)
+                        Text(dev).textSelection(.enabled).monospaced()
+                    }
+                }
                 if let sport = l.sport {
                     GridRow {
                         Text(l.proto == "ICMP" ? NSLocalizedString("Echo id", comment: "network lineage")
                                                : NSLocalizedString("Source port", comment: "network lineage"))
                             .foregroundStyle(.secondary)
-                        Text("\(sport)").monospaced()
+                        Text(verbatim: String(sport)).monospaced()
                     }
                 }
             }
@@ -327,6 +336,10 @@ struct NetworkLineageView: View {
                     if let layer = l.layer { Chip(text: Self.layerName(layer), tint: .gray) }
                 }
                 if let r = l.reason { Text(r).font(.callout).textSelection(.enabled) }
+                if l.decision == "raw" {
+                    Text(NSLocalizedString("Sent through a raw packet socket, below the guest's network stack. The firewall and proxy still apply to the traffic it carries.", comment: "network lineage"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if l.decision == "unfiltered" {
                     Text(NSLocalizedString("The firewall filters TCP and UDP; this protocol passes without a rule.", comment: "network lineage"))
                         .font(.caption).foregroundStyle(.secondary)
@@ -370,7 +383,6 @@ struct NetworkLineageView: View {
         case "l7": return NSLocalizedString("request policy (L7)", comment: "network lineage layer")
         case "identity": return NSLocalizedString("binary identity", comment: "network lineage layer")
         case "proxy": return NSLocalizedString("proxy", comment: "network lineage layer")
-        case "container": return NSLocalizedString("container, not intercepted", comment: "network lineage layer")
         default: return layer
         }
     }
@@ -380,7 +392,7 @@ func lineageTint(_ decision: String) -> Color {
     switch decision {
     case "deny": return .red
     case "allow": return .green
-    case "audit": return .orange
+    case "audit", "raw": return .orange
     default: return .gray
     }
 }
@@ -443,7 +455,7 @@ private struct ProcessRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(proc.comm).font(.callout.weight(isLeaf ? .semibold : .regular))
-                    Text("\(proc.pid)").font(.caption.monospaced()).foregroundStyle(.tertiary)
+                    Text(verbatim: String(proc.pid)).font(.caption.monospaced()).foregroundStyle(.tertiary)
                     if let exe = proc.exe, !exe.hasSuffix("/" + proc.comm) {
                         Text(exe).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
@@ -499,6 +511,7 @@ private struct DecisionBadge: View {
             case "allow": return NSLocalizedString("Allowed", comment: "network lineage decision")
             case "audit": return NSLocalizedString("Audited", comment: "network lineage decision")
             case "unfiltered": return NSLocalizedString("Not filtered", comment: "network lineage decision")
+            case "raw": return NSLocalizedString("Raw frames", comment: "network lineage decision")
             case "none": return NSLocalizedString("No flow", comment: "network lineage decision")
             default: return NSLocalizedString("Seen", comment: "network lineage decision")
             }

@@ -1786,10 +1786,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// The two above, in force: only under the OpenShell engine.
     public var effectiveSandboxHomePackages: Bool { usesOpenShellPolicy && sandboxHomePackages }
     public var effectiveSandboxSystemPackages: Bool { usesOpenShellPolicy && sandboxSystemPackages }
-    /// Don't intercept container traffic: flows the guest forwards for
-    /// containers (marked by the kernel sentry, which root can't forge) skip
-    /// the MiTM; the firewall still applies. Needs the kernel sentry.
-    public var containerTrafficDirect: Bool = false
 
     /// Strict modes as actually applied: the workspace's own switches, or the
     /// organization's requirement (bromure.io managed policy).
@@ -1827,17 +1823,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// An OpenShell `process` section needs the strict sandbox: its seccomp
     /// filters and no_new_privs would otherwise be skipped (they'd break the
     /// sudo a non-strict workspace grants), which silently fails open.
-    /// `containerTrafficDirect` as applied: never when the OpenShell policy
-    /// has request-level (L7) rules, which only the MiTM can enforce: exempting
-    /// containers would silently weaken the policy for them.
-    public var effectiveContainerTrafficDirect: Bool {
-        #if canImport(SandboxEngine)
-        guard containerTrafficDirect, effectiveKernelSentry != .off else { return false }
-        return resolvedEgressPolicy.inspectedPorts.isEmpty
-        #else
-        return false
-        #endif
-    }
 
     public var policyHasProcessSection: Bool {
         networkPolicy.split(separator: "\n", omittingEmptySubsequences: true).contains { line in
@@ -2403,7 +2388,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kernelSentry
         case openShellCredentialPlaceholders
         case sandboxHomePackages, sandboxSystemPackages
-        case containerTrafficDirect
         case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
@@ -2544,7 +2528,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         openShellCredentialPlaceholders = try c.decodeIfPresent(Bool.self, forKey: .openShellCredentialPlaceholders) ?? false
         sandboxHomePackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxHomePackages) ?? true
         sandboxSystemPackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxSystemPackages) ?? true
-        containerTrafficDirect = try c.decodeIfPresent(Bool.self, forKey: .containerTrafficDirect) ?? false
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
@@ -2723,9 +2706,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !sandboxHomePackages { try c.encode(false, forKey: .sandboxHomePackages) }
         if !sandboxSystemPackages { try c.encode(false, forKey: .sandboxSystemPackages) }
-        if containerTrafficDirect {
-            try c.encode(true, forKey: .containerTrafficDirect)
-        }
         if kernelSentry != .off {
             try c.encode(kernelSentry, forKey: .kernelSentry)
         }

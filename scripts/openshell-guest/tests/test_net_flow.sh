@@ -191,6 +191,32 @@ s.sendto(pkt, ('$DEST', 0))
 \""
 ok "a raw-socket echo request (wrapper pid $(wpid rawping))"
 
+# AF_PACKET: the path that withdrew the container mark. A frame handed straight
+# to a device, carrying its own link and IP headers, so the IP stack and every
+# netfilter hook in it are bypassed. Before `packet_sendmsg` was probed this
+# left no trace at all.
+#
+# On `lo`, deliberately: no gateway MAC to discover and nothing leaves the VM.
+# `sendto` with a sockaddr_ll rather than bind+send, because that is what
+# carries the ifindex the event reports as `dev` -- a bound socket sending with
+# no msg_name cannot report one (the ifindex lives in `struct packet_sock`,
+# which no header exports).
+drive afpacket "sudo python3 -c \"
+import socket, struct
+def ck(h):
+    if len(h) % 2: h += b'\\x00'
+    t = sum(struct.unpack('!%dH' % (len(h)//2), h)); t = (t & 0xffff) + (t >> 16)
+    return ~((t & 0xffff) + (t >> 16)) & 0xffff
+payload = b'bromure-afpacket-probe'
+udp = struct.pack('!HHHH', 40000, 51999, 8 + len(payload), 0) + payload
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0x4244, 0, 64, 17, 0,
+                 socket.inet_aton('127.0.0.1'), socket.inet_aton('127.0.0.1'))
+ip = ip[:10] + struct.pack('!H', ck(ip)) + ip[12:]
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+s.sendto(b'\\x00'*12 + b'\\x08\\x00' + ip + udp, ('lo', 0))
+\""
+ok "an AF_PACKET frame handed to lo (wrapper pid $(wpid afpacket))"
+
 # A bare TCP connect as well as curl: the TCP assertion must not depend on a
 # tool being installed, and `dig` and `nc` are NOT on the base image -- measured.
 drive tcp "python3 -c \"
@@ -621,6 +647,42 @@ if e is not None:
         bad("rawping: icmp_type %r was reported for a RAW socket, where byte 0 "
             "may be the IP header" % e.get("icmp_type"))
 
+print("  --- AF_PACKET ----------------------------------------------------")
+# `proto` must be "packet" and NOT "raw": an AF_INET SOCK_RAW socket still
+# traverses `ip_output`, an AF_PACKET one does not, and the whole point of this
+# event is the second case. The string is rendered by the MODULE
+# (`sentry_proto_name`), so a value added to the enum without a case there goes
+# out as "other" -- which is how this first shipped.
+e = pick(kind="net_flow", proto="packet")
+if e:
+    e = e[0]
+    ok("afpacket: an AF_PACKET send is reported, with proto=packet")
+    shell = wpid("afpacket")
+    if shell and shell in chain_pids(e):
+        ok("afpacket: the chain names the shell that spawned it (pid %d)" % shell)
+    elif shell:
+        bad("afpacket: chain %s does not name the spawning shell %d"
+            % (chain_pids(e), shell))
+    # The device, which is the only locational fact the event can carry: there
+    # is no destination to report, because the frame carries its own headers.
+    if e.get("dev") == "lo":
+        ok("afpacket: dev=lo, resolved from the message's sockaddr_ll")
+    else:
+        bad("afpacket: dev is %r, expected 'lo' -- the ifindex was not "
+            "resolved, or `dev` is not rendered for a flow (it was rendered "
+            "only for tc_change once, so every raw send collected a device "
+            "and emitted none)" % e.get("dev"))
+    # No destination, and the event must not invent one.
+    if not e.get("dst") or e.get("dst") == "0.0.0.0":
+        ok("afpacket: no destination claimed, because the frame carries its own")
+    else:
+        bad("afpacket: a destination %r was reported for a raw frame, which "
+            "the handler cannot know" % e.get("dst"))
+else:
+    bad("afpacket: no net_flow with proto=packet -- the probe on "
+        "`packet_sendmsg` did not fire, or the proto renders as something else: "
+        "%s" % sorted(set(f.get("proto") for f in flows)))
+
 print("  --- TCP ----------------------------------------------------------")
 e = expect("tcp", "TCP on connect", kind="net_flow", proto="tcp", dst=DEST,
            dport=443)
@@ -668,13 +730,24 @@ expect("udp", "an unconnected send names its destination per message",
        kind="net_flow", proto="udp", dst=DEST, dport=53)
 expect("udpc", "a connected datagram socket reports on its first SEND",
        kind="net_flow", proto="udp", dst=DEST, dport=5353)
-nowhere = [e for e in flows if e.get("dst") in ("0.0.0.0", "::", "")]
+# `proto == "packet"` is exempt, and the exemption is the point rather than a
+# patch over an awkward case: an AF_PACKET frame carries its own headers, so
+# there IS no destination the handler could read, and the AF_PACKET block above
+# asserts it does not invent one. Without this the suite required the same
+# event both to have a destination and not to have one -- the exact
+# self-contradiction `check_kind_consistency.py` exists to catch between DRIVEN
+# and retired kinds, reappearing one field along. Caught by the suite on the
+# first run after the probe landed.
+nowhere = [e for e in flows
+           if e.get("dst") in ("0.0.0.0", "::", "")
+           and e.get("proto") != "packet"]
 if nowhere:
-    bad("%d flow(s) have no destination: %s -- `send()` on an unconnected "
+    bad("%d IP flow(s) have no destination: %s -- `send()` on an unconnected "
         "socket reaches udp_sendmsg before failing with EDESTADDRREQ, and no "
         "packet leaves" % (len(nowhere), [(e.get("comm"), e.get("dst")) for e in nowhere]))
 else:
-    ok("a send with no destination produces no flow")
+    ok("a send with no destination produces no flow (AF_PACKET excepted: it "
+       "has none to report, and is checked separately)")
 nosend = [e for e in flows if e.get("proto") == "udp" and e.get("dport") == 7777]
 if nosend:
     bad("a UDP socket that connected and never sent produced %d flow(s): the "
