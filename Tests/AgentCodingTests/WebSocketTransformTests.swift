@@ -318,6 +318,41 @@ struct WebSocketTransformTests {
         guard case .failed = failing("{}") else { Issue.record("failure lost"); return }
     }
 
+    /// Finding (CWE-670): "Squelch stops learning tool calls once a traced
+    /// OpenShell WebSocket passes 4096 server messages". Past the trace cap
+    /// `feed` parsed one frame per chunk and left the rest of it queued, so a
+    /// call announced in a multi-frame read went unlearned while the guest
+    /// already had it. The cap now only stops the keeping.
+    @Test("A traced socket past the message cap still hands every frame to onMessage, and learns its calls")
+    func traceCapKeepsLearning() {
+        let pid = UUID()
+        final class Count: @unchecked Sendable { var n = 0 }
+        let seen = Count()
+        let collector = WSTraceCollector(direction: .upstreamToClient)
+        collector.onMessage = { msg in
+            seen.n += 1
+            if msg.kind == .text { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        let delta = #"{"type":"response.output_text.delta","delta":"x"}"#
+        var filler = Data()
+        for _ in 0..<WSTraceCollector.maxMessages { filler.append(frame(0x1, delta, masked: false)) }
+        collector.feed(filler)
+        #expect(collector.messages.count == WSTraceCollector.maxMessages && seen.n == WSTraceCollector.maxMessages)
+
+        // One read past the cap: deltas, then the call — all of it handled now.
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_cap","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        var chunk = Data()
+        for _ in 0..<5 { chunk.append(frame(0x1, delta, masked: false)) }
+        chunk.append(frame(0x1, done, masked: false))
+        collector.feed(chunk)
+        #expect(seen.n == WSTraceCollector.maxMessages + 6)
+        #expect(SquelchCallRegistry.shared.call(pid, "call_cap")?.name == "exec_command")
+        #expect(collector.messages.count == WSTraceCollector.maxMessages && collector.droppedMessages == 6)
+        let transcript = String(decoding: WSTranscriptRenderer.render(c2u: WSTraceCollector(direction: .clientToUpstream), u2c: collector),
+                                as: UTF8.self)
+        #expect(transcript.contains("(6 later messages not kept: 4096 per direction)"))
+    }
+
     @Test("Stand-ins split across delta messages come back whole; full texts restored")
     func restoreIn() {
         let vault = PIIVault(secret: secret)
