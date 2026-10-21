@@ -270,6 +270,57 @@ struct KernelSentryTests {
         #expect(a.flatMap { KernelSentryTests.S($0["reason"]) }?.contains("6.8.0-142-generic") == true)
     }
 
+    /// Finding (CWE-670): "Sentry status waiting is judged as a missing module
+    /// after the boot budget". The guest reports `waiting` while it fetches
+    /// or builds a module (minutes); only `pending` was exempt, so at 90 s a
+    /// required sentry tripped the watchdog (weight 20) mid-load.
+    @Test("A guest still fetching or building the module isn't absent; past the loader's worst case it is")
+    func waitingIsNotAbsent() {
+        let id = UUID()
+        GuestSandboxStatusStore.shared.update(profileID: id, report: [
+            "event": "sandbox_status", "filesystem": "off", "sentry": "waiting",
+        ])
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id) }
+        let b = SentryBridge(profileID: id, requirement: .hard, restoring: false)
+        let tap = Tap(); b.tap = { tap.add($0, $1) }
+        let t0 = Date()
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + 600), running: true)
+        #expect(tap.alarms("tampering").isEmpty && tap.alarms("sentry_unavailable").isEmpty)
+        // Parked on "waiting" past every legitimate load: judged as absent.
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + KernelSentryService.loadBudget + 1),
+                        running: true)
+        #expect(tap.alarms("tampering").count == 1)
+        #expect(KernelSentryService.isLoading("waiting") && KernelSentryService.isLoading("pending"))
+
+        // A required sentry loads before the supervisor publishes: its
+        // "waiting" arrives with filesystem still "pending" (no Status
+        // recorded) and must count all the same.
+        let id2 = UUID()
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "waiting",
+        ])
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id2) }
+        #expect(GuestSandboxStatusStore.shared.status(for: id2) == nil)
+        #expect(GuestSandboxStatusStore.shared.sentryState(for: id2) == "waiting")
+        let b2 = SentryBridge(profileID: id2, requirement: .hard, restoring: false)
+        let tap2 = Tap(); b2.tap = { tap2.add($0, $1) }
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
+        // The load then fails, still before the supervisor publishes: a
+        // failure to report with its reason, not tampering.
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "unavailable",
+            "sentry_reason": "no module for 6.8.0-150-generic",
+        ])
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 900), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
+        let u = tap2.alarms("sentry_unavailable").first
+        #expect(u.flatMap { KernelSentryTests.I($0["weight"]) } == 0)
+        #expect(u.flatMap { KernelSentryTests.S($0["reason"]) }?.contains("6.8.0-150-generic") == true)
+        #expect(!KernelSentryService.isLoading("running") && !KernelSentryService.isLoading("unavailable"))
+    }
+
     @Test("Cross-check with the attestor's digest and status catches an impostor")
     func crossCheck() {
         let (b, g, tap) = connect(nil, hello())

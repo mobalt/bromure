@@ -28,6 +28,16 @@ public final class KernelSentryService: @unchecked Sendable {
     /// How long a freshly started VM may take to bring the sentry up.
     public static let bootBudget: TimeInterval = 90
     public static let shutdownBudget: TimeInterval = 20
+    /// How long past the boot budget a guest may still say it's loading the
+    /// module: bromure-sentryd's host wait, then apt and make (900 s each).
+    public static let loadBudget: TimeInterval = 45 + 900 + 900 + 60
+
+    /// The guest's sentry status while the module is still being fetched or
+    /// built: `pending` (no status file yet) or `waiting` (asking the host,
+    /// then building locally).
+    static func isLoading(_ guestSentry: String?) -> Bool {
+        guestSentry == "pending" || guestSentry == "waiting"
+    }
 
     private let lock = NSLock()
     private var bridges: [UUID: SentryBridge] = [:]
@@ -689,12 +699,20 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             let silence = now.timeIntervalSince(last)
             if silence >= KernelSentryService.silenceTamper, !trippedSilence { trippedSilence = true; trip = true }
             else if silence >= KernelSentryService.silenceWarning, !warnedSilence { warnedSilence = true; warn = true }
-        } else if now.timeIntervalSince(attachedAt) >= KernelSentryService.bootBudget, !reportedAbsent,
-                  GuestSandboxStatusStore.shared.status(for: profileID)?.sentry != "pending" {
-            // (Still pending = the guest is building a module; judge it once
-            // it settles, as running, unavailable, or silent.)
-            reportedAbsent = true
-            absent = true
+        } else if now.timeIntervalSince(attachedAt) >= KernelSentryService.bootBudget {
+            // Still pending / waiting = the guest is fetching or building a
+            // module (the host's wait, then apt and make): judge it once it
+            // settles, as running, unavailable, or silent — but not past the
+            // loader's own worst case, so a guest can't park on "waiting".
+            let guest = GuestSandboxStatusStore.shared.sentryState(for: profileID)
+            let loading = KernelSentryService.isLoading(guest)
+                && now.timeIntervalSince(attachedAt) < KernelSentryService.bootBudget + KernelSentryService.loadBudget
+            if loading {
+                reportedAbsent = false          // a late module still connects cleanly
+            } else if !reportedAbsent {
+                reportedAbsent = true
+                absent = true
+            }
         }
         let silence = lastFrameAt.map { Int(now.timeIntervalSince($0)) } ?? 0
         lock.unlock()
@@ -708,10 +726,12 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             // kernel without a matching build, say) is a failure to report,
             // not an attack: only an unexplained absence is tampering, and
             // only when the sentry is required.
-            let guest = GuestSandboxStatusStore.shared.status(for: profileID)
-            if guest?.sentry == "unavailable" {
+            // From the latest report, even one sent before the sandbox
+            // published (a required sentry's inline load ends first).
+            let store = GuestSandboxStatusStore.shared
+            if store.sentryState(for: profileID) == "unavailable" {
                 alarm("sentry_unavailable",
-                      "the kernel sentry couldn't start" + (guest?.sentryReason.map { ": \($0)" } ?? ""),
+                      "the kernel sentry couldn't start" + (store.sentryReason(for: profileID).map { ": \($0)" } ?? ""),
                       weight: 0)
             } else {
                 alarm(requirement == .hard ? "tampering" : "sentry_unavailable",
@@ -725,7 +745,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         let connected = fd >= 0
         let secret = pinnedSecret
         lock.unlock()
-        guard connected, let secret, guestSentry != "pending" else { return }
+        guard connected, let secret, !KernelSentryService.isLoading(guestSentry) else { return }
         if guestSentry == "unavailable" || guestSentry == "off" {
             alarm("tampering", "something is connected on the sentry port while the guest reports the sentry \(guestSentry!) (impersonation)", weight: 20)
             return
