@@ -131,14 +131,26 @@ public final class NetworkLineage: @unchecked Sendable {
 
     /// A request that arrived through the guest's proxy bridge, from the
     /// guest client port `sport` (the bridge's `BROMURE-CLIENT` preamble).
+    ///
+    /// The line comes from the guest, and any process there that can open
+    /// vsock could send one (agentd's bridge isn't authenticated to the
+    /// host), so a claim is held to what it can honestly mean: the first one
+    /// for a client port stands until it expires — a later line naming the
+    /// same port can't overwrite it — and it only relabels a loopback flow
+    /// to the bridge itself (see `resolve`).
     public func noteProxied(profileID: UUID, sport: Int, host: String, port: Int) {
         lock.lock(); defer { lock.unlock() }
         var vm = vms[profileID] ?? VM()
         let t = now()
         vm.proxied = vm.proxied.filter { t.timeIntervalSince($0.value.at) < 120 }
+        if let held = vm.proxied[sport], held.host != host || held.port != port { vms[profileID] = vm; return }
         vm.proxied[sport] = (host, port, t)
         vms[profileID] = vm
     }
+
+    /// The guest proxy bridge's loopback ports (agentd's listener): 65534,
+    /// or 8080 on a workspace resumed from an older daemon's snapshot.
+    static let bridgePorts: Set<Int> = [SessionDisk.guestProxyPort, 8080]
 
     /// The host's decision about a flow (switch L4, MITM L7, binary identity).
     public func noteDecision(profileID: UUID, proto: String, dst: String, dport: Int,
@@ -227,7 +239,10 @@ public final class NetworkLineage: @unchecked Sendable {
         var viaProxy = false
         // A loopback connect to the guest's proxy bridge: the real destination
         // is the CONNECT target the bridge tagged with this client port.
-        if dst.hasPrefix("127.") || dst == "::1", let sport = f["sport"] as? Int, let p = vm.proxied[sport] {
+        // Only a flow to the bridge itself: a loopback connection anywhere
+        // else is never relabelled by a (guest-written) claim.
+        if dst.hasPrefix("127.") || dst == "::1", Self.bridgePorts.contains(dport),
+           let sport = f["sport"] as? Int, let p = vm.proxied[sport] {
             dst = p.host; dport = p.port; viaProxy = true
         }
         var decision = viaProxy ? vm.decisions["\(proto)|host:\(dst)|\(dport)"] : vm.decisions["\(proto)|\(dst)|\(dport)"]

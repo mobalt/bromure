@@ -158,6 +158,30 @@ struct NetworkLineageProxyTests {
         let row = try #require(SecurityTimeline.map(profileID: pid, eventType: "net.flow", eventData: ok, now: Date()))
         #expect(row.condition == "curl → TCP example.com:443")
     }
+
+    /// Finding (CWE-345): "A direct vsock client can forge BROMURE-CLIENT and
+    /// relabel a proxied flow". A guest process connecting straight to the
+    /// MITM's vsock port could claim any client port and make a loopback flow
+    /// read as a benign host.
+    @Test("A forged bridge claim relabels neither a loopback flow elsewhere nor an earlier real claim")
+    func forgedProxyClaim() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        // A loopback connection to the attacker's own listener, claimed as benign.
+        l.noteProxied(profileID: pid, sport: 40001, host: "benign.example", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 60, "proto": "tcp", "dst": "127.0.0.1", "dport": 9999, "sport": 40001])
+        // The bridge's real claim first; a forged one for the same port later.
+        l.noteProxied(profileID: pid, sport: 40002, host: "evil.example", port: 443)
+        l.noteProxied(profileID: pid, sport: 40002, host: "benign.example", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 61, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40002])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let own = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40001 })
+        #expect(NetworkLineageTests.S(own["dst"]) == "127.0.0.1" && NetworkLineageTests.I(own["dport"]) == 9999)
+        if case .bool(true)? = own["via_proxy"] { Issue.record("a non-bridge loopback flow was relabelled") }
+        let bridged = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40002 })
+        #expect(NetworkLineageTests.S(bridged["dst"]) == "evil.example")
+    }
 }
 
 @Suite("Network lineage from the agents' PreToolUse hooks")
