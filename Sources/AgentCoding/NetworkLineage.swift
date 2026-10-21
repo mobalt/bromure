@@ -45,6 +45,9 @@ public final class NetworkLineage: @unchecked Sendable {
         var folded: [String: (first: Date, count: Int, data: [String: AnyJSON])] = [:]
         /// Guest client port → the proxied target (cooperative proxy).
         var proxied: [Int: (host: String, port: Int, at: Date)] = [:]
+        /// Client ports claimed for two different targets: neither is
+        /// believed (see `noteProxied`).
+        var contested: [Int: Date] = [:]
     }
 
     private let lock = NSLock()
@@ -134,17 +137,27 @@ public final class NetworkLineage: @unchecked Sendable {
     ///
     /// The line comes from the guest, and any process there that can open
     /// vsock could send one (agentd's bridge isn't authenticated to the
-    /// host), so a claim is held to what it can honestly mean: the first one
-    /// for a client port stands until it expires — a later line naming the
-    /// same port can't overwrite it — and it only relabels a loopback flow
-    /// to the bridge itself (see `resolve`).
+    /// host), so a claim is held to what it can honestly mean. It only
+    /// relabels a loopback flow to the bridge itself (see `resolve`), and a
+    /// port claimed for two different targets is contested: neither claim
+    /// is believed, whichever came first. The bridge always sends the real
+    /// line for a connection that went through it, so a forged line for
+    /// that connection can only ever make its row stay "127.0.0.1:<bridge>"
+    /// — never name another host.
     public func noteProxied(profileID: UUID, sport: Int, host: String, port: Int) {
         lock.lock(); defer { lock.unlock() }
         var vm = vms[profileID] ?? VM()
         let t = now()
         vm.proxied = vm.proxied.filter { t.timeIntervalSince($0.value.at) < 120 }
-        if let held = vm.proxied[sport], held.host != host || held.port != port { vms[profileID] = vm; return }
-        vm.proxied[sport] = (host, port, t)
+        vm.contested = vm.contested.filter { t.timeIntervalSince($0.value) < 120 }
+        if vm.contested[sport] != nil {
+            vm.contested[sport] = t
+        } else if let held = vm.proxied[sport], held.host != host || held.port != port {
+            vm.proxied[sport] = nil
+            vm.contested[sport] = t
+        } else {
+            vm.proxied[sport] = (host, port, t)
+        }
         vms[profileID] = vm
     }
 

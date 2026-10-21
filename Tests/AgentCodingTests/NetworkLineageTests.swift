@@ -163,7 +163,7 @@ struct NetworkLineageProxyTests {
     /// relabel a proxied flow". A guest process connecting straight to the
     /// MITM's vsock port could claim any client port and make a loopback flow
     /// read as a benign host.
-    @Test("A forged bridge claim relabels neither a loopback flow elsewhere nor an earlier real claim")
+    @Test("A forged bridge claim relabels neither a loopback flow elsewhere nor a contested port, in either order")
     func forgedProxyClaim() async throws {
         let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
         l.decisionWait = 0.05
@@ -171,16 +171,28 @@ struct NetworkLineageProxyTests {
         // A loopback connection to the attacker's own listener, claimed as benign.
         l.noteProxied(profileID: pid, sport: 40001, host: "benign.example", port: 443)
         l.noteFlow(profileID: pid, ["pid": 60, "proto": "tcp", "dst": "127.0.0.1", "dport": 9999, "sport": 40001])
-        // The bridge's real claim first; a forged one for the same port later.
-        l.noteProxied(profileID: pid, sport: 40002, host: "evil.example", port: 443)
-        l.noteProxied(profileID: pid, sport: 40002, host: "benign.example", port: 443)
-        l.noteFlow(profileID: pid, ["pid": 61, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40002])
-        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        // Two different claims for one port, in either order: neither is believed.
+        l.noteProxied(profileID: pid, sport: 40002, host: "evil.example", port: 443)     // the bridge's
+        l.noteProxied(profileID: pid, sport: 40002, host: "benign.example", port: 443)   // forged, later
+        l.noteFlow(profileID: pid, ["pid": 61, "path": "/usr/bin/a", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40002])
+        l.noteProxied(profileID: pid, sport: 40003, host: "benign.example", port: 443)   // forged, first
+        l.noteProxied(profileID: pid, sport: 40003, host: "evil.example", port: 443)     // the bridge's
+        l.noteProxied(profileID: pid, sport: 40003, host: "benign.example", port: 443)   // refreshed: still contested
+        l.noteFlow(profileID: pid, ["pid": 62, "path": "/usr/bin/b", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40003])
+        // One honest claim still relabels.
+        l.noteProxied(profileID: pid, sport: 40004, host: "pypi.org", port: 443)
+        l.noteProxied(profileID: pid, sport: 40004, host: "pypi.org", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 63, "path": "/usr/bin/c", "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 40004])
+        for _ in 0..<300 where sink.flows.count < 4 { try? await Task.sleep(nanoseconds: 10_000_000) }
         let own = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40001 })
         #expect(NetworkLineageTests.S(own["dst"]) == "127.0.0.1" && NetworkLineageTests.I(own["dport"]) == 9999)
         if case .bool(true)? = own["via_proxy"] { Issue.record("a non-bridge loopback flow was relabelled") }
-        let bridged = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40002 })
-        #expect(NetworkLineageTests.S(bridged["dst"]) == "evil.example")
+        for sport in [40002, 40003] {
+            let f = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == sport })
+            #expect(NetworkLineageTests.S(f["dst"]) == "127.0.0.1", "sport \(sport) relabelled")
+        }
+        let honest = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40004 })
+        #expect(NetworkLineageTests.S(honest["dst"]) == "pypi.org")
     }
 }
 
