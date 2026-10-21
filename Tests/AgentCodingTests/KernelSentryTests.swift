@@ -501,10 +501,20 @@ struct GuestSandboxAttentionTests {
         let noSentry = try status(["filesystem": "enforced", "sentry": "unavailable"])
         #expect(!noSentry.needsAttention(sentryExpected: false))
         #expect(noSentry.needsAttention(sentryExpected: true))
-        // Off with a reason: a run_as failure when a filesystem policy was
-        // asked for; nothing at all when none was.
-        let off = try status(["filesystem": "off", "degraded_reason": "run_as_user sandbox: no such user"])
-        #expect(off.needsAttention(sentryExpected: false, filesystemExpected: true))
-        #expect(!off.needsAttention(sentryExpected: false, filesystemExpected: false))
+        // Finding (CWE-451): "Sandbox card warns when a process-only policy
+        // correctly leaves the filesystem off". Off is judged by the guest's
+        // own reason, not the editor's draft: a run_as identity that failed
+        // (or a reason not known to be intended) warns; a policy that asked
+        // nothing of the filesystem (process-only, no paths, no spec) doesn't.
+        for reason in ["cannot provision run_as identity: useradd failed",
+                       "cannot resolve run_as identity: no such user", "something unexpected"] {
+            let off = try status(["filesystem": "off", "degraded_reason": reason])
+            #expect(off.needsAttention(sentryExpected: false), "\(reason)")
+        }
+        for asked in ["filesystem_policy not configured", "no paths configured"] {
+            let off = try status(["filesystem": "off", "degraded_reason": asked, "strict_applied": true])
+            #expect(!off.needsAttention(sentryExpected: false), "\(asked)")
+        }
+        #expect(!(try status(["filesystem": "off"])).needsAttention(sentryExpected: false))
     }
 }

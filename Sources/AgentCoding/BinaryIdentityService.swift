@@ -375,15 +375,29 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         /// unconfined, and only these two fields say so.
         public var filesystemFailed: Bool { filesystem == "failed" || filesystem == "degraded" }
 
+        /// `off` because nothing was asked of the filesystem: no spec, no
+        /// filesystem_policy (a process-only policy), or one with no paths.
+        static let filesystemOffAsAsked: Set<String> = ["filesystem_policy not configured", "no paths configured"]
+
+        /// The filesystem sandbox is off for a reason that isn't the policy's
+        /// own: a run_as identity that couldn't be provisioned or resolved
+        /// (off, with that reason), or any reason not known to be intended.
+        public var filesystemOffUnasked: Bool {
+            guard filesystem == "off", let reason = degradedReason, !reason.isEmpty else { return false }
+            return !Self.filesystemOffAsAsked.contains(reason)
+        }
+
         /// Anything the sandbox reported as not working as asked. The
-        /// sentry counts only when the workspace wants one; a filesystem
-        /// sandbox reported `off` only when the policy asked for one (a
-        /// run_as failure leaves it off with a reason — the same shape a
-        /// policy without a filesystem section has).
-        public func needsAttention(sentryExpected: Bool, filesystemExpected: Bool = false) -> Bool {
+        /// sentry counts only when the workspace wants one. A filesystem
+        /// sandbox reported `off` counts only when the guest's own reason
+        /// says the apply failed (Finding CWE-451, "Sandbox card warns when
+        /// a process-only policy correctly leaves the filesystem off"): it
+        /// was judged against the editor's unsaved draft, and a `process`
+        /// section — or a filesystem_policy with no paths — warned forever.
+        public func needsAttention(sentryExpected: Bool) -> Bool {
             filesystemFailed || strictApplied == false || !warnings.isEmpty
                 || (sentry == "unavailable" && sentryExpected)
-                || (filesystemExpected && filesystem == "off")
+                || filesystemOffUnasked
         }
     }
 
