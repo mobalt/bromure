@@ -11670,6 +11670,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 .filter { !freshFakes.contains($0.fake) }
             engine.swapper.setMap(TokenMap(entries: fresh.entries + preserved),
                                   for: profile.id)
+            // …and the rest of what the kubeconfigs need, as at launch: a
+            // kubeconfig imported while the VM runs must be trusted (its
+            // cluster CA) and authenticated (its client certificate) now.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
         }
 
         // Rewrite the guest-side credential files with the freshly-minted
@@ -12264,27 +12268,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             engine.swapper.setMap(tokenMap, for: profile.id)
 
-            // Per-host client identities for upstream mTLS (kubectl
-            // → API server).
-            for ident in kubeMat.clientIdentities {
-                engine.clientIdentities.setIdentity(
-                    ident.identity, host: ident.host, profileID: profile.id,
-                    consentCredentialID: ident.consentCredentialID,
-                    consentDisplayName: ident.consentDisplayName)
-            }
-            // Per-host CA overrides so the proxy can verify private
-            // API-server certs that don't chain to macOS roots.
-            for entry in kubeMat.clusterCAs {
-                engine.clusterCAs.setCA(
-                    pem: entry.caPEM, host: entry.host, profileID: profile.id)
-            }
-            // Exec-credential poller: refreshes the swap map on a
-            // schedule for each context. Cancelled in unregister.
-            if !kubeMat.execContexts.isEmpty {
-                engine.execPoller.start(kubeMat.execContexts,
-                                        profileID: profile.id,
-                                        swapper: engine.swapper)
-            }
+            // Client identities for upstream mTLS (kubectl → API server),
+            // each cluster's own CA (private API-server certs don't chain to
+            // macOS roots), and the exec-credential pollers.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
 
             // 1Password: manual tokens whose value is an `op://` reference are
             // resolved host-side. The plan already minted a stable fake from the

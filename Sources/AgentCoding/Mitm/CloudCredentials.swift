@@ -572,6 +572,8 @@ public final class KubeconfigMaterializer {
 @MainActor
 public final class ExecCredentialPoller {
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    /// Which workspace each entry's task refreshes for.
+    private var owner: [UUID: UUID] = [:]
 
     public init() {}
 
@@ -597,17 +599,31 @@ public final class ExecCredentialPoller {
                 }
             }
             tasks[ctx.entryID] = task
+            owner[ctx.entryID] = profileID
         }
     }
 
     public func stop(entryID: UUID) {
         tasks[entryID]?.cancel()
         tasks.removeValue(forKey: entryID)
+        owner.removeValue(forKey: entryID)
+    }
+
+    /// Stop one workspace's pollers, and only its: a workspace closing
+    /// used to stop every running workspace's exec-credential refresh.
+    public func stopAll(profileID: UUID) {
+        for (entry, pid) in owner where pid == profileID { stop(entryID: entry) }
+    }
+
+    /// The kubeconfig entries being refreshed for `profileID`.
+    public func entries(for profileID: UUID) -> Set<UUID> {
+        Set(owner.filter { $0.value == profileID }.keys)
     }
 
     public func stopAll() {
         for (_, t) in tasks { t.cancel() }
         tasks.removeAll()
+        owner.removeAll()
     }
 
     /// Spawn the exec plugin, decode its `ExecCredential` JSON, return
