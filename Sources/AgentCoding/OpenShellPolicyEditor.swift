@@ -603,8 +603,9 @@ struct KernelSentrySection: View {
             }
             Divider()
             PolicyRow(title: "Don't intercept container traffic",
-                      caption: draft.containerTrafficDirect && !draft.effectiveContainerTrafficDirect
-                          ? "Not applied: request-level (L7) rules need the proxy."
+                      caption: draft.containerTrafficDirect
+                          ? draft.containerTrafficDirectRefusal.map { LocalizedStringKey($0) }
+                              ?? "Containers go out directly; the firewall still applies."
                           : "Containers go out directly; the firewall still applies.",
                       info: "Traffic from containers in this VM (Docker, pods) goes out directly instead of through Bromure's proxy. The firewall still applies, and image pulls are still checked. Inside containers you lose credential brokering (Bromure's stand-in tokens aren't swapped for real ones), package checks, prompt-injection and PII scanning, and per-request logs. The kernel sentry marks container traffic in a way processes in the VM can't fake, so this needs the sentry on; without it, container traffic is intercepted as usual. Takes effect at the next VM start.") {
                 Toggle("Don't intercept container traffic", isOn: $draft.containerTrafficDirect)

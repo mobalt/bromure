@@ -1833,12 +1833,31 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// unseen), and never when the OpenShell policy has request-level (L7)
     /// rules, which only the MiTM can enforce: exempting containers would
     /// silently weaken the policy for them.
+    ///
+    /// Nor under strict credential mode or the strict sandbox, which (as for
+    /// `effectiveDisableTransparentProxy`) need every connection through the
+    /// MiTM; nor while any rule limits request methods (Finding CWE-693,
+    /// "Container exemption on Bromure rules skips web method checks while
+    /// the pane says the firewall still applies": the switch forwards a
+    /// container flow at L4, where a method rule can't be checked).
     public var effectiveContainerTrafficDirect: Bool {
+        containerTrafficDirect && containerTrafficDirectRefusal == nil
+    }
+
+    /// Why `containerTrafficDirect` isn't applied (nil = it would be).
+    public var containerTrafficDirectRefusal: String? {
         #if canImport(SandboxEngine)
-        guard containerTrafficDirect, usesOpenShellPolicy, effectiveKernelSentry != .off else { return false }
-        return resolvedEgressPolicy.inspectedPorts.isEmpty
+        if effectiveKernelSentry == .off { return "Not applied: needs the kernel sentry." }
+        if !usesOpenShellPolicy { return "Not applied: only under the OpenShell engine." }
+        if effectiveStrictCredentials { return "Not applied: strict credential mode needs every request through the proxy." }
+        if effectiveStrictSandbox { return "Not applied: the strict sandbox needs every connection through the proxy." }
+        let policy = resolvedEgressPolicy
+        if !policy.inspectedPorts.isEmpty || policy.rules.contains(where: { $0.proto == .web && $0.methods != nil }) {
+            return "Not applied: request-level (L7) rules need the proxy."
+        }
+        return nil
         #else
-        return false
+        return "Not applied on this device."
         #endif
     }
 
