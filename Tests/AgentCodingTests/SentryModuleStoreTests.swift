@@ -228,6 +228,20 @@ struct SentryModuleStoreTests {
         #expect(none?.definitive == true && none?.reason.contains("no module published") == true)
     }
 
+    @Test("With nothing cached, a rejected first catalog doesn't stop the retries from fetching")
+    func rejectedFirstCatalogRetries() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        var unsigned = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        unsigned.signature = nil
+        serveCatalog(host, String(data: try JSONEncoder().encode(unsigned), encoding: .utf8)!)
+        let s = store(host: host, root: root)
+        #expect(await s.ensureOutcome(kernel: "6.8.0-142-generic", hash: Self.hash)?.definitive == false)
+        // Fixed on the server seconds later: the next retry gets it.
+        serveCatalog(host)
+        #expect(await s.ensureOutcome(kernel: "6.8.0-142-generic", hash: Self.hash) == nil)
+    }
+
     @Test("An older catalog never replaces a newer cached one")
     func rollbackGuard() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"

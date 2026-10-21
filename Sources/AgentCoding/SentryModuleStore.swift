@@ -325,7 +325,9 @@ public final class SentryModuleStore: @unchecked Sendable {
         var fresh = false
         if catalog?.module(for: kernel) == nil {
             // A new kernel may have been published since the cached catalog.
-            (catalog, fresh) = await fetchCatalog(hash, force: catalog != nil)
+            // Always fetched: the guest's wait paces these retries, and a
+            // rejected first fetch mustn't skip the network for a minute.
+            (catalog, fresh) = await fetchCatalog(hash, force: true)
         }
         guard let catalog else { return transient("no module catalog for this Bromure version (offline?)") }
         guard let entry = catalog.module(for: kernel) else {
