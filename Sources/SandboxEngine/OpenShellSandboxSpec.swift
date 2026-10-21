@@ -28,6 +28,11 @@ public struct OpenShellSandboxSpec: Equatable, Sendable {
     /// Kernel sentry requirement: "off", "best_effort" or "hard".
     public var sentry: String
 
+    /// The policy confines the guest: a filesystem_policy or process
+    /// section. A network-only policy (just the default-deny firewall) and
+    /// a sentry alone don't.
+    public var confinesGuest: Bool { filesystemPolicy != nil || process != nil }
+
     /// Whether anything needs staging at all: the policy carries one of the
     /// sections, or the kernel sentry is on. Otherwise the guest behaves
     /// exactly as before.
