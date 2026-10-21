@@ -4255,3 +4255,4 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "无法发送回答。";
 "Your answer is already on its way." = "你的回答已在发送中。";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "无法确定是哪个程序尝试连接；启用“Enforce binaries”时，规则必须指明程序。请重新尝试连接，然后再允许。";

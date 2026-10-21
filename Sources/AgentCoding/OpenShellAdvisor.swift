@@ -104,6 +104,9 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     public var applyApproved: (@Sendable (UUID, Proposal) async -> String?) = { _, _ in "advisor not wired" }
     /// Whether the workspace takes system-package requests.
     public var systemPackagesProvider: (@Sendable (UUID) -> Bool) = { _ in false }
+    /// Enforce binaries is on (a network rule then applies only to the
+    /// programs it lists); set by the app.
+    public var enforceBinariesProvider: (@Sendable (UUID) -> Bool) = { _ in false }
     /// Install approved packages in the guest as root. Returns (exit code,
     /// output).
     public var installPackages: (@Sendable (UUID, String, [String]) async -> (Int, String)) = { _, _, _ in (1, "not wired") }
@@ -135,7 +138,7 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// and port, no inspection — the user can approve it or wait for the
     /// agent's narrower L7 proposal, which supersedes it.
     public func recordDenial(profileID: UUID, layer: String, host: String, port: Int,
-                             method: String?, path: String?, reason: String) {
+                             method: String?, path: String?, reason: String, ip: String? = nil) {
         guard policyProvider(profileID) != nil else { return }
         lock.lock()
         var list = denials[profileID] ?? []
@@ -155,16 +158,23 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         }
         lock.unlock()
         guard !exists else { return }
-        _ = enqueue(profileID: profileID, rule: Self.allowRule(profileID: profileID, host: host, port: port),
+        let rule = Self.allowRule(profileID: profileID, host: host, port: port, ip: ip)
+        // Enforce binaries on and no program known: the rule would list none
+        // and so allow nothing. Don't draft a proposal that can't work.
+        if rule.binaries.isEmpty, enforceBinariesProvider(profileID) { return }
+        _ = enqueue(profileID: profileID, rule: rule,
                     source: "mechanistic", intent: "Drafted from a blocked connection to \(host):\(port)")
     }
 
     /// One host and port, no inspection. When the attestor named the program
     /// that tried (Enforce binaries is on), the rule lists it: a rule without
     /// `binaries` allows nothing there.
-    static func allowRule(profileID: UUID, host: String, port: Int) -> OpenShellPolicy.NetworkRule {
+    /// The program is looked up by every key the blocked row shows: the host
+    /// (SNI / Host header) and the destination IP.
+    static func allowRule(profileID: UUID, host: String, port: Int, ip: String? = nil) -> OpenShellPolicy.NetworkRule {
         let h = host.lowercased()
-        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID, destinations: [h], port: port)
+        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID,
+                                                         destinations: [h] + (ip.map { [$0] } ?? []), port: port)
         func slug(_ s: String) -> String { s.map { $0.isLetter || $0.isNumber ? $0 : "_" }.reduce(into: "") { $0.append($1) } }
         var key = "allow_" + slug(h) + "_\(port)"
         if let exe { key += "_" + slug((exe as NSString).lastPathComponent) }
@@ -177,8 +187,14 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// The user allowed a blocked destination (the Sandbox drawer): add the
     /// rule now, through the same validation and apply path as an approval,
     /// and settle any draft for it. Returns an error message, or nil.
-    public func allow(profileID: UUID, host: String, port: Int) async -> String? {
-        let rule = Self.allowRule(profileID: profileID, host: host, port: port)
+    public func allow(profileID: UUID, host: String, port: Int, ip: String? = nil) async -> String? {
+        let rule = Self.allowRule(profileID: profileID, host: host, port: port, ip: ip)
+        // A rule with no program allows nothing while Enforce binaries is on:
+        // saying "Allowed" would be untrue, and the next try would still fail.
+        if rule.binaries.isEmpty, enforceBinariesProvider(profileID) {
+            return NSLocalizedString("Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.",
+                                     comment: "network drawer: allow refused, no program known")
+        }
         let id: String
         switch enqueue(profileID: profileID, rule: rule, source: "user", intent: "Allowed from the Sandbox drawer") {
         case .ok(let v): id = v

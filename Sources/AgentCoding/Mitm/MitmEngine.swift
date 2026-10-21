@@ -528,6 +528,7 @@ public final class MitmEngine {
             if plainHTTP {
                 let peeked = Self.peekHTTPHost(fd: appFD)
                 let host = peeked ?? destIP
+                BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: peeked, port: destPort)
                 let strict80 = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
                 var shouldSplice = !strict80 && PassthroughList.current().matches(host)
                 // `policy.local` on its reserved address: the advisor, answered
@@ -593,6 +594,7 @@ public final class MitmEngine {
             // destination address) instead of letting them fail open: its rules
             // are default-deny, and the switch deferred these flows to us.
             let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: sniHost, port: destPort)
             if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy,
                sniHost != nil || policy.openShell != nil {
                 switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,

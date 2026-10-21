@@ -4257,3 +4257,4 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "No se pudo enviar la respuesta.";
 "Your answer is already on its way." = "Tu respuesta ya está en camino.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "No se pudo saber qué programa lo intentó, y con «Enforce binaries» activado una regla debe nombrar uno. Vuelva a intentar la conexión y luego permítala.";

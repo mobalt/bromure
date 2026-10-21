@@ -176,6 +176,43 @@ struct OpenShellAdvisorTests {
         #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) != nil)
     }
 
+    /// Finding (CWE-670): "Sandbox drawer Allow saves a no-op rule when
+    /// Enforce binaries is on". The MiTM recorded the program under the
+    /// destination IP only and the row's host is the SNI, so Allow found no
+    /// program and saved a rule listing none — which allows nothing there.
+    @Test("Under Enforce binaries: Allow finds the program by host or IP, and refuses when there's none")
+    func allowUnderEnforce() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        a.enforceBinariesProvider = { _ in true }
+        // The MiTM's path: identity asked by IP, then the SNI learned.
+        BinaryIdentityService.shared.noteExe("/usr/bin/pip", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        let identity = OpenShellPolicy.BinaryIdentity(exe: "/usr/bin/pip", sha256: "", ancestors: [])
+        BinaryIdentityService.shared.noteHost(identity, profileID: pid, host: "pypi.org", port: 443)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) == nil)
+        let rule = try #require(try OpenShellPolicy.parse(box.policy).networkPolicies.first { $0.key.hasPrefix("allow_pypi_org_443") })
+        #expect(rule.binaries == ["/usr/bin/pip"])
+        // Known by IP only (as the row's dst_ip shows it): found too.
+        BinaryIdentityService.shared.noteExe("/usr/bin/curl", profileID: pid, destinations: ["140.82.112.3"], port: 8443)
+        #expect(await a.allow(profileID: pid, host: "github.com", port: 8443, ip: "140.82.112.3") == nil)
+        #expect(try OpenShellPolicy.parse(box.policy).networkPolicies.contains { $0.key == "allow_github_com_8443_curl" })
+        // No program known at all: refused, nothing saved, no draft queued.
+        let before = box.policy
+        let refused = await a.allow(profileID: pid, host: "files.example.com", port: 443)
+        #expect(refused?.contains("Enforce binaries") == true)
+        #expect(box.policy == before)
+        a.recordDenial(profileID: pid, layer: "sni", host: "files.example.com", port: 443, method: nil, path: nil, reason: "no rule")
+        #expect(a.pending(for: pid).isEmpty)
+    }
+
+    @Test("A MiTM firewall row carries its destination IP (dst_ip)")
+    func timelineReadsDstIP() {
+        let e = SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall",
+                                           eventData: ["action": .string("deny"), "host": .string("pypi.org"),
+                                                       "port": .int(443), "layer": .string("sni"),
+                                                       "dst_ip": .string("151.101.0.223")], now: Date())
+        #expect(e?.firewall?.ip == "151.101.0.223")
+    }
+
     @Test("policy.local routes: feature_disabled when off; denials, policy, proposal wait")
     func agentAPI() async throws {
         let (off, offPID, _) = advisor(mode: .off)

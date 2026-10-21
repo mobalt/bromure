@@ -4289,3 +4289,4 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "The answer couldn't be sent.";
 "Your answer is already on its way." = "Your answer is already on its way.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.";

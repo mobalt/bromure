@@ -4255,3 +4255,4 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "La réponse n'a pas pu être envoyée.";
 "Your answer is already on its way." = "Votre réponse est déjà en cours d'envoi.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Impossible de savoir quel programme a essayé, et avec « Enforce binaries » une règle doit en nommer un. Réessayez la connexion, puis autorisez-la.";

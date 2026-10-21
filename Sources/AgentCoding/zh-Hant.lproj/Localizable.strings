@@ -4258,3 +4258,4 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "無法傳送回答。";
 "Your answer is already on its way." = "你的回答已在傳送中。";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "無法確定是哪個程式嘗試連線；啟用「Enforce binaries」時，規則必須指明程式。請重新嘗試連線，然後再允許。";
