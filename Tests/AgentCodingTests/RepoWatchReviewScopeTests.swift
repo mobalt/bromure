@@ -548,7 +548,7 @@ struct ReviewRunAgentdTests {
             open(meta + '/proxy.env', 'w').write(
                 'export HTTPS_PROXY=http://127.0.0.1:3128\\nexport NO_PROXY=localhost,127.0.0.1\\n'
                 'export OPENAI_API_KEY=sk-not-for-git\\n'
-                "export NO_PROXY='localhost,127.0.0.1'\\n")      # a profile's own, shell-quoted
+                "export HTTPS_PROXY='http://127.0.0.1:3129'\\n")      # a profile's own, shell-quoted: it wins
             m.META = meta
             calls = []
             def fake_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
@@ -566,7 +566,7 @@ struct ReviewRunAgentdTests {
             env = fetch[0][1] if fetch else {}
             print('FETCHED', bool(fetch))
             print('SOCK', env.get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
-            print('PROXY', env.get('HTTPS_PROXY') == 'http://127.0.0.1:3128' and env.get('NO_PROXY') == 'localhost,127.0.0.1')
+            print('PROXY', env.get('HTTPS_PROXY') == 'http://127.0.0.1:3129' and env.get('NO_PROXY') == 'localhost,127.0.0.1')
             print('ONLY_PROXY', 'OPENAI_API_KEY' not in env)
             print('FDS', bool(fetch) and len(fetch[0][2]) == 3)
             """, dir: dir)
