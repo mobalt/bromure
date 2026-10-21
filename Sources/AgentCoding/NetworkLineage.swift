@@ -45,9 +45,11 @@ public final class NetworkLineage: @unchecked Sendable {
         var folded: [String: (first: Date, count: Int, data: [String: AnyJSON])] = [:]
         /// Guest client port → the proxied target (cooperative proxy).
         var proxied: [Int: (host: String, port: Int, at: Date)] = [:]
-        /// Client ports claimed for two different targets: neither is
-        /// believed (see `noteProxied`).
+        /// Client ports claimed for two different targets, or by two
+        /// connections: neither is believed (see `noteProxied`).
         var contested: [Int: Date] = [:]
+        /// Connections that opened with a preamble naming each client port.
+        var claimants: [Int: (count: Int, at: Date)] = [:]
     }
 
     private let lock = NSLock()
@@ -158,6 +160,24 @@ public final class NetworkLineage: @unchecked Sendable {
         } else {
             vm.proxied[sport] = (host, port, t)
         }
+        vms[profileID] = vm
+    }
+
+    /// A connection to the MITM opened with a preamble naming `sport` — called
+    /// as soon as its first line arrives, before the request is read. agentd
+    /// writes that line the moment it accepts the client, so a connection
+    /// through the bridge registers here at once; a second connection naming
+    /// the same port (a forged line, however early or however long its
+    /// request is held back) contests the port before the flow is resolved.
+    public func noteClaimant(profileID: UUID, sport: Int) {
+        lock.lock(); defer { lock.unlock() }
+        var vm = vms[profileID] ?? VM()
+        let t = now()
+        vm.claimants = vm.claimants.filter { t.timeIntervalSince($0.value.at) < 120 }
+        vm.contested = vm.contested.filter { t.timeIntervalSince($0.value) < 120 }
+        let n = (vm.claimants[sport]?.count ?? 0) + 1
+        vm.claimants[sport] = (n, t)
+        if n > 1 { vm.contested[sport] = t; vm.proxied[sport] = nil }
         vms[profileID] = vm
     }
 

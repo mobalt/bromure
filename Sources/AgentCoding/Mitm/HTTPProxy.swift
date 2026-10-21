@@ -173,6 +173,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
+    /// The preamble's client port, read without consuming the stream (the
+    /// request read that follows still sees it), waiting briefly for the
+    /// first bytes: agentd writes the line before any client byte.
+    static func peekPreambleSport(fd: Int32, waitMs: Int32 = 500) -> Int? {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, waitMs) > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 160)
+        let n = recv(fd, &buf, buf.count, MSG_PEEK)
+        guard n > 0 else { return nil }
+        var d = Data(buf.prefix(n))
+        return stripClientPreamble(&d)
+    }
+
     func run() async {
         defer { closeFD() }
         do {
@@ -190,6 +203,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
         //    request carries headers and possibly a body after it, and one
         //    non-ASCII byte there must not make the whole request "malformed".
+        // A preamble's claim is counted from its first line, before the
+        // request is read (see NetworkLineage.noteClaimant).
+        if let sport = Self.peekPreambleSport(fd: fd) {
+            NetworkLineage.shared.noteClaimant(profileID: profileID, sport: sport)
+        }
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
         // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the

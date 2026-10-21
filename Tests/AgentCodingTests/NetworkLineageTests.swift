@@ -194,6 +194,52 @@ struct NetworkLineageProxyTests {
         let honest = try #require(sink.flows.first { NetworkLineageTests.I($0["sport"]) == 40004 })
         #expect(NetworkLineageTests.S(honest["dst"]) == "pypi.org")
     }
+
+    @Test("A planted claim whose bridge request is held back past the flow's resolution is still contested")
+    func heldBackRequest() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        // The forged direct connection: its preamble, then its target.
+        l.noteClaimant(profileID: pid, sport: 40010)
+        l.noteProxied(profileID: pid, sport: 40010, host: "benign.example", port: 443)
+        // The attacker connects to the bridge from that port; agentd's line
+        // arrives at once, its request is held back (no target yet).
+        l.noteClaimant(profileID: pid, sport: 40010)
+        l.noteFlow(profileID: pid, ["pid": 64, "path": "/usr/bin/d", "proto": "tcp", "dst": "127.0.0.1",
+                                    "dport": 65534, "sport": 40010])
+        for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let f = try #require(sink.flows.first)
+        #expect(NetworkLineageTests.S(f["dst"]) == "127.0.0.1")
+        if case .bool(true)? = f["via_proxy"] { Issue.record("labelled from a contested port") }
+        // One connection, one claim: still labelled.
+        l.noteClaimant(profileID: pid, sport: 40011)
+        l.noteProxied(profileID: pid, sport: 40011, host: "pypi.org", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 65, "path": "/usr/bin/e", "proto": "tcp", "dst": "127.0.0.1",
+                                    "dport": 65534, "sport": 40011])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(sink.flows.contains { NetworkLineageTests.S($0["dst"]) == "pypi.org" })
+    }
+
+    @Test("The preamble's port is read from the first line without consuming the stream")
+    func peekPreamble() throws {
+        var fds: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        defer { close(fds[0]); close(fds[1]) }
+        let msg = Array("BROMURE-CLIENT 1 sport=51234 peer=127.0.0.1\nCONNECT a:443 HTTP/1.1\r\n\r\n".utf8)
+        _ = msg.withUnsafeBytes { write(fds[1], $0.baseAddress, msg.count) }
+        #expect(HTTPMitmConnection.peekPreambleSport(fd: fds[0]) == 51234)
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = read(fds[0], &buf, buf.count)
+        #expect(n == msg.count)                                 // nothing was consumed
+        // No preamble: nothing claimed.
+        var g: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &g) == 0)
+        defer { close(g[0]); close(g[1]) }
+        let plain = Array("CONNECT a:443 HTTP/1.1\r\n\r\n".utf8)
+        _ = plain.withUnsafeBytes { write(g[1], $0.baseAddress, plain.count) }
+        #expect(HTTPMitmConnection.peekPreambleSport(fd: g[0]) == nil)
+    }
 }
 
 @Suite("Network lineage from the agents' PreToolUse hooks")
