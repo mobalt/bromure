@@ -27,6 +27,10 @@ public final class NetworkLineage: @unchecked Sendable {
     struct Proc {
         var key: ProcKey
         var ppid: Int
+        /// The parent at exec, exactly: the frame's `chain[0]` (pid AND start
+        /// time). A pid is reused within minutes, so `ppid` alone can name a
+        /// later process. nil = an older sentry that sent no chain.
+        var parent: ProcKey? = nil
         var comm: String
         var exe: String
         var argv: String
@@ -38,7 +42,8 @@ public final class NetworkLineage: @unchecked Sendable {
 
     private struct VM {
         var procs: [ProcKey: Proc] = [:]
-        /// Latest start per pid, to walk `ppid` (which carries no start time).
+        /// Latest start per pid: a flow's leaf, and the parent of a process
+        /// whose exec carried no chain.
         var byPid: [Int: ProcKey] = [:]
         var toolCalls: [ToolCall] = []
         var decisions: [String: Decision] = [:]       // "proto|dst|dport"
@@ -109,6 +114,9 @@ public final class NetworkLineage: @unchecked Sendable {
         var vm = vms[profileID] ?? VM()
         var p = Proc(key: key, ppid: f["ppid"] as? Int ?? 0, comm: f["comm"] as? String ?? "?",
                      exe: f["path"] as? String ?? "", argv: f["argv"] as? String ?? "", at: t, link: nil)
+        if let first = (f["chain"] as? [[String: Any]])?.first, let pp = first["pid"] as? Int, pp == p.ppid {
+            p.parent = ProcKey(pid: pp, startNs: Self.u64(first["start_ns"]))
+        }
         p.link = Self.matchToolCall(argv: p.argv, calls: vm.toolCalls, at: t)
         if p.link == nil {
             // The agent's hook named its own pid: a process it starts right
@@ -182,11 +190,11 @@ public final class NetworkLineage: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let vm = vms[profileID] ?? VM()
         var chain: [Proc] = []
-        var cursor: ProcKey? = vm.procs[leaf] != nil ? leaf : vm.byPid[leaf.pid]
-        var seen = Set<Int>()
-        while let k = cursor, let p = vm.procs[k], seen.insert(k.pid).inserted, chain.count < 16 {
+        var cursor: ProcKey? = vm.procs[leaf] != nil ? leaf : (leaf.startNs == 0 ? vm.byPid[leaf.pid] : nil)
+        var seen = Set<ProcKey>()
+        while let k = cursor, let p = vm.procs[k], seen.insert(k).inserted, chain.count < 16 {
             chain.append(p)
-            cursor = vm.byPid[p.ppid]
+            cursor = Self.parentKey(of: p, in: vm)
         }
         // Processes the host never saw exec (older than the sentry): the
         // frame's own chain, nearest first.
@@ -194,13 +202,27 @@ public final class NetworkLineage: @unchecked Sendable {
             chain.append(Proc(key: leaf, ppid: 0, comm: f["comm"] as? String ?? "?",
                               exe: f["path"] as? String ?? "", argv: "", at: now(), link: nil))
         }
+        // The kernel's chain for this flow (nearest first, by pid and start
+        // time) picks up where the walk ends: after the walk's last process,
+        // or its exact parent. All of it when the walk knew only the leaf.
         if let frameChain = f["chain"] as? [[String: Any]] {
-            let known = Set(chain.map(\.key.pid))
-            for c in frameChain {
-                guard let p = c["pid"] as? Int, !known.contains(p) else { continue }
-                if let last = chain.last, last.ppid != 0, last.ppid != p { continue }
-                chain.append(Proc(key: ProcKey(pid: p, startNs: Self.u64(c["start_ns"])), ppid: 0,
-                                  comm: c["comm"] as? String ?? "?", exe: "", argv: "", at: now(), link: nil))
+            let keys: [ProcKey] = frameChain.compactMap { c in
+                (c["pid"] as? Int).map { ProcKey(pid: $0, startNs: Self.u64(c["start_ns"])) }
+            }
+            let last = chain.last!
+            let from: Int? = {
+                if let i = keys.firstIndex(of: last.key) { return i + 1 }
+                if let parent = last.parent, let i = keys.firstIndex(of: parent) { return i }
+                return chain.count == 1 ? 0 : nil
+            }()
+            if let from {
+                for (i, c) in frameChain.enumerated() where i >= from && i < keys.count {
+                    let k = keys[i]
+                    guard !seen.contains(k), chain.count < 16 else { continue }
+                    seen.insert(k)
+                    chain.append(vm.procs[k] ?? Proc(key: k, ppid: 0, comm: c["comm"] as? String ?? "?",
+                                                     exe: "", argv: "", at: now(), link: nil))
+                }
             }
         }
         var link: (ToolCall, String)?
@@ -216,6 +238,16 @@ public final class NetworkLineage: @unchecked Sendable {
             return d
         }
         return (processes, link)
+    }
+
+    /// The process that started `p`: the exact identity its exec recorded,
+    /// else (an older sentry) the latest process with its ppid, but only one
+    /// that started before `p` — a pid reused afterwards isn't its parent.
+    private static func parentKey(of p: Proc, in vm: VM) -> ProcKey? {
+        if let parent = p.parent { return parent }
+        guard p.ppid != 0, let k = vm.byPid[p.ppid] else { return nil }
+        if k.startNs != 0, p.key.startNs != 0, k.startNs > p.key.startNs { return nil }
+        return k
     }
 
     private func resolve(profileID: UUID, flowID: String, frame f: [String: Any], proto: String, dst: String,
