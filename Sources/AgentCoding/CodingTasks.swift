@@ -2402,6 +2402,14 @@ final class CodingTaskEngine {
         }
     }
 
+    /// The guest refused to start a task's run (`worktree-error.txt` named
+    /// its slug): say why on the card now, not after the launch watch.
+    func runRefused(profileID: UUID, slug: String, reason: String) {
+        guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
+                                                  && $0.stage == .inProgress }) else { return }
+        store.mutate(t.id) { $0.lastError = reason }
+    }
+
     /// An agent that takes its brief on the command line: watch the launch
     /// so one that dies at once (bad flag, missing binary) puts the reason
     /// on the card in seconds, not never.

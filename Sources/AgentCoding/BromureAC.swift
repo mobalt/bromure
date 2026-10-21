@@ -15343,10 +15343,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerError(message)
             }
         }
-        sandbox.onWorktreeError = { [weak self] message in
+        sandbox.onWorktreeError = { [weak self] raw in
             Task { @MainActor in
                 guard let self else { return }
+                // An automation (or task) run's refusal names its slug on the
+                // first line: that run failed — it isn't left "launched".
+                let (slug, message) = Self.splitWorktreeError(raw)
                 SupplyChainLog.shared.record("[worktree] \(message)")
+                if let slug {
+                    self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message)
+                    self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message)
+                }
                 // NON-BLOCKING. A modal runModal() here froze the main run loop
                 // — and with it the automation server that POST /sessions waits
                 // on — so one failed worktree wedged the whole app (and hung the
