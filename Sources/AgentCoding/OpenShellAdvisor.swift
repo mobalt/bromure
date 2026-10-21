@@ -89,6 +89,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     private let lock = NSLock()
     private var packageRequests: [UUID: [PackageRequest]] = [:]
     private var proposals: [UUID: [Proposal]] = [:]
+    /// Proposals an approval is applying right now ("profileID|id").
+    private var applyingProposals: Set<String> = []
     private var denials: [UUID: [Denial]] = [:]
     private var nextID = 1
 
@@ -323,10 +325,17 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     }
 
     public func approve(id: String, profileID: UUID, auto: Bool = false) async {
-        guard let p = proposal(id: id, profileID: profileID), p.status == .pending else { return }
+        // Claimed under the lock with the pending check: a second approval
+        // (or a reject) while this one applies the rule does nothing, rather
+        // than applying it twice or being overwritten (as for packages).
+        lock.lock()
+        guard let p = proposals[profileID]?.first(where: { $0.id == id }), p.status == .pending,
+              applyingProposals.insert("\(profileID)|\(id)").inserted else { lock.unlock(); return }
+        lock.unlock()
         let error = await applyApproved(profileID, p)
         lock.lock()
-        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id }) {
+        applyingProposals.remove("\(profileID)|\(id)")
+        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
             if let error {
                 proposals[profileID]![i].status = .rejected
                 proposals[profileID]![i].rejectionReason = "could not be applied: \(error)"
@@ -344,7 +353,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
 
     public func reject(id: String, profileID: UUID, reason: String) {
         lock.lock()
-        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
+        if !applyingProposals.contains("\(profileID)|\(id)"),
+           let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
             proposals[profileID]![i].status = .rejected
             proposals[profileID]![i].rejectionReason = reason.isEmpty ? nil : reason
         }
@@ -502,12 +512,31 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         return .ok(r)
     }
 
+    /// Moves request `id` out of `pending` under one lock: the request, when
+    /// this call is the one that moved it; nil when it had already left
+    /// (Finding CWE-362, "A second Install click starts another root
+    /// apt-get and can overwrite success": the pending check and the
+    /// `.installing` write were two lock acquisitions, so two clicks — or the
+    /// drawer and the control-socket route — both installed, and a reject
+    /// between them was overwritten).
+    private func claimPending(_ id: String, _ profileID: UUID, _ change: (inout PackageRequest) -> Void) -> PackageRequest? {
+        lock.lock()
+        guard let i = packageRequests[profileID]?.firstIndex(where: { $0.id == id }),
+              packageRequests[profileID]![i].status == .pending else { lock.unlock(); return nil }
+        let before = packageRequests[profileID]![i]
+        change(&packageRequests[profileID]![i])
+        lock.unlock()
+        notify()
+        return before
+    }
+
     /// The user approved: install now (returns once the install finished).
+    /// Only the approval that moved the request to `.installing` runs apt.
     public func approvePackages(id: String, profileID: UUID) async {
-        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
-        updatePackage(id, profileID) { $0.status = .installing }
+        guard let r = claimPending(id, profileID, { $0.status = .installing }) else { return }
         let (code, output) = await installPackages(profileID, r.manager, r.packages)
         updatePackage(id, profileID) {
+            guard $0.status == .installing else { return }
             $0.status = code == 0 ? .installed : .failed
             $0.exitCode = code
             $0.output = String(output.suffix(16_000))
@@ -518,8 +547,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     }
 
     public func rejectPackages(id: String, profileID: UUID, reason: String) {
-        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
-        updatePackage(id, profileID) { $0.status = .rejected; $0.reason = reason.isEmpty ? nil : reason }
+        guard let r = claimPending(id, profileID, { $0.status = .rejected; $0.reason = reason.isEmpty ? nil : reason })
+        else { return }
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.package_request", eventData: [
             "manager": .string(r.manager), "packages": .array(r.packages.map { .string($0) }), "status": .string("rejected")])
     }

@@ -278,4 +278,34 @@ struct OpenShellAdvisorTests {
         #expect(route("POST", ["proposals", id1, "approve"], [:]).status == 409)   // already rejected
         #expect(route("POST", ["proposals", "nope", "reject"], [:]).status == 404)
     }
+
+    /// Same finding, for network proposals: the pending check and the
+    /// status write straddled the policy write, so two approvals applied the
+    /// rule twice and a reject during it was overwritten.
+    @Test("Two approvals of one proposal apply it once; a reject while it applies is ignored")
+    func oneApply() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        final class Count: @unchecked Sendable { var n = 0; let lock = NSLock() }
+        let applied = Count()
+        a.applyApproved = { _, p in
+            applied.lock.lock(); applied.n += 1; applied.lock.unlock()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            do { box.policy = try OpenShellPolicy.insertingRules(p.yaml, into: box.policy); return nil }
+            catch { return "\(error)" }
+        }
+        let (s, _, d) = await a.handle(profileID: pid, method: "POST", target: "/v1/proposals",
+                                       body: proposal("docs", host: "docs.example.org"), policyReloaded: { _ in false })
+        #expect(s == 202)
+        let id = try #require(((try JSONSerialization.jsonObject(with: d)) as? [String: Any])?["accepted_chunk_ids"] as? [String]).first!
+        await withTaskGroup(of: Void.self) { g in
+            g.addTask { await a.approve(id: id, profileID: pid) }
+            g.addTask { await a.approve(id: id, profileID: pid) }
+            g.addTask {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                a.reject(id: id, profileID: pid, reason: "changed my mind")
+            }
+        }
+        #expect(applied.n == 1)
+        #expect(a.proposal(id: id, profileID: pid)?.status == .approved)
+    }
 }
