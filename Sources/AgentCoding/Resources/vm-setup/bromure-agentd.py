@@ -509,11 +509,19 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
                               stdout=stdout, stderr=stderr,
                               env=run_env if env else None, **kwargs)
 
-    def _sink(requested, fallback_pipe):
+    def _sink(requested, fallback_pipe, merge_into=None):
         """(child_fd, read_fd) for one output stream."""
         if requested is None or requested is subprocess.PIPE or capture_output:
             return fallback_pipe
-        if isinstance(requested, int):
+        # subprocess's own markers are negative ints, not descriptors:
+        # `os.dup(DEVNULL)` raised EBADF before the supervisor was asked, so
+        # every sandboxed call passing `_DEVNULL` (the review base fetch, its
+        # `_commit_exists`, worktree checks) died, taking its thread along.
+        if requested == subprocess.DEVNULL:
+            return os.open(os.devnull, os.O_WRONLY), None
+        if requested == subprocess.STDOUT and merge_into is not None:
+            return os.dup(merge_into), None
+        if isinstance(requested, int) and requested >= 0:
             return os.dup(requested), None
         if hasattr(requested, "fileno"):
             return os.dup(requested.fileno()), None
@@ -522,7 +530,7 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
     out_child, out_read = _sink(stdout, (out_w, out_r))
-    err_child, err_read = _sink(stderr, (err_w, err_r))
+    err_child, err_read = _sink(stderr, (err_w, err_r), merge_into=out_child)
     if out_child is not out_w:
         os.close(out_w)
         os.close(out_r)
@@ -4719,6 +4727,25 @@ def _commit_exists(cwd, ref):
 # workspace), never interactive.
 _FETCH_SSH_COMMAND = "/usr/bin/ssh -F /dev/null -o BatchMode=yes"
 
+# The cooperative proxy's variables, as proxy.env gives them to shells (this
+# service never sources it): with transparent interception off, an https
+# origin is reached only through that proxy.
+_FETCH_PROXY_KEYS = frozenset(("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                               "NO_PROXY", "no_proxy"))
+
+
+def _meta_proxy_env():
+    out = {}
+    try:
+        with open(os.path.join(META, "proxy.env")) as f:
+            for line in f:
+                m = re.match(r"^export ([A-Za-z_]+)=(\S*)$", line.strip())
+                if m and m.group(1) in _FETCH_PROXY_KEYS:
+                    out[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return out
+
 
 # The fetch a review run makes for a base its checkout lacks. The upload
 # pack is pinned to git's own on the command line (it beats any
@@ -4758,8 +4785,9 @@ def _resolve_run_base(cwd, base):
         p = _ws_run(_review_fetch_argv(cwd),
                     stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
                     git_protocols="https:ssh",
-                    env={"GIT_SSH_COMMAND": _FETCH_SSH_COMMAND,
-                         "SSH_AUTH_SOCK": SSH_AGENT_UNIX_PATH})
+                    env=dict(_meta_proxy_env(),
+                             GIT_SSH_COMMAND=_FETCH_SSH_COMMAND,
+                             SSH_AUTH_SOCK=SSH_AGENT_UNIX_PATH))
         if getattr(p, "returncode", 0) != 0:
             log("automation", "fetch for %s exited %s" % (base, p.returncode))
     except Exception as e:
