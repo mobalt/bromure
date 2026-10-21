@@ -523,4 +523,76 @@ struct ReviewRunAgentdTests {
             """, dir: dir)
         for key in ["NAMED", "PLAIN"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
     }
+
+    /// Finding (CWE-670): "SSH origin fetch has no agent socket, so
+    /// automation bases stay on HEAD". The VM's only key is the host's,
+    /// through agentd's ssh-agent bridge; SSH_AUTH_SOCK comes from proxy.env,
+    /// which agentd (a systemd service) never sources.
+    @Test("The base fetch carries the bridged agent socket, not whatever agentd's environment has",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sshFetchHasAgentSocket() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            g('remote', 'add', 'origin', 'ssh://git@127.0.0.1:1/nope.git')
+            seen = []
+            real = subprocess.run
+            def spy(args, **kw):
+                if 'fetch' not in args: return real(args, **kw)
+                seen.append(kw.get('env') or {})
+                return real(['true'])
+            m.subprocess.run = spy
+            os.environ.pop('SSH_AUTH_SOCK', None)          # agentd's own environment
+            m._resolve_run_base(repo, 'e' * 40)
+            print('SOCK', bool(seen) and seen[0].get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
+            os.environ['SSH_AUTH_SOCK'] = d + '/elsewhere.sock'
+            m._resolve_run_base(repo, 'e' * 40)
+            print('NOT_ENV', seen[-1].get('SSH_AUTH_SOCK') == m.SSH_AGENT_UNIX_PATH)
+            print('STILL_FIXED', seen[-1].get('GIT_SSH_COMMAND') == m._FETCH_SSH_COMMAND)
+            """, dir: dir)
+        for key in ["SOCK", "NOT_ENV", "STILL_FIXED"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// The same fetch inside a sandbox goes through the supervisor's exec:
+    /// `_DEVNULL` used to be `os.dup`ed (EBADF) before the supervisor was
+    /// asked, killing the automation thread. And the cooperative proxy's
+    /// variables come from proxy.env, which agentd never sources.
+    @Test("Sandboxed, the fetch reaches the supervisor with the agent socket and the proxy",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sandboxedFetchReachesSupervisor() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            meta = d + '/meta'; os.makedirs(meta)
+            open(meta + '/proxy.env', 'w').write(
+                'export HTTPS_PROXY=http://127.0.0.1:3128\\nexport NO_PROXY=localhost,127.0.0.1\\n'
+                'export OPENAI_API_KEY=sk-not-for-git\\n'
+                "export HTTPS_PROXY='http://127.0.0.1:3129'\\n")      # a profile's own, shell-quoted: it wins
+            m.META = meta
+            calls = []
+            def fake_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
+                calls.append((list(argv), dict(env or {}), [os.fstat(f).st_mode for f in fds]))
+                return {'ok': True, 'exit': 1}            # the commit isn't there
+            m._sandbox_exec = fake_exec
+            m._SANDBOX['control_socket'] = d + '/ctl.sock'
+            os.environ.pop('SSH_AUTH_SOCK', None)
+            try:
+                m._resolve_run_base(repo, 'e' * 40)
+                print('NO_CRASH', True)
+            except OSError as e:
+                print('NO_CRASH', False, e)
+            fetch = [c for c in calls if 'fetch' in c[0]]
+            env = fetch[0][1] if fetch else {}
+            print('FETCHED', bool(fetch))
+            print('SOCK', env.get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
+            print('PROXY', env.get('HTTPS_PROXY') == 'http://127.0.0.1:3129' and env.get('NO_PROXY') == 'localhost,127.0.0.1')
+            print('ONLY_PROXY', 'OPENAI_API_KEY' not in env)
+            print('FDS', bool(fetch) and len(fetch[0][2]) == 3)
+            """, dir: dir)
+        for key in ["NO_CRASH", "FETCHED", "SOCK", "PROXY", "ONLY_PROXY", "FDS"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
 }
