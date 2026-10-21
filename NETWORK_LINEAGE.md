@@ -137,6 +137,9 @@ flows as leaves. Joins: `net.flow.agent.tool_use_id` ↔ `command.run`/`tool.use
 ## 4. Volume and privacy
 - `exec` never leaves the host. `net.flow` is folded (60 s) and bounded per batch by the
   uploader (500 events, 1 MiB).
-- argv is capped (1024 bytes guest, 256 bytes per process in `net.flow`); the MITM's
-  credential redaction applies to argv before upload (tokens on command lines).
+- argv is capped (1024 bytes guest, 256 bytes per process in `net.flow`). Every event's
+  command-line fields (`argv`, `command`, `input_summary`, at any depth) go through
+  `CommandLineRedactor` in `BACEventEmitter.emit`, before the timeline records them and
+  before upload: known token schemes become their fingerprint label, passwords / header
+  values / `--token`-style arguments / URL userinfo become `***`.
 - Private profiles upload nothing (existing emitter gate).

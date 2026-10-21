@@ -194,6 +194,9 @@ public final class BACEventEmitter: @unchecked Sendable {
     public func emit(profileID: UUID,
                      eventType: String,
                      eventData: [String: AnyJSON]) async {
+        // Command lines (a flow's argv, a tool's command) lose their secrets
+        // before they're recorded or uploaded: both stores outlive the VM.
+        let eventData = CommandLineRedactor.scrub(eventData)
         // Local Security Timeline — ALWAYS, before either gate below. It's an
         // on-device view of what the engines did on the user's own machine,
         // independent of the enrolled-only, cloud-bound telemetry.
