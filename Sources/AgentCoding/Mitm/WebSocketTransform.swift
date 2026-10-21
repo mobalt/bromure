@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SandboxEngine
 
 // WebSocket content protection.
 //
@@ -410,13 +411,48 @@ final class WSContentGuard: @unchecked Sendable {
 
     /// The guard for an upgrade, or nil when the socket should stay an
     /// opaque (compressed) pipe: not a model provider, or neither engine on.
-    static func make(host: String, path: String, profileID: UUID, conversation: String? = nil) -> WSContentGuard? {
+    /// A model provider's socket, which these engines read.
+    static func isModelSocket(host: String, profileID: UUID) -> Bool {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this Mac
         // (a custom server elsewhere) — the on-device engine is exempt.
-        guard HTTPMitmConnection.isAIHost(h), !h.contains("huggingface.co"),
-              h != InferenceService.localMitmHost
-                || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil else { return nil }
+        return HTTPMitmConnection.isAIHost(h) && !h.contains("huggingface.co")
+            && (h != InferenceService.localMitmHost || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil)
+    }
+
+    /// Squelch is on for this socket.
+    static func squelchApplies(host: String, profileID: UUID) -> Bool {
+        isModelSocket(host: host, profileID: profileID)
+            && (HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled ?? false)
+    }
+
+    /// Squelch as an OpenShell message transform, for a socket on the
+    /// per-message pump (a policy or rewrite is installed, so there is no
+    /// guard): client text is trimmed first, then `then` runs on it.
+    static func squelchingTransform(then: ((String) -> OpenShellWebSocket.MessageTransform)?, profileID: UUID,
+                                    conversation: String?, ledger: SquelchLedger = .shared)
+        -> (String) -> OpenShellWebSocket.MessageTransform {
+        { text in
+            var current = text
+            var changed = false
+            let data = Data(text.utf8)
+            if HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled == true,
+               SquelchRewriter.mayCarryToolOutput(data) {
+                let o = SquelchRewriter.rewrite(data, priorCall: { SquelchCallRegistry.shared.call(profileID, $0) })
+                ledger.record(o, profileID: profileID, conversation: conversation ?? o.conversation)
+                if o.body != data { current = String(decoding: o.body, as: UTF8.self); changed = true }
+            }
+            switch then?(current) ?? .unchanged {
+            case .unchanged: break
+            case .replaced(let t): current = t; changed = true
+            case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
+            }
+            return changed ? .replaced(current) : .unchanged
+        }
+    }
+
+    static func make(host: String, path: String, profileID: UUID, conversation: String? = nil) -> WSContentGuard? {
+        guard isModelSocket(host: host, profileID: profileID) else { return nil }
         let piiOn = HTTPMitmConnection.piiPolicyProvider?(profileID)?.isActive ?? false
         let piOn = HTTPMitmConnection.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
         let squelchOn = HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled ?? false
