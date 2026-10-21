@@ -18,13 +18,15 @@ enum ClaudeHooks {
         var pqPost = pqClear
         pqPost["matcher"] = "AskUserQuestion"
         let settings: [String: Any] = [
-            // Agent-to-agent traffic never waits on a permission prompt, nor
-            // do the files other agents hand over (~/.bromure/inbox): read,
-            // listed and unpacked unprompted — running one still goes through
-            // the approval mode. The rules bromure-ac seeds in its workspaces.
+            // Agent-to-agent traffic never waits on a permission prompt. The
+            // files other agents hand over do: unlike a workspace VM, this
+            // Mac's home (and its ~/.bromure/inbox) is shared by every session
+            // here, every Bromure linked to it and the user's own tools, so an
+            // unprompted Read or Edit of the inbox would open files staged for
+            // someone else (CWE-732). Opening one goes through the approval
+            // mode like any file outside the session's folder.
             "permissions": [
-                "allow": ["mcp__delegation", "Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"],
-                "additionalDirectories": ["~/.bromure/inbox"],
+                "allow": ["mcp__delegation"],
             ],
             "hooks": [
                 "SessionStart": [hook("done")],
