@@ -31,7 +31,17 @@ struct BootBudgetTests {
         c.now += 600
         #expect(b.remains)                       // past 180 s, the sentry is still loading
         loading.on = false
-        #expect(!b.remains)                      // settled (or the guest stopped saying so)
+        // Settled: the workload server starts just after; the probes get a grace to see it.
+        #expect(b.remains)
+        c.now += BootBudget.settleGrace - 1
+        #expect(b.remains)
+        c.now += 2
+        #expect(!b.remains)
+        // A budget that never extended has no grace past its seconds.
+        let plain = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                               extendWhile: { false }, extendUpTo: 180 + 1905)
+        c.now += 181
+        #expect(!plain.remains)
         let capped = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
                                 extendWhile: { true }, extendUpTo: 180 + 1905)
         c.now += 180 + 1905

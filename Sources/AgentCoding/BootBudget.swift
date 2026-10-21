@@ -27,9 +27,14 @@ import IOKit.pwr_mgt
 final class BootBudget: @unchecked Sendable {
     private let deadline: TimeInterval
     private let clock: () -> TimeInterval
-    /// Past the deadline, time still remains while this holds, up to `cap`.
+    /// Past the deadline, time still remains while this holds, up to `cap`,
+    /// and `settleGrace` after it stops holding (once it has extended):
+    /// the guest says the sentry settled a moment before its workload
+    /// server is listening, and the next probes must still get to see it.
     private let extendWhile: (() -> Bool)?
     private let cap: TimeInterval
+    static let settleGrace: TimeInterval = 90
+    private var extendedUntil: TimeInterval?
     private let lock = NSLock()
     private var activity: NSObjectProtocol?
     private var systemSleepAssertion: IOPMAssertionID?
@@ -83,7 +88,16 @@ final class BootBudget: @unchecked Sendable {
     /// Time is left. Once it isn't, the keep-awake ends.
     var remains: Bool {
         let now = clock()
-        let left = now < deadline || (now < cap && (extendWhile?() ?? false))
+        var left = now < deadline
+        if !left, now < cap {
+            if extendWhile?() ?? false {
+                lock.lock(); extendedUntil = now; lock.unlock()
+                left = true
+            } else {
+                lock.lock(); let last = extendedUntil; lock.unlock()
+                left = last.map { now < $0 + Self.settleGrace } ?? false
+            }
+        }
         if !left { release() }
         return left
     }

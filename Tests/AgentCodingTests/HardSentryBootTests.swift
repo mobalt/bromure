@@ -191,7 +191,7 @@ struct HardSentryBootTests {
         for key in ["NOT_READY", "ATTACH_WAITS", "NO_HOLD"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
     }
 
-    @Test("The supervisor's hold says so in its status, and clears it when the server starts")
+    @Test("The supervisor's hold says so in its status, and clears it with the started server's publish")
     func supervisorSaysHold() throws {
         let src = try String(contentsOf: Self.vmSetup.appendingPathComponent("bromure-sandboxd"), encoding: .utf8)
         let hold = try #require(src.range(of: "if supervisor.sentry_hold.held():"))
@@ -199,8 +199,14 @@ struct HardSentryBootTests {
         let set = try #require(block.range(of: "supervisor.status[\"sentry_hold\"] = True"))
         let publish = try #require(block.range(of: "supervisor.publish()"))
         #expect(set.lowerBound < publish.lowerBound)
-        let cleared = try #require(block.range(of: "supervisor.status[\"sentry_hold\"] = False"))
-        let start = try #require(block.range(of: "supervisor.start(\"initial, after the sentry\")"))
-        #expect(cleared.lowerBound < start.lowerBound)
+        // Not cleared before the server exists (a republish in between would
+        // announce it): in start(), after start_server, in the same publish.
+        #expect(!block.contains("supervisor.status[\"sentry_hold\"] = False"))
+        let start = try #require(src.range(of: "    def start(self, reason):"))
+        let body = String(src[start.lowerBound...].prefix(2000))
+        let server = try #require(body.range(of: "start_server(self.plan"))
+        let clear = try #require(body.range(of: "self.status[\"sentry_hold\"] = False"))
+        let pub = try #require(body.range(of: "self.publish(outcome, report)"))
+        #expect(server.lowerBound < clear.lowerBound && clear.lowerBound < pub.lowerBound)
     }
 }

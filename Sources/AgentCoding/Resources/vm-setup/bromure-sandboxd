@@ -2116,6 +2116,11 @@ class Supervisor(object):
         self.start_times.append(self.last_start)
         outcome, report = start_server(self.plan, self.live_agentd_pid())
         self.starts += 1
+        # The hold's flag goes in the same publish as the started server (or
+        # its failure): cleared any earlier, a republish in between (the
+        # sentry's status changing) would announce the socket of a server
+        # that isn't listening yet.
+        self.status["sentry_hold"] = False
         self.publish(outcome, report)
         if report["ok"]:
             if self.first_server_at is None:
@@ -2895,8 +2900,7 @@ def main():
 
         def _start_when_settled():
             supervisor.sentry_hold.wait()
-            supervisor.status["sentry_hold"] = False
-            ok, why = supervisor.start("initial, after the sentry")
+            ok, why = supervisor.start("initial, after the sentry")   # clears sentry_hold
             if not ok:
                 log("initial start failed: %s" % why)
                 supervisor.publish()

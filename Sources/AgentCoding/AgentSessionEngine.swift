@@ -1897,7 +1897,13 @@ final class AgentSessionEngine {
         let sentryCap = Date().addingTimeInterval(Self.bootTimeout + KernelSentryService.loadBudget)
         // Cancelled, the sleep throws at once: without this check the loop
         // execs into the machine back to back until the boot timeout.
-        while (Date() < deadline || (Date() < sentryCap && BootBudget.sentryLoading(profileID))), !Task.isCancelled {
+        while !Task.isCancelled {
+            if Date() >= deadline {
+                // Past it, while the sentry loads — and a grace after it
+                // settles, for the server it then starts (BootBudget).
+                guard Date() < sentryCap, BootBudget.sentryLoading(profileID) else { break }
+                deadline = Date().addingTimeInterval(BootBudget.settleGrace)
+            }
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
                 deadline = Date().addingTimeInterval(Self.bootTimeout)
