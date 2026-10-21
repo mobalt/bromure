@@ -98,8 +98,9 @@ struct ContainerTrafficTests {
     /// revocation while the tc rule is still installed". The revocation
     /// lived only in the host process; a restored VM keeps its kernel and
     /// the qdisc, and its reconnect turned the exemption back on.
-    @Test("A restored VM's reconnect keeps the mark revoked; a fresh boot re-arms it")
-    func revocationSurvivesRestore() {
+    @Test("A restored VM's reconnect keeps the mark revoked; a fresh boot re-arms it",
+          arguments: ["b", ""])                     // "": a guest that couldn't read its boot id
+    func revocationSurvivesRestore(bootID: String) {
         let k = KernelSentryTests()
         let pid = UUID()
         let svc = KernelSentryService.shared
@@ -112,7 +113,7 @@ struct ContainerTrafficTests {
         let marked: [String: Any] = ["container_mark": Int(VMNetSwitch.containerDSCP),
                                      "probes": Array(KernelSentryService.tcProbeSymbols)]
         func hello(_ extra: [String: Any]) -> Data {
-            k.frame(["type": "hello", "v": 1, "boot_id": "b", "kernel": "k", "module": "1"]
+            k.frame(["type": "hello", "v": 1, "boot_id": bootID, "kernel": "k", "module": "1"]
                 .merging(marked) { $1 }.merging(extra) { $1 })
         }
         // The first boot: the mark is honoured, then tc changes.
@@ -127,7 +128,7 @@ struct ContainerTrafficTests {
         // Host restart: a new process (nothing revoked in memory), the VM restored.
         svc.rearmContainerMark(profileID: pid)
         let restored = SentryBridge(profileID: pid, requirement: .bestEffort, restoring: true, pinFile: pin)
-        let proof = SentryBridge.reconnectProof(secret: KernelSentryTests.secret, bootID: "b", conn: 1)
+        let proof = SentryBridge.reconnectProof(secret: KernelSentryTests.secret, bootID: bootID, conn: 1)
         let (_, g1, tap1) = k.connect(restored, hello(["conn": 1, "proof": proof]))
         tap1.waitFor { restored.snapshot().connected }
         #expect(restored.snapshot().connected && tap1.alarms().isEmpty)

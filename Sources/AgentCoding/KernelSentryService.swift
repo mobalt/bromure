@@ -303,7 +303,9 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
                 pinnedSecret = o["secret"] as? String
                 pinnedBootID = o["boot_id"] as? String
                 lastConn = o["conn"] as? Int ?? 0
-                markRevokedBoot = (o["mark_revoked_boot"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                // Present only when revoked; "" is a boot id too (a guest
+                // that couldn't read its own).
+                markRevokedBoot = o["mark_revoked_boot"] as? String
             }
         } else {
             // A fresh boot loads a fresh module with a fresh secret.
@@ -313,8 +315,8 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
 
     private func persistPin() {
         guard let pinFile, let secret = pinnedSecret else { return }
-        let o: [String: Any] = ["secret": secret, "boot_id": pinnedBootID ?? "", "conn": lastConn,
-                                "mark_revoked_boot": markRevokedBoot ?? ""]
+        var o: [String: Any] = ["secret": secret, "boot_id": pinnedBootID ?? "", "conn": lastConn]
+        if let markRevokedBoot { o["mark_revoked_boot"] = markRevokedBoot }
         guard let d = try? JSONSerialization.data(withJSONObject: o) else { return }
         try? d.write(to: pinFile, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: pinFile.path)
