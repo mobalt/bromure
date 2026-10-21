@@ -147,6 +147,8 @@ public final class SentryModuleStore: @unchecked Sendable {
         public let definitive: Bool
     }
     private var catalogFetchedAt: [String: Date] = [:]
+    /// When a fetched catalog was last accepted (cached as current).
+    private var catalogAcceptedAt: [String: Date] = [:]
 
     public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
                 publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64,
@@ -222,11 +224,22 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// doesn't verify or is older than what's cached.
     @discardableResult
     public func refreshCatalog(_ hash: String, force: Bool = false) async -> SentryModuleCatalog? {
+        await fetchCatalog(hash, force: force).catalog
+    }
+
+    /// `refreshCatalog`, saying whether the catalog returned is one the
+    /// server just served and this store accepted (`fresh`) — or the cached
+    /// one it fell back to (offline, non-200, undecodable, rejected, older).
+    /// Only a fresh catalog proves what isn't published (Finding CWE-670, "A
+    /// failed sentry-catalog refresh is treated as proof the kernel was never
+    /// published").
+    private func fetchCatalog(_ hash: String, force: Bool) async -> (catalog: SentryModuleCatalog?, fresh: Bool) {
         lock.lock()
         let recent = catalogFetchedAt[hash].map { Date().timeIntervalSince($0) < 60 } ?? false
+        let acceptedRecently = catalogAcceptedAt[hash].map { Date().timeIntervalSince($0) < 60 } ?? false
         lock.unlock()
         let cached = cachedCatalog(hash)
-        if recent && !force { return cached }
+        if recent && !force { return (cached, acceptedRecently && cached != nil) }
         let url = base.appendingPathComponent("sentry/\(hash)/catalog.json")
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -235,21 +248,21 @@ public final class SentryModuleStore: @unchecked Sendable {
               let fetched = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data)
         else {
             Self.log("catalog for source \(hash.prefix(12)) unavailable from \(url.host ?? "?"); using \(cached == nil ? "nothing" : "the cached one")")
-            return cached
+            return (cached, false)
         }
         lock.lock(); catalogFetchedAt[hash] = Date(); lock.unlock()
         guard accept(fetched, for: hash) else {
             Self.log("REJECTED the catalog for source \(hash.prefix(12)): bad signature or shape")
-            return cached
+            return (cached, false)
         }
         if let old = cached?.signature?.signedAt, let new = fetched.signature?.signedAt, new < old {
             Self.log("ignored a catalog signed \(new), older than the cached \(old)")
-            return cached
+            return (cached, false)
         }
         try? fm.createDirectory(at: catalogFile(hash).deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: catalogFile(hash), options: .atomic)
-        lock.lock(); catalogs[hash] = fetched; lock.unlock()
-        return fetched
+        lock.lock(); catalogs[hash] = fetched; catalogAcceptedAt[hash] = Date(); lock.unlock()
+        return (fetched, true)
     }
 
     // MARK: Modules
@@ -309,13 +322,19 @@ public final class SentryModuleStore: @unchecked Sendable {
         func transient(_ r: String) -> Failure { Failure(reason: r, definitive: false) }
         func definitive(_ r: String) -> Failure { Failure(reason: r, definitive: true) }
         var catalog = cachedCatalog(hash)
+        var fresh = false
         if catalog?.module(for: kernel) == nil {
             // A new kernel may have been published since the cached catalog.
-            catalog = await refreshCatalog(hash, force: catalog != nil)
+            // Always fetched: the guest's wait paces these retries, and a
+            // rejected first fetch mustn't skip the network for a minute.
+            (catalog, fresh) = await fetchCatalog(hash, force: true)
         }
         guard let catalog else { return transient("no module catalog for this Bromure version (offline?)") }
         guard let entry = catalog.module(for: kernel) else {
-            return definitive("no module published for \(kernel) yet")
+            // Only the server's current catalog says it isn't published: the
+            // cached one we fell back to may simply predate it.
+            return fresh ? definitive("no module published for \(kernel) yet")
+                         : transient("couldn't refresh the module catalog to look for \(kernel)")
         }
         guard moduleTrusted(entry, in: catalog) else {
             Self.log("REJECTED the \(kernel) module: missing or invalid module signature")
