@@ -4788,8 +4788,10 @@ public final class ProfileStore {
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
             // Stop drains them too: a note written after the blocked tool's
-            // PostToolUse ran would otherwise wait for the next message.
-            hooks["Stop"] = hookCmd("policy") + hookCmd("done") + [pqStop] + othersUnder("Stop")
+            // PostToolUse ran would otherwise wait for the next message. One
+            // `stop` command (the hooks of an event run in parallel): it
+            // reports `done` only when no note kept the turn going.
+            hooks["Stop"] = hookCmd("stop") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
             // not Stop: without it the tab sat "working" forever. A refused
@@ -4875,6 +4877,20 @@ public final class ProfileStore {
             # blocked something it did (PolicySteering), as the hook's
             # additionalContext. Each note is claimed by rename, so two hooks
             # firing at once never hand over the same one.
+            # `stop` (Claude's one Stop hook): a turn that ends with notes
+            # owed is kept going with them (`decision: block`), and then it has
+            # NOT ended: reporting `done` too would let the host type a held
+            # notice and finish a task while the agent works on. Claude runs a
+            # Stop event's hooks in parallel, so this is one command, not
+            # `policy` and `done` side by side.
+            stop_json=""
+            if [ "${1:-}" = stop ]; then
+              if [ ! -t 0 ]; then stop_json=$(cat 2>/dev/null); fi
+              kept=$(printf '%s' "$stop_json" | sh "$0" policy)
+              if [ -n "$kept" ]; then printf '%s\n' "$kept"; exit 0; fi
+              set -- done "${2:-}"
+              stop_read=1
+            fi
             if [ "${1:-}" = policy ]; then
               [ -n "${TMUX_PANE:-}" ] || exit 0
               idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
@@ -4924,7 +4940,8 @@ public final class ProfileStore {
             # the transcript file (kept per tab, below) and, for a
             # Notification, WHICH notification. Not a terminal → nothing to read.
             hook_json=""
-            if [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
+            if [ -n "${stop_read:-}" ]; then hook_json=$stop_json
+            elif [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
             # Claude's Notification hook fires for more than questions: an
             # idle_prompt comes after the agent has merely sat at its prompt
             # for a while. Reporting that as "needs input" made every idle

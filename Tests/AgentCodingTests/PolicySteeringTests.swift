@@ -446,7 +446,7 @@ struct PolicyNoteDeliveryTests {
         }
         try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
         let hostSettings = store.homeDirectory(for: p).appendingPathComponent(".claude/settings.json")
-        #expect(stopCommands(hostSettings).contains { $0.hasSuffix("agent-status.sh policy") })
+        #expect(stopCommands(hostSettings).filter { $0.contains("agent-status.sh") } == ["/home/ubuntu/.bromure/agent-status.sh stop"])
         // …and agentd's twin for an ext4 home (seeded in the guest).
         let guestHome = root.appendingPathComponent("guest-home"), seedIn = root.appendingPathComponent("guest-seed")
         try FileManager.default.createDirectory(at: guestHome, withIntermediateDirectories: true)
@@ -468,7 +468,8 @@ struct PolicyNoteDeliveryTests {
             """, agentd.path, seedIn.path, guestHome.path]
         py.standardError = FileHandle.nullDevice
         try py.run(); py.waitUntilExit()
-        #expect(stopCommands(guestHome.appendingPathComponent(".claude/settings.json")).contains { $0.hasSuffix("agent-status.sh policy") })
+        #expect(stopCommands(guestHome.appendingPathComponent(".claude/settings.json")).filter { $0.contains("agent-status.sh") }
+                == ["/home/ubuntu/.bromure/agent-status.sh stop"])
 
         // Run the script as the hook would, with a tmux that says window 3.
         let bin = root.appendingPathComponent("bin")
@@ -483,7 +484,7 @@ struct PolicyNoteDeliveryTests {
                                                          atomically: true, encoding: .utf8)
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = [script.path, "policy"]
+            proc.arguments = [script.path, event == "Stop" ? "stop" : "policy"]
             proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
             let input = Pipe(), output = Pipe()
             proc.standardInput = input; proc.standardOutput = output
@@ -500,5 +501,59 @@ struct PolicyNoteDeliveryTests {
         let post = try #require(try JSONSerialization.jsonObject(with: Data(try run("PostToolUse").utf8)) as? [String: Any])
         #expect(((post["hookSpecificOutput"] as? [String: Any])?["additionalContext"] as? String)?.contains("evil.example") == true)
         #expect((try? FileManager.default.contentsOfDirectory(atPath: notes.path))?.isEmpty == true)   // claimed
+    }
+
+    /// Finding (CWE-670): "A Stop policy block still marks the tab done and
+    /// can finish the task". `policy` and `done` were separate Stop hooks,
+    /// which Claude runs in parallel: the turn a note kept going was also
+    /// reported over, so the host typed held notices and finished tasks.
+    @Test("a Stop that a note keeps going reports no `done`; one with no note does",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func stopBlockNotDone() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("stop-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let seed = root.appendingPathComponent("seed")
+        try ProfileStore(rootDir: root).writeHomeSeedFiles(for: Profile(name: "ws", tool: .claude, authMode: .token),
+                                                           into: seed, terminalDefaults: .fallback)
+        let outbox = root.appendingPathComponent("outbox")
+        try fm.createDirectory(at: outbox, withIntermediateDirectories: true)
+        let body = try String(contentsOf: seed.appendingPathComponent("files/.bromure/agent-status.sh"), encoding: .utf8)
+        #expect(body.contains("d=/mnt/bromure-outbox"))
+        let script = root.appendingPathComponent("agent-status.sh")
+        try body.replacingOccurrences(of: "d=/mnt/bromure-outbox", with: "d=\(outbox.path)")
+            .write(to: script, atomically: true, encoding: .utf8)
+        let bin = root.appendingPathComponent("bin")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        try "#!/bin/sh\necho 3\n".write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
+        chmod(bin.appendingPathComponent("tmux").path, 0o755)
+        let home = root.appendingPathComponent("home")
+        let notes = home.appendingPathComponent(".bromure/policy-notes")
+        try fm.createDirectory(at: notes, withIntermediateDirectories: true)
+        let status = outbox.appendingPathComponent("agent-status-3.txt")
+
+        func stop() throws -> String {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = [script.path, "stop"]
+            proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
+            let input = Pipe(), output = Pipe()
+            proc.standardInput = input; proc.standardOutput = output
+            try proc.run()
+            input.fileHandleForWriting.write(Data(#"{"hook_event_name":"Stop","session_id":"abc-1"}"#.utf8))
+            try input.fileHandleForWriting.close()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        try "curl to evil.example was blocked".write(to: notes.appendingPathComponent("w3-1.note"), atomically: true, encoding: .utf8)
+        let kept = try #require(try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])
+        #expect(kept["decision"] as? String == "block")
+        #expect(!fm.fileExists(atPath: status.path), "the turn goes on: no done")
+
+        // The continued turn's own Stop, with nothing owed: over now.
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
     }
 }
