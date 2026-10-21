@@ -77,6 +77,13 @@ struct PolicyDrawer: View {
         .onReceive(NotificationCenter.default.publisher(for: OpenShellAdvisor.changedNotification)) { _ in
             reloadProposals()
         }
+        // Closing only hides the drawer (its view, and this clock, live on),
+        // so each open — not just the first appearance — and the close itself
+        // mark what was on screen as seen.
+        .onChange(of: list.policyDrawerOpen) { _, open in
+            if open { reloadProposals() }
+            PolicyDrawer.markSeen(list, closing: !open)
+        }
         .onReceive(clock) { now = $0; markSeen() }
     }
 
@@ -596,9 +603,14 @@ struct PolicyDrawer: View {
     // MARK: Seen
 
     /// The toolbar badge counts blocks newer than this.
-    private func markSeen() {
-        guard let id = list.stageProfileID else { return }
-        list.policyDrawerSeen[id] = Date()
+    private func markSeen() { PolicyDrawer.markSeen(list) }
+
+    /// Only what was on screen counts as seen: while the drawer is open (or
+    /// as it closes). The hidden drawer's clock and a workspace switch with
+    /// the drawer closed used to mark it too, so the badge stayed at 0.
+    @MainActor static func markSeen(_ list: SessionListModel, closing: Bool = false, now: Date = Date()) {
+        guard list.policyDrawerOpen || closing, let id = list.stageProfileID else { return }
+        list.policyDrawerSeen[id] = now
     }
 
     /// Distinct destinations blocked since the drawer was last seen (the
