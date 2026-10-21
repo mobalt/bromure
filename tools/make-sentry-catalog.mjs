@@ -93,15 +93,21 @@ const verifyPath = opt("verify");
 if (verifyPath) {
   const pub = publicKeyFromRaw(req("public-key"));
   const dir = req("modules");
-  const cat = JSON.parse(readFileSync(verifyPath, "utf8"));
-  const fail = (msg) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(1); };
+  // Exit 3 = a signature doesn't verify against the pinned key (the key is
+  // wrong); 1 = anything else (a module, a .sig or the catalog itself), so a
+  // caller can tell a wrong key from a bad build.
+  const WRONG_KEY = 3;
+  const fail = (msg, code = 1) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(code); };
+  let cat;
+  try { cat = JSON.parse(readFileSync(verifyPath, "utf8")); }
+  catch (e) { fail(`can't read ${verifyPath}: ${e.message}`); }
   if (cat.sourceHash !== req("source-hash").toLowerCase()) fail(`catalog is for ${cat.sourceHash}`);
   if (!cat.signature) fail("catalog is unsigned");
   if (!verify(null, signingPayload(cat, cat.signature.signedAt), pub, Buffer.from(cat.signature.edSignature, "base64")))
-    fail("catalog signature does NOT verify against the pinned key");
+    fail("catalog signature does NOT verify against the pinned key", WRONG_KEY);
   for (const m of cat.modules) {
     if (!m.signature || !verify(null, moduleSigningPayload(cat.sourceHash, m), pub, Buffer.from(m.signature, "base64")))
-      fail(`module ${m.kernel}: signature does NOT verify`);
+      fail(`module ${m.kernel}: signature does NOT verify against the pinned key`, WRONG_KEY);
     const file = join(dir, `bromure_sentry-${m.kernel}.ko`);
     if (!existsSync(file)) continue;   // published earlier, not rebuilt here
     const body = readFileSync(file);
