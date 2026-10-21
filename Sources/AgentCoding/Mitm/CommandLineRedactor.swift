@@ -25,6 +25,15 @@ enum CommandLineRedactor {
         + #"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"#)
     /// `scheme://user:password@host`
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
+
+    // Each pattern below matches up to where its value starts, with the
+    // value's opening quote (if any) in group 2; `value(…)` then takes the
+    // value itself: a quoted one through its matching quote, spaces and all,
+    // an unquoted one up to a space or quote (Finding CWE-532: "Cookie flags
+    // and secrets past the first space are still stored and uploaded" — a
+    // value stopped at the first space, so `-u "alice:my hunter2"` kept
+    // "hunter2" and a Cookie header kept every pair after the first).
+
     /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`,
     /// and `-u` / `-U` closing a cluster of short flags (`-su user:pw`,
     /// `-fsSLu user:pw`, `-sLuuser:pw`: Finding CWE-532, "A curl -u password
@@ -37,7 +46,7 @@ enum CommandLineRedactor {
     /// redaction erases rsync paths, PWD, and token: URLs that are not
     /// secrets"): `userFlagIsCurl` checks the command — a cluster ending in
     /// u (`-fsSLu`) included. The long forms are always userinfo.
-    private static let userFlag = re(#"((?:^|\s)(-[a-z0-9#]*u|--user|--proxy-user)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    private static let userFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*u|--user|--proxy-user)(?:\s+|=)?)(['"]?)"#)
     /// The command a flag at `location` belongs to is curl: a word named
     /// `curl` (any path, any case) since the start of its shell segment. The
     /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
@@ -89,18 +98,90 @@ enum CommandLineRedactor {
             .contains { ($0.split(separator: "/").last ?? $0).lowercased() == "curl" }
     }
 
-    /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
+    /// curl's `-b` / `--cookie name=value; …` (a value without `=` is a
+    /// cookie file, and `-b` is `git checkout -b`'s branch: both kept;
+    /// `--cookie-jar` is a path).
+    private static let cookieFlag = re(#"((?:^|\s)(?:-b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`.
+    /// Group 2 is the quote opening the whole header argument
+    /// (`-H 'Cookie: a=1; b=2'`): the value runs to its match.
     private static let header = re(
-        #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
+        #"()(['"]?)((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?"#)
     /// `--password value`, `--token value`, …
     private static let secretFlag = re(
-        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token)(?:\s+|=))(['"]?)[^\s'"]+"#)
+        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token)(?:\s+|=))(['"]?)"#)
     /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`. The key
     /// is taken whole, and the secret word ends it or a `_`/`-`/`.` follows
     /// (`API_TOKEN_V2`, not `tokens:list`); the shell's own `PWD` / `OLDPWD`
     /// is a directory, not a password (`DB_PWD` still is).
     private static let keyValue = re(
-        #"((?<![A-Za-z0-9_.-])(?!(?:old)?pwd['"]?\s*[=:])[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)(?:[_.-][A-Za-z0-9_.-]*)?['"]?\s*[=:]\s*)(['"]?)[^\s'"&,}]+"#)
+        #"((?<![A-Za-z0-9_.-])(?!(?:old)?pwd['"]?\s*[=:])[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)(?:[_.-][A-Za-z0-9_.-]*)?['"]?\s*[=:]\s*)(['"]?)"#)
+
+    /// The value starting at `start` (UTF-16): through the matching `quote`
+    /// when there is one (to the end if it's never closed), else while no
+    /// space, quote or `stops` character comes; an unquoted cookie value
+    /// goes on across its `; name=value` pairs (the sentry's argv is the
+    /// process's arguments joined by spaces, its quotes gone).
+    private static func valueEnd(_ ns: NSString, from start: Int, quote: String, stops: String,
+                                 cookiePairs: Bool = false) -> Int {
+        let n = ns.length
+        if !quote.isEmpty {
+            let q = ns.range(of: quote, options: [], range: NSRange(location: start, length: n - start))
+            return q.location == NSNotFound ? n : q.location
+        }
+        let stop = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"" + stops))
+        func run(_ i: Int) -> Int {
+            var j = i
+            // A surrogate (half a non-BMP character) is never a stop.
+            while j < n {
+                if let u = UnicodeScalar(ns.character(at: j)), stop.contains(u) { break }
+                j += 1
+            }
+            return j
+        }
+        var end = run(start)
+        while cookiePairs, end > start, end < n, ns.character(at: end - 1) == 0x3B /* ; */ {
+            var k = end
+            while k < n, ns.character(at: k) == 0x20 { k += 1 }
+            let next = run(k)
+            guard next > k, ns.substring(with: NSRange(location: k, length: next - k)).contains("=") else { break }
+            end = next
+        }
+        return end
+    }
+
+    /// Every match of `rx`, its value (see `valueEnd`) replaced by what
+    /// `masked(value)` returns (nil = left as is). The prefix (all groups
+    /// but the value) is kept.
+    private static func replacingValues(_ s: String, _ rx: NSRegularExpression, stops: String = "",
+                                        when applies: (NSTextCheckingResult, NSString) -> Bool = { _, _ in true },
+                                        cookiePairs: (NSTextCheckingResult, NSString) -> Bool = { _, _ in false },
+                                        masked: (String) -> String?) -> String {
+        let ns = s as NSString
+        var out = ""
+        var pos = 0
+        // Resumed after each value: `^` and `\s` still see the whole string.
+        while pos < ns.length,
+              let m = rx.firstMatch(in: s, options: [.withoutAnchoringBounds, .withTransparentBounds],
+                                    range: NSRange(location: pos, length: ns.length - pos)) {
+            let start = m.range.location + m.range.length
+            guard applies(m, ns) else {
+                // Not this kind of value here (`rsync -u host:path`): kept.
+                out += ns.substring(with: NSRange(location: pos, length: max(start, pos + 1) - pos))
+                pos = max(start, pos + 1)
+                continue
+            }
+            let q = m.range(at: 2)
+            let quote = q.location == NSNotFound || q.length == 0 ? "" : ns.substring(with: q)
+            let end = valueEnd(ns, from: start, quote: quote, stops: stops, cookiePairs: cookiePairs(m, ns))
+            out += ns.substring(with: NSRange(location: pos, length: start - pos))
+            let value = ns.substring(with: NSRange(location: start, length: end - start))
+            out += value.isEmpty ? "" : (masked(value) ?? value)
+            pos = end
+        }
+        if pos < ns.length { out += ns.substring(from: pos) }
+        return out
+    }
 
     static func redact(_ s: String) -> String {
         guard !s.isEmpty else { return s }
@@ -115,23 +196,21 @@ enum CommandLineRedactor {
             last = m.range.location + m.range.length
         }
         if last > 0 { out = labelled + ns.substring(from: last) }
-        // user:password after -u/--user — the short flag only for curl.
-        let uns = out as NSString
-        var userMasked = ""
-        var at = 0
-        for m in userFlag.matches(in: out, range: NSRange(location: 0, length: uns.length)) {
-            let flag = uns.substring(with: m.range(at: 2))
-            guard flag.hasPrefix("--") || userFlagIsCurl(uns, before: m.range.location) else { continue }
-            userMasked += uns.substring(with: NSRange(location: at, length: m.range(at: 1).upperBound - at)) + ":" + mask
-            at = m.range.upperBound
+        out = urlUserinfo.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length),
+                                                   withTemplate: "$1:\(mask)@")
+        // user:password — the user stays; a short -u / -U only for curl.
+        out = replacingValues(out, userFlag, when: { m, ns in
+            ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces).hasPrefix("--")
+                || userFlagIsCurl(ns, before: m.range.location)
+        }) { v in
+            v.firstIndex(of: ":").map { String(v[..<$0]) + ":" + mask }
         }
-        if at > 0 { out = userMasked + uns.substring(from: at) }
-        for (rx, template) in [(urlUserinfo, "$1:\(mask)@"),
-                               (header, "$1$2$3\(mask)"), (secretFlag, "$1$2\(mask)"),
-                               (keyValue, "$1$2\(mask)")] {
-            out = rx.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length),
-                                             withTemplate: template)
-        }
+        out = replacingValues(out, cookieFlag, cookiePairs: { _, _ in true }) { $0.contains("=") ? mask : nil }
+        out = replacingValues(out, header, cookiePairs: { m, ns in
+            ns.substring(with: m.range(at: 3)).lowercased() == "cookie"
+        }) { _ in mask }
+        out = replacingValues(out, secretFlag) { _ in mask }
+        out = replacingValues(out, keyValue, stops: "&,}") { _ in mask }
         return out
     }
 

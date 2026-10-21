@@ -93,6 +93,40 @@ struct CommandLineRedactorTests {
         }
     }
 
+    /// Finding (CWE-532): "Cookie flags and secrets past the first space are
+    /// still stored and uploaded" — every value stopped at the first space or
+    /// quote, and curl's own cookie flags weren't recognized.
+    @Test("cookies (header, -b, --cookie) and quoted secrets with spaces are taken out whole")
+    func valuesPastTheFirstSpace() {
+        let r = CommandLineRedactor.redact
+        #expect(r("curl -H 'Cookie: session=SECRET; csrf=OTHER' https://x.example")
+                == "curl -H 'Cookie: ***' https://x.example")
+        #expect(r(#"curl -H "Authorization: Bearer abc def" x"#) == #"curl -H "Authorization: Bearer ***" x"#)
+        #expect(r("curl --cookie 'session=SECRET; csrf=OTHER' x") == "curl --cookie '***' x")
+        #expect(r("curl -b 'session=SECRET' x") == "curl -b '***' x")
+        #expect(r("curl -b session=SECRET x") == "curl -b *** x")
+        #expect(r("curl --cookie=session=SECRET x") == "curl --cookie=*** x")
+        #expect(r(#"curl -u "alice:my hunter2" x"#) == #"curl -u "alice:***" x"#)
+        #expect(r(#"tool --password="my hunter2" go"#) == #"tool --password="***" go"#)
+        #expect(r("tool --token 'a b c' go") == "tool --token '***' go")
+        #expect(r(#"API_KEY="hunter2 extra" ./run"#) == #"API_KEY="***" ./run"#)
+        #expect(r(#"curl -d '{"password": "a b", "user": "bob"}' x"#) == #"curl -d '{"password": "***", "user": "bob"}' x"#)
+        // The sentry's argv: arguments joined by spaces, quotes gone.
+        #expect(r("curl -H Cookie: session=SECRET; csrf=OTHER https://x.example")
+                == "curl -H Cookie: *** https://x.example")
+        #expect(r("curl --cookie session=SECRET; csrf=OTHER https://x.example") == "curl --cookie *** https://x.example")
+        // Not cookies: a cookie file, a cookie jar, a git branch.
+        #expect(r("curl -b cookies.txt -c jar.txt x") == "curl -b cookies.txt -c jar.txt x")
+        #expect(r("curl --cookie-jar /tmp/jar x") == "curl --cookie-jar /tmp/jar x")
+        #expect(r("git checkout -b fix-login && git push") == "git checkout -b fix-login && git push")
+        // A non-BMP character inside an unquoted value doesn't end it.
+        #expect(r("deploy --token=ab🔑cd now") == "deploy --token=*** now")
+        #expect(r("curl -b s=🍪x; t=2 x") == "curl -b *** x")
+        // Several in one line, each whole.
+        #expect(r(#"curl -u "a:b c" -H 'Cookie: s=1; t=2' --password 'p q'"#)
+                == #"curl -u "a:***" -H 'Cookie: ***' --password '***'"#)
+    }
+
     @Test("a net.flow's argv per process and its tool command are scrubbed; other fields aren't touched")
     func scrubFlow() {
         let data: [String: AnyJSON] = [
