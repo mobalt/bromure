@@ -129,6 +129,11 @@ struct CommandLineRedactorTests {
             ("curl -bsession=SECRET x", "curl -b*** x"),
             ("curl -sb session=SECRET; csrf=OTHER https://x", "curl -sb *** https://x"),   // the sentry's argv
             ("/usr/bin/curl -SB 'session=SECRET' x", "/usr/bin/curl -SB '***' x"),
+            // A `b` in the cookie's own name: curl's argument starts at the first one.
+            ("curl -sbab=SECRET x", "curl -sb*** x"),
+            ("curl -bAWSALB=SECRET x", "curl -b*** x"),
+            ("curl -sbAWSALB=SECRET x", "curl -sb*** x"),
+            ("curl -sbtokenb=SECRET x", "curl -sb*** x"),
         ] {
             #expect(r(cmd) == out, "\(cmd)")
         }
@@ -141,6 +146,18 @@ struct CommandLineRedactorTests {
         #expect(r("curl --key k.pem --pass hunter2 x") == "curl --key k.pem --pass *** x")
         #expect(r("curl --proxy-pass=hunter2 x") == "curl --proxy-pass=*** x")
         #expect(r("curl --oauth2-bearer abc.def x") == "curl --oauth2-bearer *** x")
+        #expect(r("curl --tlspassword hunter2 x") == "curl --tlspassword *** x")
+        #expect(r("curl --proxy-tlspassword hunter2 x") == "curl --proxy-tlspassword *** x")
+        // A client certificate's passphrase; a bare certificate path stays.
+        #expect(r("curl -E client.pem:hunter2 https://x") == "curl -E client.pem:*** https://x")
+        #expect(r("curl -kE client.pem:hunter2 https://x") == "curl -kE client.pem:*** https://x")
+        #expect(r("curl --cert client.pem:hunter2 https://x") == "curl --cert client.pem:*** https://x")
+        #expect(r("curl --proxy-cert=c.pem:hunter2 https://x") == "curl --proxy-cert=c.pem:*** https://x")
+        #expect(r("curl -E client.pem https://x") == "curl -E client.pem https://x")
+        #expect(r("curl -e https://ref.example:8443/ https://x") == "curl -e https://ref.example:8443/ https://x")
+        #expect(r("grep -E a:b file") == "grep -E a:b file")
+        // -u binds its first u too: the user shows whole.
+        #expect(r("curl -sLuuser:pw https://x") == "curl -sLuuser:*** https://x")
         // A non-BMP character inside an unquoted value doesn't end it.
         #expect(r("deploy --token=ab🔑cd now") == "deploy --token=*** now")
         #expect(r("curl -b s=🍪x; t=2 x") == "curl -b *** x")

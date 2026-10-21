@@ -46,7 +46,7 @@ enum CommandLineRedactor {
     /// redaction erases rsync paths, PWD, and token: URLs that are not
     /// secrets"): `userFlagIsCurl` checks the command — a cluster ending in
     /// u (`-fsSLu`) included. The long forms are always userinfo.
-    private static let userFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*u|--user|--proxy-user)(?:\s+|=)?)(['"]?)"#)
+    private static let userFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*?u|--user|--proxy-user)(?:\s+|=)?)(['"]?)"#)
     /// The command a flag at `location` belongs to is curl: a word named
     /// `curl` (any path, any case) since the start of its shell segment. The
     /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
@@ -104,16 +104,24 @@ enum CommandLineRedactor {
     /// (`-sb`, `-fsSLb`, `-4b`, `-sbname=value`) when the command is curl, as
     /// `-u` does (Finding CWE-532, "Clustered curl -b leaves cookie values in
     /// the timeline and the org upload").
-    private static let cookieFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// The cluster is lazy: curl starts a glued argument at the FIRST `b`
+    /// (`-sbAWSALB=x` is the cookie `AWSALB=x`), and the `=` must stay in the
+    /// value for it to read as a cookie.
+    private static let cookieFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*?b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// curl's `-E` / `--cert` / `--proxy-cert certificate:passphrase`: the
+    /// passphrase after the first `:` (a value without one is a path). `-E`
+    /// is case-sensitive (`-e` is the referer) and may close a cluster.
+    private static let certFlag = re(#"((?:^|\s)(?:(?-i:-[a-zA-Z0-9#]*?E)(?:\s+|=)?|--cert(?:\s+|=)|--proxy-cert(?:\s+|=)))(['"]?)"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`.
     /// Group 2 is the quote opening the whole header argument
     /// (`-H 'Cookie: a=1; b=2'`): the value runs to its match.
     private static let header = re(
         #"()(['"]?)((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?"#)
     /// `--password value`, `--token value`, … and curl's own secret-taking
-    /// options (`--pass` / `--proxy-pass` key passphrases, `--oauth2-bearer`).
+    /// options (`--pass` / `--proxy-pass` key passphrases, `--oauth2-bearer`,
+    /// `--tlspassword` / `--proxy-tlspassword`).
     private static let secretFlag = re(
-        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token|pass|proxy-pass|oauth2-bearer)(?:\s+|=))(['"]?)"#)
+        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token|pass|proxy-pass|oauth2-bearer|tlspassword|proxy-tlspassword)(?:\s+|=))(['"]?)"#)
     /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`. The key
     /// is taken whole, and the secret word ends it or a `_`/`-`/`.` follows
     /// (`API_TOKEN_V2`, not `tokens:list`); the shell's own `PWD` / `OLDPWD`
@@ -214,6 +222,10 @@ enum CommandLineRedactor {
             let flag = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
             return flag.hasPrefix("--") || flag == "-b" || flag == "-b=" || userFlagIsCurl(ns, before: m.range.location)
         }, cookiePairs: { _, _ in true }) { $0.contains("=") ? mask : nil }
+        // A client certificate's passphrase (curl only).
+        out = replacingValues(out, certFlag, when: { m, ns in userFlagIsCurl(ns, before: m.range.location) }) { v in
+            v.firstIndex(of: ":").map { String(v[..<$0]) + ":" + mask }
+        }
         out = replacingValues(out, header, cookiePairs: { m, ns in
             ns.substring(with: m.range(at: 3)).lowercased() == "cookie"
         }) { _ in mask }
