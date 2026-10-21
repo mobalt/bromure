@@ -99,8 +99,12 @@ public final class PolicySteering: @unchecked Sendable {
         if let claimed {
             Self.log("\(claimed.dedupe): flow \(pids.prefix(4)) → \(background ? "agent's own traffic, not told" : "window \(window.map(String.init) ?? "none")")")
         }
-        if let claimed, !background { send(claimed.profileID, window, claimed.dedupe, claimed.text, soleOnly: false) }
+        if let claimed, !background { send(claimed.profileID, window, claimed.dedupe, claimed.text, soleOnly: window == nil) }
     }
+
+    /// Firewall layers that deny inside a request (the MITM's L7 rules, web
+    /// filtering): no single flow to attribute, so every agent is told.
+    static let requestLevelLayers: Set<String> = ["l7", "web"]
 
     /// Every event the emitter sees; acts on policy denials.
     public func observe(profileID: UUID, eventType: String, eventData d: [String: AnyJSON]) {
@@ -135,10 +139,13 @@ public final class PolicySteering: @unchecked Sendable {
         let text = Self.message(what: what, why: why, kind: "network",
                                 advisor: advisorOnProvider(profileID) && openShellProvider(profileID) != nil)
         let dedupe = "net|\(target)|\(port)|\(s("method") ?? "")"
-        // Connection-level denials (no request yet): the flow the sentry saw
-        // names the process. A request-level one went through the proxy,
-        // whose client is the agent's tree but not one flow we can join.
-        guard ["l4", "sni", "container"].contains(layer) else {
+        // Connection-level denials (no request yet) — the switch's l4/sni,
+        // container traffic, the cooperative proxy's CONNECT check, binary
+        // identity — wait for the flow the sentry saw, which names the
+        // process (through the proxy bridge too: `host:<name>|<port>`). Only
+        // a request-level deny, made inside a request the proxy can't tie to
+        // one flow, is told at once.
+        guard !Self.requestLevelLayers.contains(layer) else {
             send(profileID, nil, dedupe, text, soleOnly: false)
             return
         }
@@ -153,7 +160,8 @@ public final class PolicySteering: @unchecked Sendable {
             let background = backgroundLocked(profileID, seen.pids, host: host)
             lock.unlock()
             Self.log("\(dedupe): flow \(seen.pids.prefix(4)) → \(background ? "agent's own traffic, not told" : "window \(window.map(String.init) ?? "none")")")
-            if !background { send(profileID, window, dedupe, text, soleOnly: false) }
+            // A process under no agent's tab: only a sole agent is told.
+            if !background { send(profileID, window, dedupe, text, soleOnly: window == nil) }
             return
         }
         // One agent (or none known): no one else it could be — don't wait.

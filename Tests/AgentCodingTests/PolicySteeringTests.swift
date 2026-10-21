@@ -241,6 +241,40 @@ struct PolicySteeringTests {
         #expect(sink.notes.first?.window == 3)
     }
 
+    /// Finding (CWE-670): "Proxy CONNECT denials are announced to every
+    /// agent, not the one that connected". The cooperative proxy's CONNECT
+    /// check denies with layer `proxy` — connection-level — but only l4 / sni
+    /// / container waited for the flow; `proxy` was told to every agent.
+    @Test("A proxy CONNECT denial waits for its flow and goes to that agent's tab; unclaimed by any tab, only a sole agent")
+    func proxyConnectDeny() {
+        let sink = SteeringSink()
+        let s = steering(sink)
+        s.attributionWait = 1
+        s.noteAgent(profileID: Self.ws, pid: 500, window: 3)
+        s.noteAgent(profileID: Self.ws, pid: 600, window: 5)
+        let deny: [String: AnyJSON] = ["action": .string("deny"), "proto": .string("tcp"), "layer": .string("proxy"),
+                                       "host": .string("registry.npmjs.org"), "port": .int(443)]
+        s.observe(profileID: Self.ws, eventType: "egress.firewall", eventData: deny)
+        #expect(sink.notes.isEmpty)                              // waits, not broadcast
+        s.noteFlow(profileID: Self.ws, dst: "host:registry.npmjs.org", dport: 443, pids: [920, 610, 600])
+        #expect(sink.notes.count == 1)
+        #expect(sink.notes.first?.window == 5)
+
+        // A flow from a process under no agent's tab: only a sole agent is told.
+        var other = deny
+        other["host"] = .string("example.org")
+        s.noteFlow(profileID: Self.ws, dst: "host:example.org", dport: 443, pids: [930, 1])
+        s.observe(profileID: Self.ws, eventType: "egress.firewall", eventData: other)
+        #expect(sink.notes.count == 2)
+        #expect(sink.notes.last?.window == nil && sink.notes.last?.soleOnly == true)
+        // A request-level deny still tells every agent at once.
+        s.observe(profileID: Self.ws, eventType: "egress.firewall",
+                  eventData: ["action": .string("deny"), "layer": .string("l7"), "host": .string("api.github.com"),
+                              "port": .int(443), "method": .string("POST"), "path": .string("/repos")])
+        #expect(sink.notes.count == 3)
+        #expect(sink.notes.last?.window == nil && sink.notes.last?.soleOnly == false)
+    }
+
     @Test("The lineage's denied net.flow (root → leaf chain) attributes a denial waiting for it")
     func lineageFlow() {
         let sink = SteeringSink()
