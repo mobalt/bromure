@@ -159,6 +159,14 @@ struct TaskAnswerSendTests {
         // The link failed: not taken. A server from before the wait: `{ok: true}`, as ever.
         #expect(!RemoteHostController.answerAccepted(nil))
         #expect(RemoteHostController.answerAccepted(["ok": true]))
+        #expect(RemoteHostController.answerAccepted(["ok": true, "stage": "working"]))
+        // Finding (CWE-754): a 200 whose body was lost or cut off is `[:]` —
+        // the verdict is unknown, the draft stays. So does any reply without
+        // a boolean `ok`.
+        #expect(!RemoteHostController.answerAccepted([:]))
+        #expect(!RemoteHostController.answerAccepted(["stage": "working"]))
+        #expect(!RemoteHostController.answerAccepted(["ok": "true"]))
+        #expect(!RemoteHostController.answerAccepted(["ok": 1]))
     }
 
     /// Finding (CWE-362): "Refused task answers read the task store off the
