@@ -4896,9 +4896,20 @@ public final class ProfileStore {
             # guest folder on the path): the mount covering the notes must be
             # the read-only virtiofs export, and each note must be on it.
             share = "/mnt/bromure-meta"
+            def procfs(fd):
+                # The table is procfs itself, not a file bound over it.
+                if not sys.platform.startswith("linux"):
+                    return True
+                import ctypes
+                buf = ctypes.create_string_buffer(256)
+                if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
+                    return False
+                return int.from_bytes(buf.raw[:ctypes.sizeof(ctypes.c_long)], sys.byteorder) == 0x9FA0
             dev = None
             try:
                 with open("/proc/self/mountinfo") as h:
+                    if not procfs(h.fileno()):
+                        raise OSError("not procfs")
                     for line in h:
                         a, _, b = line.partition(" - ")
                         a, b = a.split(), b.split()
@@ -4921,20 +4932,26 @@ public final class ProfileStore {
                 sys.exit(0)
             notes = []
             for f in sorted(sys.argv[1:]):
+                # Checked and read through one descriptor, so nothing can swap
+                # the file in between.
                 try:
-                    st = os.lstat(f)
-                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
-                        continue
-                    fd = os.open(os.path.join(claims, os.path.basename(f)),
-                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    nfd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
                 except OSError:
                     continue
-                os.close(fd)
-                try:
-                    with open(f) as h:
+                with os.fdopen(nfd) as h:
+                    st = os.fstat(nfd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
+                        continue
+                    try:
+                        cfd = os.open(os.path.join(claims, os.path.basename(f)),
+                                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except OSError:
+                        continue
+                    os.close(cfd)
+                    try:
                         notes.append(h.read().strip())
-                except OSError:
-                    pass
+                    except (OSError, ValueError):
+                        pass
             # Forget the claims on notes the host has since dropped.
             try:
                 live = set(os.listdir(os.path.dirname(sys.argv[1])))
