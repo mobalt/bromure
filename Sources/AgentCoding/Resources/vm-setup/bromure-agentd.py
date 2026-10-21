@@ -311,9 +311,6 @@ _GIT_NETWORK_ENV_KEEP = frozenset((
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
     "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
     "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
-    # The forwarded agent an ssh origin authenticates with (the fetch's ssh
-    # reads no config, so this is its only key source).
-    "SSH_AUTH_SOCK",
 ))
 
 
@@ -4753,11 +4750,16 @@ def _resolve_run_base(cwd, base):
         # 128, quietly. It overrides that config and any GIT_SSH_COMMAND in
         # agentd's environment; `-F /dev/null` skips user and system ssh
         # config, so a workspace ProxyCommand / LocalCommand can't run;
-        # BatchMode never prompts.
+        # BatchMode never prompts. SSH_AUTH_SOCK, because the only key the
+        # VM has is the host's, through agentd's own bridge: agentd's
+        # environment never had it (it comes from proxy.env, which shells
+        # and `vm exec` source and this service doesn't), so an ssh origin
+        # had nothing to authenticate with and the base stayed on HEAD.
         p = _ws_run(_review_fetch_argv(cwd),
                     stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
                     git_protocols="https:ssh",
-                    env={"GIT_SSH_COMMAND": _FETCH_SSH_COMMAND})
+                    env={"GIT_SSH_COMMAND": _FETCH_SSH_COMMAND,
+                         "SSH_AUTH_SOCK": SSH_AGENT_UNIX_PATH})
         if getattr(p, "returncode", 0) != 0:
             log("automation", "fetch for %s exited %s" % (base, p.returncode))
     except Exception as e:

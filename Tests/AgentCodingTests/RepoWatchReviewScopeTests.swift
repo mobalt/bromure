@@ -502,4 +502,35 @@ struct ReviewRunAgentdTests {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
+
+    /// Finding (CWE-670): "SSH origin fetch has no agent socket, so
+    /// automation bases stay on HEAD". The VM's only key is the host's,
+    /// through agentd's ssh-agent bridge; SSH_AUTH_SOCK comes from proxy.env,
+    /// which agentd (a systemd service) never sources.
+    @Test("The base fetch carries the bridged agent socket, not whatever agentd's environment has",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sshFetchHasAgentSocket() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            g('remote', 'add', 'origin', 'ssh://git@127.0.0.1:1/nope.git')
+            seen = []
+            real = subprocess.run
+            def spy(args, **kw):
+                if 'fetch' not in args: return real(args, **kw)
+                seen.append(kw.get('env') or {})
+                return real(['true'])
+            m.subprocess.run = spy
+            os.environ.pop('SSH_AUTH_SOCK', None)          # agentd's own environment
+            m._resolve_run_base(repo, 'e' * 40)
+            print('SOCK', bool(seen) and seen[0].get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
+            os.environ['SSH_AUTH_SOCK'] = d + '/elsewhere.sock'
+            m._resolve_run_base(repo, 'e' * 40)
+            print('NOT_ENV', seen[-1].get('SSH_AUTH_SOCK') == m.SSH_AGENT_UNIX_PATH)
+            print('STILL_FIXED', seen[-1].get('GIT_SSH_COMMAND') == m._FETCH_SSH_COMMAND)
+            """, dir: dir)
+        for key in ["SOCK", "NOT_ENV", "STILL_FIXED"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
 }
