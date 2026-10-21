@@ -104,9 +104,44 @@ struct FirewallSentryCardTests {
         #expect(FirewallEditor.firewallSentryCard(p, floor: .off) == .canTurnOff)
         #expect(FirewallEditor.firewallSentryCard(p, floor: .bestEffort) == .canTurnOff)   // down to the floor
         #expect(FirewallEditor.firewallSentryCard(p, floor: .hard) == .required(.hard))
-        // Turning it off writes the floor; the card then says the floor is in force.
-        p.kernelSentry = .bestEffort
+        // Turning it off stores `.off`; the card then says the floor is in force.
+        p.kernelSentry = .off
         #expect(FirewallEditor.firewallSentryCard(p, floor: .bestEffort) == .required(.bestEffort))
+    }
+
+    /// Finding (CWE-670): "Firewall sentry card stays stale after the
+    /// organization floor changes, and Turn off can save a higher mode".
+    /// The card read the floor once in `body`, and Turn off stored whatever
+    /// the floor was at the click, so a minimum that rose to Required after
+    /// the card was drawn was saved into the workspace and outlived the
+    /// organization dropping it.
+    @Test("The pane's floor follows the organization's changes; Turn off stores no minimum")
+    @MainActor
+    func floorFollows() {
+        let center = NotificationCenter()
+        final class Org: @unchecked Sendable { var floor: KernelSentryMode = .off }
+        let org = Org()
+        let watch = KernelSentryFloorWatch(center: center, read: { org.floor })
+        var p = Profile(name: "f", tool: .claude, authMode: .token)
+        p.kernelSentry = .bestEffort
+        #expect(FirewallEditor.firewallSentryCard(p, floor: watch.floor) == .canTurnOff)
+
+        org.floor = .hard
+        center.post(name: OpenShellGovernance.changedNotification, object: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        #expect(watch.floor == .hard)
+        #expect(FirewallEditor.firewallSentryCard(p, floor: watch.floor) == .required(.hard))   // no Turn off now
+
+        // Turn off (and leaving the OpenShell engine) stores off, never the
+        // minimum of the moment: the organization's floor still applies,
+        // and once it drops the workspace is off again.
+        p.kernelSentry = .off
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .hard) == .required(.hard))
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .off) == .none)
+        let src = (try? String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/OpenShellPolicyEditor.swift"), encoding: .utf8)) ?? ""
+        #expect(!src.contains("draft.kernelSentry = OpenShellGovernance.shared.kernelSentryFloor"))
     }
 
     @Test("The discard dialog says what will actually apply")
