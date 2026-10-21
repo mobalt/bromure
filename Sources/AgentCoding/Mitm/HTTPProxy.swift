@@ -173,6 +173,26 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
+    /// The client port a connection may label its flow with: the one its
+    /// preamble names, only when that line was seen (and counted) at once.
+    static func claimedSport(parsed: Int?, peeked: Int?) -> Int? {
+        guard let parsed, parsed == peeked else { return nil }
+        return parsed
+    }
+
+    /// The preamble's client port, read without consuming the stream (the
+    /// request read that follows still sees it), waiting briefly for the
+    /// first bytes: agentd writes the line before any client byte.
+    static func peekPreambleSport(fd: Int32, waitMs: Int32 = 500) -> Int? {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, waitMs) > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 160)
+        let n = recv(fd, &buf, buf.count, MSG_PEEK)
+        guard n > 0 else { return nil }
+        var d = Data(buf.prefix(n))
+        return stripClientPreamble(&d)
+    }
+
     func run() async {
         defer { closeFD() }
         do {
@@ -190,13 +210,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
         //    request carries headers and possibly a body after it, and one
         //    non-ASCII byte there must not make the whole request "malformed".
+        // A preamble's claim is counted from its first line, before the
+        // request is read (see NetworkLineage.noteClaimant).
+        let peekedSport = Self.peekPreambleSport(fd: fd)
+        if let peekedSport {
+            NetworkLineage.shared.noteClaimant(profileID: profileID, sport: peekedSport)
+        }
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
         // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
         // client socket this request came from, which the kernel sentry
         // reports as a loopback flow. It ties the CONNECT target to the
         // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
-        let clientSport = Self.stripClientPreamble(&connectReq)
+        // The target is only ever recorded for a connection counted above:
+        // one whose line didn't arrive at once (agentd's always does) can't
+        // label a flow, so it can't dodge the claimant count either.
+        let clientSport = Self.claimedSport(parsed: Self.stripClientPreamble(&connectReq), peeked: peekedSport)
         guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
               let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
                                         encoding: .isoLatin1) else {
