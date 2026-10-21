@@ -160,4 +160,63 @@ struct HardSentryBootTests {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
+
+    /// Finding (CWE-362): "Hard-sentry settle and the boot start both launch
+    /// tmux and unlink its socket". The settle thread's start and agentd's
+    /// `start` landed together; start_server unlinks the socket first, so the
+    /// second deleted the first one's live server's socket.
+    @Test("Two starts at once launch one server; the second finds it running",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func oneStartAtATime() throws {
+        let out = try run("""
+            import types, importlib.machinery
+            os.uname = lambda: types.SimpleNamespace(sysname='Linux', nodename='t', release='6.8', version='', machine='aarch64')
+            ld = importlib.machinery.SourceFileLoader('sandboxd', 'bromure-sandboxd')
+            sd = importlib.util.module_from_spec(importlib.util.spec_from_loader('sandboxd', ld)); ld.exec_module(sd)
+            sd.log = lambda *a: None
+            state = {'pid': None, 'starts': 0, 'overlap': False, 'inside': 0}
+            lock = threading.Lock()
+            def fake_start(plan, tgid):
+                with lock:
+                    state['inside'] += 1; state['starts'] += 1
+                    if state['inside'] > 1: state['overlap'] = True
+                time.sleep(0.3)                      # unlink, fork, wait for the socket
+                with lock:
+                    state['pid'] = 4242; state['inside'] -= 1
+                return None, {'ok': True}
+            sd.start_server = fake_start
+            sd.server_pid = lambda: state['pid']
+            sd.write_status = lambda s: None
+            sup = sd.Supervisor(types.SimpleNamespace(uid=1000, gid=1000, owner_uid=1000, owner_gid=1000, sandbox_cgroup=None),
+                                {'warnings': []}, None, sd.SentryHold(False))
+            sup.publish = lambda *a, **k: None
+            results = []
+            ts = [threading.Thread(target=lambda r=r: results.append(sup.start(r)))
+                  for r in ('initial, after the sentry', 'requested by pid 1')]
+            for t in ts: t.start()
+            for t in ts: t.join()
+            print('ONE_START', state['starts'] == 1 and not state['overlap'])
+            print('BOTH_OK', len(results) == 2 and all(ok for ok, _ in results))
+            """)
+        for key in ["ONE_START", "BOTH_OK"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    @Test("agentd asks again when its start loses to one in flight, and gets the server",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func ensureServerRetries() throws {
+        let out = try run("""
+            open(m.OPENSHELL_SPEC, 'w').write('{}')
+            m._SANDBOX = {'tmux_socket': '/run/bromure-tmux/s'}
+            replies = [{'ok': False, 'reason': 'busy'}, {'ok': True}]
+            asked = []
+            def ctl(op, **kw):
+                asked.append(op); return replies.pop(0) if replies else {'ok': True}
+            m._sandbox_ctl = ctl
+            m._load_sandbox_status = lambda: m._SANDBOX
+            sessions = iter([False, False, False, True])
+            m._has_session = lambda: next(sessions, True)
+            print('RETRIED', m.ensure_sandbox_server('session startup', timeout=5.0) and asked == ['start', 'start'])
+            """)
+        #expect(out.contains("RETRIED True"), Comment(rawValue: out))
+    }
 }

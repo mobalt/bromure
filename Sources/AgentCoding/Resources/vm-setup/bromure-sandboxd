@@ -1931,6 +1931,13 @@ class Supervisor(object):
         self.sentry_hold = sentry_hold or SentryHold(False)
         self.agentd_pid = agentd_pid
         self.starts = 0            # supervisor-performed starts, total
+        # One start at a time: the hard-sentry settle thread and agentd's
+        # `start` (create_session) arrive together, and start_server unlinks
+        # the socket first — the second would delete the first's live server's
+        # socket (Finding CWE-362, "Hard-sentry settle and the boot start both
+        # launch tmux and unlink its socket"). Held from the "already
+        # running?" check through the publish, so the second caller finds it.
+        self._start_lock = threading.Lock()
         self.start_times = []
         self.last_start = 0.0
         # A session exists only once agentd says so. The supervisor starting a
@@ -2100,6 +2107,10 @@ class Supervisor(object):
         return True, None
 
     def start(self, reason):
+        with self._start_lock:
+            return self._start_locked(reason)
+
+    def _start_locked(self, reason):
         # "Is one already running" comes FIRST. Asking for a server that exists
         # is not a start and must never be refused by the rate limiter -- an
         # earlier version checked the limiter first and turned a no-op request

@@ -821,19 +821,29 @@ def ensure_sandbox_server(reason="", timeout=20.0):
         return False
     if _has_session():
         return True
-    reply = _sandbox_ctl("start")
-    if reply is None or not reply.get("ok"):
-        log("sandbox", "supervisor would not start a server%s: %s"
-            % (" (%s)" % reason if reason else "",
-               (reply or {}).get("reason", "no reply")))
-        return False
-    _load_sandbox_status()
     deadline = time.time() + timeout
+    # Asked again while the deadline lasts: a start that loses to another one
+    # in flight (the hard-sentry settle starting the server at the same
+    # moment) is answered once that one is done — a one-shot ask returned
+    # False, and create_session then never sent session_ready.
+    while True:
+        reply = _sandbox_ctl("start")
+        if reply is not None and reply.get("ok"):
+            break
+        if _has_session():
+            return True
+        if time.time() >= deadline:
+            log("sandbox", "supervisor would not start a server%s: %s"
+                % (" (%s)" % reason if reason else "",
+                   (reply or {}).get("reason", "no reply")))
+            return False
+        time.sleep(1.0)
+    _load_sandbox_status()
     while time.time() < deadline:
         if _has_session():
             return True
         time.sleep(0.2)
-    return False
+    return _has_session()
 # New shells (the initial window + plain new-tab) open here. Without an
 # explicit -c, tmux windows inherit the server's start directory, which
 # under systemd is "/" — so pin it to the user's home.
