@@ -1827,12 +1827,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// An OpenShell `process` section needs the strict sandbox: its seccomp
     /// filters and no_new_privs would otherwise be skipped (they'd break the
     /// sudo a non-strict workspace grants), which silently fails open.
-    /// `containerTrafficDirect` as applied: never when the OpenShell policy
-    /// has request-level (L7) rules, which only the MiTM can enforce: exempting
-    /// containers would silently weaken the policy for them.
+    /// `containerTrafficDirect` as applied: only under the OpenShell engine,
+    /// which is where its switch is (the Bromure Firewall pane has none, so a
+    /// flag left set there must not keep routing containers around the MiTM
+    /// unseen), and never when the OpenShell policy has request-level (L7)
+    /// rules, which only the MiTM can enforce: exempting containers would
+    /// silently weaken the policy for them.
     public var effectiveContainerTrafficDirect: Bool {
         #if canImport(SandboxEngine)
-        guard containerTrafficDirect, effectiveKernelSentry != .off else { return false }
+        guard containerTrafficDirect, usesOpenShellPolicy, effectiveKernelSentry != .off else { return false }
         return resolvedEgressPolicy.inspectedPorts.isEmpty
         #else
         return false
