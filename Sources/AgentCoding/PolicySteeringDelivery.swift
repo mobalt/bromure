@@ -1,13 +1,25 @@
 import Foundation
 
 /// Where `PolicySteering`'s notes go. Claude reads them mid-turn: its
-/// PostToolUse / UserPromptSubmit hook (`agent-status.sh policy`) claims the
-/// files dropped in `~/.bromure/policy-notes/` and hands their text to the
-/// model as context, right after the tool call that hit the block. The other
-/// agents' hooks only report status, so their note is typed into the tab as
-/// one line once the agent's turn is over.
+/// PostToolUse / UserPromptSubmit / Stop hook (`agent-status.sh policy`)
+/// claims the files in `policy-notes/` of the read-only meta share
+/// (`/mnt/bromure-meta`) and hands their text to the model, right after the
+/// tool call that hit the block. The other agents' hooks only report status,
+/// so their note is typed into the tab as one line once the agent's turn is
+/// over.
+///
+/// The notes live where only the host can write: a Stop note becomes the
+/// instruction that keeps the turn going, and any guest process (every tab is
+/// the same `ubuntu` user, and it has sudo outside the strict sandbox) could
+/// plant one in a guest directory. (Finding CWE-345, "Any guest process can
+/// plant a policy note that blocks Stop".)
 extension ACAppDelegate {
-    static let policyNotesDir = "/home/ubuntu/.bromure/policy-notes"
+    /// The notes' folder in the meta share (host side) and as the guest sees it.
+    nonisolated static let policyNotesShareDir = "policy-notes"
+    nonisolated static let guestPolicyNotesDir = "/mnt/bromure-meta/policy-notes"
+    /// A note nobody's hook took within this long is dropped on the next write
+    /// (a closed tab's index gets reused).
+    nonisolated static let policyNoteLifetime: TimeInterval = 3600
 
     func wirePolicySteering(_ engine: MitmEngine) {
         let steering = PolicySteering.shared
@@ -70,22 +82,43 @@ extension ACAppDelegate {
     }
 
     /// One file per note, moved into place whole, so the hook never reads
-    /// half of one; owned by the agent's user so it can claim them.
+    /// half of one.
     @MainActor
     private func writePolicyNote(profileID: UUID, window: Int, text: String) async -> Bool {
-        let d = Self.policyNotesDir
-        let cmd = """
-        d=\(d); mkdir -p "$d" && chown ubuntu:ubuntu "$d" 2>/dev/null; chmod 700 "$d"; \
-        t="$d/.w\(window).$$"; printf '%s\\n' \(CodingTaskEngine.shellQuote(text)) > "$t" \
-        && chown ubuntu:ubuntu "$t" 2>/dev/null; mv -f "$t" "$d/w\(window)-$(date +%s%N).note"
-        """
+        guard let meta = runningSessions[profileID]?.sandbox.sessionDisk?.metadataDirectory else {
+            PolicySteering.log("note for w\(window) not written: no meta share")
+            return false
+        }
         do {
-            _ = try await guestExec(profileID: profileID, command: cmd, timeout: 10)   // throws on failure
+            try Self.dropPolicyNote(in: meta, window: window, text: text)
             return true
         } catch {
             PolicySteering.log("note for w\(window) not written: \(error)")
             return false
         }
+    }
+
+    /// Write `text` as window `window`'s next note under `meta`'s notes
+    /// folder, and drop the notes older than `policyNoteLifetime`.
+    @discardableResult
+    nonisolated static func dropPolicyNote(in meta: URL, window: Int, text: String, now: Date = Date()) throws -> URL {
+        let fm = FileManager.default
+        let dir = meta.appendingPathComponent(policyNotesShareDir, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".note") {
+            let f = dir.appendingPathComponent(name)
+            if let at = (try? fm.attributesOfItem(atPath: f.path))?[.modificationDate] as? Date,
+               now.timeIntervalSince(at) > policyNoteLifetime {
+                try? fm.removeItem(at: f)
+            }
+        }
+        let stamp = UInt64(now.timeIntervalSince1970 * 1_000_000_000)
+        let name = "w\(window)-\(stamp)-\(UUID().uuidString.prefix(8).lowercased()).note"
+        let tmp = dir.appendingPathComponent(".\(name).tmp")
+        try Data((text + "\n").utf8).write(to: tmp)
+        let dest = dir.appendingPathComponent(name)
+        try fm.moveItem(at: tmp, to: dest)
+        return dest
     }
 
     /// Notes owed to non-Claude tabs, typed once the tab's agent is idle.

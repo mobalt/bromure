@@ -4873,33 +4873,52 @@ public final class ProfileStore {
             # `policy` (Claude's PostToolUse / UserPromptSubmit / Stop): hand the model
             # the notes the host left for this tab when the workspace's policy
             # blocked something it did (PolicySteering), as the hook's
-            # additionalContext. Each note is claimed by rename, so two hooks
-            # firing at once never hand over the same one.
+            # additionalContext. The notes are in the host's read-only meta
+            # share, never a guest folder: a Stop note keeps the turn going, so
+            # one any guest process could write would be a prompt nobody typed.
+            # Each is claimed by an exclusive marker, so two hooks firing at
+            # once never hand over the same one.
             if [ "${1:-}" = policy ]; then
               [ -n "${TMUX_PANE:-}" ] || exit 0
               idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
               [ -n "$idx" ] || exit 0
-              set -- "$HOME"/.bromure/policy-notes/w"$idx"-*.note
+              set -- /mnt/bromure-meta/policy-notes/w"$idx"-*.note
               [ -e "$1" ] || exit 0
-              exec python3 -c '
-            import json, os, sys
+              exec python3 -I -c '
+            import json, os, stat, sys
             event = "PostToolUse"
             try:
                 event = json.load(sys.stdin).get("hook_event_name") or event
             except Exception:
                 pass
+            claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
+            try:
+                os.makedirs(claims, mode=0o700, exist_ok=True)
+            except OSError:
+                sys.exit(0)
             notes = []
             for f in sorted(sys.argv[1:]):
-                mine = "%s.%d" % (f, os.getpid())
                 try:
-                    os.rename(f, mine)
+                    if not stat.S_ISREG(os.lstat(f).st_mode):
+                        continue
+                    fd = os.open(os.path.join(claims, os.path.basename(f)),
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 except OSError:
                     continue
+                os.close(fd)
                 try:
-                    with open(mine) as h:
+                    with open(f) as h:
                         notes.append(h.read().strip())
-                finally:
-                    os.unlink(mine)
+                except OSError:
+                    pass
+            # Forget the claims on notes the host has since dropped.
+            try:
+                live = set(os.listdir(os.path.dirname(sys.argv[1])))
+                for n in os.listdir(claims):
+                    if n not in live:
+                        os.unlink(os.path.join(claims, n))
+            except OSError:
+                pass
             if notes and event == "Stop":
                 # The turn ended on the blocked action, before the note was
                 # written: keep the turn going with the note, rather than
