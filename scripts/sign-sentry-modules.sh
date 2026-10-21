@@ -14,6 +14,11 @@ KEY_FILE="${2:?usage: sign-sentry-modules.sh <ci-build out dir> <private key fil
 # Must match ImageCatalogStore.pinnedPublicKeyBase64 / SUPublicEDKey.
 SENTRY_CATALOG_PUBLIC_KEY="${SENTRY_CATALOG_PUBLIC_KEY:-G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=}"
 
+# The out dir comes from the build container (`docker cp` keeps symlinks):
+# a planted link would be signed/published as a module, or written through.
+LINK=$(find "$OUT" -type l -print -quit)
+[ -z "$LINK" ] || { echo "ERROR: $LINK is a symlink — the out dir must hold real files only"; exit 1; }
+
 HASH=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).sourceHash)' "$OUT/manifest.json")
 PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
