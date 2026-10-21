@@ -19,6 +19,69 @@ struct BootBudgetTests {
         #expect(!b.remains)
     }
 
+    /// Finding (CWE-670): "Hard-sentry hold fails unattended boots at 180s
+    /// while the module is still loading".
+    @Test("past its seconds, a budget holds while the guest still loads its sentry, up to the cap")
+    func extendsWhileLoading() {
+        let c = Clock()
+        final class Flag: @unchecked Sendable { var on = true }
+        let loading = Flag()
+        let b = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                           extendWhile: { loading.on }, extendUpTo: 180 + 1905)
+        c.now += 600
+        #expect(b.remains)                       // past 180 s, the sentry is still loading
+        loading.on = false
+        // Settled: the workload server starts just after; the probes get a grace to see it.
+        #expect(b.remains)
+        c.now += BootBudget.settleGrace - 1
+        #expect(b.remains)
+        c.now += 2
+        #expect(!b.remains)
+        // Loading seen just before the deadline, settled as it passes: the grace still runs.
+        let edge = Flag()
+        let atEdge = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                                extendWhile: { edge.on }, extendUpTo: 180 + 1905)
+        c.now += 178
+        #expect(atEdge.remains)
+        edge.on = false
+        c.now += 5
+        #expect(atEdge.remains)
+        // A budget that never extended has no grace past its seconds.
+        let plain = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                               extendWhile: { false }, extendUpTo: 180 + 1905)
+        c.now += 181
+        #expect(!plain.remains)
+        let capped = BootBudget(seconds: 180, reason: "test", holdAwake: false, clock: { c.now },
+                                extendWhile: { true }, extendUpTo: 180 + 1905)
+        c.now += 180 + 1905
+        #expect(!capped.remains)                 // never past the sentry's worst case
+        // Only `pending` / `waiting` count as loading.
+        let pid = UUID()
+        defer { GuestSandboxStatusStore.shared.reset(profileID: pid) }
+        #expect(!BootBudget.sentryLoading(pid))
+        GuestSandboxStatusStore.shared.update(profileID: pid, report: ["event": "sandbox_status", "filesystem": "pending",
+                                                                       "sentry": "waiting"])
+        #expect(BootBudget.sentryLoading(pid))
+        GuestSandboxStatusStore.shared.update(profileID: pid, report: ["event": "sandbox_status", "filesystem": "pending",
+                                                                       "sentry": "running"])
+        #expect(!BootBudget.sentryLoading(pid))
+    }
+
+    @Test("the session engine's boot wait keeps a grace after the sentry was last seen loading")
+    @MainActor func sessionBootGrace() {
+        let t0 = Date(), deadline = t0.addingTimeInterval(180), cap = t0.addingTimeInterval(180 + 1905)
+        let go = { (at: TimeInterval, last: TimeInterval?) in
+            AgentSessionEngine.bootGoesOn(now: t0.addingTimeInterval(at), deadline: deadline, sentryCap: cap,
+                                          lastLoading: last.map { t0.addingTimeInterval($0) })
+        }
+        #expect(go(100, nil))                    // within the deadline
+        #expect(!go(200, nil))                   // past it, never loading
+        #expect(go(292, 291))                    // loading a moment ago
+        #expect(go(294 + 80, 292))               // settled at ~292: probes go on through the grace
+        #expect(!go(292 + 91, 292))
+        #expect(!go(180 + 1905, 180 + 1904))     // never past the cap
+    }
+
     @Test("the default clock is the one that stops while the Mac sleeps")
     func defaultClock() {
         let b = BootBudget(seconds: 60, reason: "test")

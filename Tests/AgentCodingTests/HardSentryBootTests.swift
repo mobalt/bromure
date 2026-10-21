@@ -219,4 +219,54 @@ struct HardSentryBootTests {
             """)
         #expect(out.contains("RETRIED True"), Comment(rawValue: out))
     }
+
+    /// Finding (CWE-670): "Hard-sentry hold fails unattended boots at 180s
+    /// while the module is still loading". The supervisor published its
+    /// socket paths during the hold, so agentd's gate took the VM for ready
+    /// and every exec was refused (126) by the supervisor; host probes failed
+    /// fast until the 180 s boot wait gave up.
+    @Test("During a hold the gate isn't ready; an attach waits it out, an exec is told why",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func gateWaitsForHold() throws {
+        let out = try run("""
+            m.SANDBOX_STATUS = d + '/status.json'
+            open(m.OPENSHELL_SPEC, 'w').write('{}')
+            m.strict_sandbox_requested = lambda: False
+            def publish(**kw): json.dump(dict({'tmux_socket': '/run/bromure-tmux/s', 'control_socket': '/run/c'}, **kw),
+                                         open(m.SANDBOX_STATUS, 'w'))
+            publish(sentry_hold=True)
+            m._SANDBOX = {}; m._SANDBOX_READY.clear()
+            ok, why = m.sandbox_gate(timeout=0.3)
+            print('NOT_READY', not ok and 'kernel sentry' in (why or ''))
+            # An attach waits through the hold, and gets in once it's over.
+            threading.Timer(0.6, lambda: publish(sentry_hold=False)).start()
+            t = time.time()
+            ok, why = m.sandbox_gate(timeout=0.3, through_sentry_hold=True)
+            print('ATTACH_WAITS', ok and time.time() - t >= 0.5)
+            # Without a hold, the published server is ready at once (as before).
+            m._SANDBOX_READY.clear(); m._SANDBOX = {}
+            print('NO_HOLD', m.sandbox_gate(timeout=0.3)[0])
+            """)
+        for key in ["NOT_READY", "ATTACH_WAITS", "NO_HOLD"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    @Test("The supervisor's hold says so in its status, and clears it with the started server's publish")
+    func supervisorSaysHold() throws {
+        let src = try String(contentsOf: Self.vmSetup.appendingPathComponent("bromure-sandboxd"), encoding: .utf8)
+        let hold = try #require(src.range(of: "if supervisor.sentry_hold.held():"))
+        let block = String(src[hold.lowerBound...].prefix(1200))
+        let set = try #require(block.range(of: "supervisor.status[\"sentry_hold\"] = True"))
+        let publish = try #require(block.range(of: "supervisor.publish()"))
+        #expect(set.lowerBound < publish.lowerBound)
+        // Not cleared before the server exists (a republish in between would
+        // announce it): in start(), after start_server, in the same publish.
+        #expect(!block.contains("supervisor.status[\"sentry_hold\"] = False"))
+        // (start() serializes; the work is in _start_locked.)
+        let start = try #require(src.range(of: "    def _start_locked(self, reason):"))
+        let body = String(src[start.lowerBound...].prefix(2000))
+        let server = try #require(body.range(of: "start_server(self.plan"))
+        let clear = try #require(body.range(of: "self.status[\"sentry_hold\"] = False"))
+        let pub = try #require(body.range(of: "self.publish(outcome, report)"))
+        #expect(server.lowerBound < clear.lowerBound && clear.lowerBound < pub.lowerBound)
+    }
 }
