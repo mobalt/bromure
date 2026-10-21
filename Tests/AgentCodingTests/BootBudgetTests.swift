@@ -58,6 +58,21 @@ struct BootBudgetTests {
         #expect(!BootBudget.sentryLoading(pid))
     }
 
+    @Test("the session engine's boot wait keeps a grace after the sentry was last seen loading")
+    @MainActor func sessionBootGrace() {
+        let t0 = Date(), deadline = t0.addingTimeInterval(180), cap = t0.addingTimeInterval(180 + 1905)
+        let go = { (at: TimeInterval, last: TimeInterval?) in
+            AgentSessionEngine.bootGoesOn(now: t0.addingTimeInterval(at), deadline: deadline, sentryCap: cap,
+                                          lastLoading: last.map { t0.addingTimeInterval($0) })
+        }
+        #expect(go(100, nil))                    // within the deadline
+        #expect(!go(200, nil))                   // past it, never loading
+        #expect(go(292, 291))                    // loading a moment ago
+        #expect(go(294 + 80, 292))               // settled at ~292: probes go on through the grace
+        #expect(!go(292 + 91, 292))
+        #expect(!go(180 + 1905, 180 + 1904))     // never past the cap
+    }
+
     @Test("the default clock is the one that stops while the Mac sleeps")
     func defaultClock() {
         let b = BootBudget(seconds: 60, reason: "test")
