@@ -4875,8 +4875,11 @@ public final class ProfileStore {
             # `policy` (Claude's PostToolUse / UserPromptSubmit / Stop): hand the model
             # the notes the host left for this tab when the workspace's policy
             # blocked something it did (PolicySteering), as the hook's
-            # additionalContext. Each note is claimed by rename, so two hooks
-            # firing at once never hand over the same one.
+            # additionalContext. The notes are in the host's read-only meta
+            # share, never a guest folder: a Stop note keeps the turn going, so
+            # one any guest process could write would be a prompt nobody typed.
+            # Each is claimed by an exclusive marker, so two hooks firing at
+            # once never hand over the same one.
             # `stop` (Claude's one Stop hook): a turn that ends with notes
             # owed is kept going with them (`decision: block`), and then it has
             # NOT ended: reporting `done` too would let the host type a held
@@ -4903,28 +4906,85 @@ public final class ProfileStore {
               [ -n "${TMUX_PANE:-}" ] || exit 0
               idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
               [ -n "$idx" ] || exit 0
-              set -- "$HOME"/.bromure/policy-notes/w"$idx"-*.note
+              set -- /mnt/bromure-meta/policy-notes/w"$idx"-*.note
               [ -e "$1" ] || exit 0
-              printf '%s' "$pol_json" | python3 -c '
-            import json, os, sys
+              printf '%s' "$pol_json" | python3 -I -c '
+            import json, os, stat, sys
             event = "PostToolUse"
             try:
                 e = json.load(sys.stdin)
                 event = e.get("hook_event_name") or e.get("hookEventName") or event
             except Exception:
                 pass
+            # The host share itself, not something mounted over it (outside the
+            # strict sandbox the guest has sudo, and a bind mount would stack a
+            # guest folder on the path): the mount covering the notes must be
+            # the read-only virtiofs export, and each note must be on it.
+            share = "/mnt/bromure-meta"
+            def procfs(fd):
+                # The table is procfs itself, not a file bound over it.
+                if not sys.platform.startswith("linux"):
+                    return True
+                import ctypes
+                buf = ctypes.create_string_buffer(256)
+                if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
+                    return False
+                return int.from_bytes(buf.raw[:ctypes.sizeof(ctypes.c_long)], sys.byteorder) == 0x9FA0
+            dev = None
+            try:
+                with open("/proc/self/mountinfo") as h:
+                    if not procfs(h.fileno()):
+                        raise OSError("not procfs")
+                    for line in h:
+                        a, _, b = line.partition(" - ")
+                        a, b = a.split(), b.split()
+                        mp = a[4].replace("\\040", " ")
+                        if mp == share or share.startswith(mp.rstrip("/") + "/"):
+                            ok = (mp == share and a[3] == "/" and "ro" in a[5].split(",")
+                                  and b[:2] == ["virtiofs", "bromure-meta"])
+                            major, minor = a[2].split(":")
+                            dev = os.makedev(int(major), int(minor)) if ok else None
+                        elif mp.startswith(share + "/"):
+                            dev = None
+            except (OSError, ValueError, IndexError):
+                dev = None
+            if dev is None:
+                sys.exit(0)
+            claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
+            try:
+                os.makedirs(claims, mode=0o700, exist_ok=True)
+            except OSError:
+                sys.exit(0)
             notes = []
             for f in sorted(sys.argv[1:]):
-                mine = "%s.%d" % (f, os.getpid())
+                # Checked and read through one descriptor, so nothing can swap
+                # the file in between.
                 try:
-                    os.rename(f, mine)
+                    nfd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
                 except OSError:
                     continue
-                try:
-                    with open(mine) as h:
+                with os.fdopen(nfd) as h:
+                    st = os.fstat(nfd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
+                        continue
+                    try:
+                        cfd = os.open(os.path.join(claims, os.path.basename(f)),
+                                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except OSError:
+                        continue
+                    os.close(cfd)
+                    try:
                         notes.append(h.read().strip())
-                finally:
-                    os.unlink(mine)
+                    except (OSError, ValueError):
+                        pass
+            # Forget the claims on notes the host has since dropped.
+            try:
+                live = set(os.listdir(os.path.dirname(sys.argv[1])))
+                for n in os.listdir(claims):
+                    if n not in live:
+                        os.unlink(os.path.join(claims, n))
+            except OSError:
+                pass
             if notes and event == "Stop":
                 # The turn ended on the blocked action, before the note was
                 # written: keep the turn going with the note, rather than
