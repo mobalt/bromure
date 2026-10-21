@@ -47,3 +47,32 @@ struct OpenShellGovernanceTests {
         #expect(g.effectiveAdvisorMode(.off) == .off)
     }
 }
+
+/// Finding (CWE-670): "Turning the sentry off on the firewall ignores the
+/// organization minimum". Turn off / switching to the firewall / Discard
+/// wrote `.off`, the card then hid (it read the stored mode), while the
+/// managed floor kept the sentry on — the pane said it was off.
+@Suite("Firewall pane: the kernel sentry card follows the mode that applies")
+struct FirewallSentryCardTests {
+    @Test("With an organization minimum the card stays, without Turn off; without one it offers it")
+    func card() {
+        var p = Profile(name: "f", tool: .claude, authMode: .token)
+        p.kernelSentry = .off
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .off) == .none)
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .bestEffort) == .required(.bestEffort))
+        p.kernelSentry = .hard
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .off) == .canTurnOff)
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .bestEffort) == .canTurnOff)   // down to the floor
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .hard) == .required(.hard))
+        // Turning it off writes the floor; the card then says the floor is in force.
+        p.kernelSentry = .bestEffort
+        #expect(FirewallEditor.firewallSentryCard(p, floor: .bestEffort) == .required(.bestEffort))
+    }
+
+    @Test("The discard dialog says what will actually apply")
+    func discardMessage() {
+        #expect(FirewallEditor.discardMessage(floor: .off).contains("kernel sentry turned off"))
+        let kept = FirewallEditor.discardMessage(floor: .hard)
+        #expect(!kept.contains("turned off") && kept.contains("stays on") && kept.contains("Required"))
+    }
+}

@@ -1811,8 +1811,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// the organization's minimum (bromure.io managed policy).
     public var effectiveKernelSentry: KernelSentryMode {
         #if os(macOS)
-        if let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)),
-           floor.rank > kernelSentry.rank { return floor }
+        let floor = OpenShellGovernance.shared.kernelSentryFloor
+        if floor.rank > kernelSentry.rank { return floor }
         #endif
         return kernelSentry
     }
@@ -6695,6 +6695,15 @@ public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
         case .off: return 0
         case .bestEffort: return 1
         case .hard: return 2
+        }
+    }
+
+    /// As the editor names it.
+    var label: String {
+        switch self {
+        case .off: return NSLocalizedString("Off", comment: "kernel sentry mode")
+        case .bestEffort: return NSLocalizedString("Best effort", comment: "kernel sentry mode")
+        case .hard: return NSLocalizedString("Required", comment: "kernel sentry mode")
         }
     }
 }
