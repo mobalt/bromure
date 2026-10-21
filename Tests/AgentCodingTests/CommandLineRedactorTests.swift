@@ -36,6 +36,8 @@ struct CommandLineRedactorTests {
     func notSecrets() {
         let r = CommandLineRedactor.redact
         for kept in ["rsync -u host:/var/data dest", "rsync -u backup:~/data .",
+                     "rsync -u host:src/file dest", "rsync -u user@host::module/file dest",
+                     "rsync -u 'host:src/file' dest", "curl -s https://x; rsync -u host:src dest",
                      "PWD=/Users/someone/proj make -j", "OLDPWD=/tmp cd -",
                      "curl https://api.example/v1/tokens:list", "grep -r passwordless docs/",
                      "git push -u origin HEAD:main"] {
@@ -47,6 +49,11 @@ struct CommandLineRedactorTests {
         #expect(r(#"curl -d '{"token": "x"}' 'https://x/cb?access_token=zzz&id=1'"#)
                 == #"curl -d '{"token": "***"}' 'https://x/cb?access_token=***&id=1'"#)
         #expect(r("curl -u alice:hunter2 https://x") == "curl -u alice:*** https://x")
+        // A curl password is masked whatever it starts with, wrapped or not.
+        #expect(r("curl -u alice:/s3cret https://x") == "curl -u alice:*** https://x")
+        #expect(r("/usr/bin/curl -U bob:~hunter -x p https://x") == "/usr/bin/curl -U bob:*** -x p https://x")
+        #expect(r("bash -c 'curl -sS -u alice:/BAiM0RVZnc= https://x'") == "bash -c 'curl -sS -u alice:*** https://x'")
+        #expect(r("wget --user=bob:pw https://x") == "wget --user=bob:*** https://x")
     }
 
     @Test("a net.flow's argv per process and its tool command are scrubbed; other fields aren't touched")

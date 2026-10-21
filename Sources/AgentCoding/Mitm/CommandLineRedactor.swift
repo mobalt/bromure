@@ -27,10 +27,22 @@ enum CommandLineRedactor {
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
     /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
-    /// A password never starts with `/` or `~`: `rsync -u host:/var/data`
-    /// is a remote path (Finding CWE-670, "Command redaction erases rsync
-    /// paths, PWD, and token: URLs that are not secrets").
-    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):(?![/~])[^\s'"]+"#)
+    /// Short `-u` / `-U` mean user:password only to curl (`rsync -u` is
+    /// "update", its `host:path` a remote path; Finding CWE-670, "Command
+    /// redaction erases rsync paths, PWD, and token: URLs that are not
+    /// secrets"): `userFlagIsCurl` checks the command. The long forms are
+    /// always userinfo.
+    private static let userFlag = re(#"((?:^|\s)(-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// The command a flag at `location` belongs to is curl: a `curl` word
+    /// since the start of its shell segment (`;`, `&`, `|`, newline, `(`,
+    /// a backtick), so `bash -c 'curl -u a:b'` counts and `rsync -u` doesn't.
+    private static func userFlagIsCurl(_ ns: NSString, before location: Int) -> Bool {
+        let head = ns.substring(to: location)
+        let segment = head.split(omittingEmptySubsequences: false,
+                                 whereSeparator: { ";&|\n(`".contains($0) }).last ?? Substring(head)
+        return segment.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "'" || $0 == "\"" })
+            .contains { ($0.split(separator: "/").last ?? $0) == "curl" }
+    }
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
@@ -57,7 +69,18 @@ enum CommandLineRedactor {
             last = m.range.location + m.range.length
         }
         if last > 0 { out = labelled + ns.substring(from: last) }
-        for (rx, template) in [(urlUserinfo, "$1:\(mask)@"), (userFlag, "$1:\(mask)"),
+        // user:password after -u/--user — the short flag only for curl.
+        let uns = out as NSString
+        var userMasked = ""
+        var at = 0
+        for m in userFlag.matches(in: out, range: NSRange(location: 0, length: uns.length)) {
+            let flag = uns.substring(with: m.range(at: 2))
+            guard flag.hasPrefix("--") || userFlagIsCurl(uns, before: m.range.location) else { continue }
+            userMasked += uns.substring(with: NSRange(location: at, length: m.range(at: 1).upperBound - at)) + ":" + mask
+            at = m.range.upperBound
+        }
+        if at > 0 { out = userMasked + uns.substring(from: at) }
+        for (rx, template) in [(urlUserinfo, "$1:\(mask)@"),
                                (header, "$1$2$3\(mask)"), (secretFlag, "$1$2\(mask)"),
                                (keyValue, "$1$2\(mask)")] {
             out = rx.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length),
