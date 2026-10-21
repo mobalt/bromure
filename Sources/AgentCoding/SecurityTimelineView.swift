@@ -17,7 +17,9 @@ struct SecurityPosture: Identifiable {
     let guardrails: Bool
     let promptInjection: Bool
     var pii: Bool = false
-    /// The OpenShell engine (policy, guest sandbox, kernel sentry).
+    /// The guest is confined: its OpenShell policy has a filesystem_policy
+    /// or process section, or the guest reported its filesystem sandbox
+    /// enforced (`confinesGuest(_:)`).
     var sandbox: Bool = false
 }
 
@@ -39,7 +41,19 @@ extension SecurityPosture {
                   guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
                   promptInjection: p.promptInjection.isActive,
                   pii: p.pii.isActive,
-                  sandbox: p.usesOpenShellPolicy)
+                  sandbox: Self.confinesGuest(p))
+    }
+
+    /// Finding (CWE-451): "Security Overview marks Sandbox on for a
+    /// network-only OpenShell policy" — the column was lit by any OpenShell
+    /// document, which is the Firewall's default deny, not confinement.
+    static func confinesGuest(_ p: Profile,
+                              reported: GuestSandboxStatusStore.Status? = nil) -> Bool {
+        if p.usesOpenShellPolicy,
+           OpenShellSandboxSpec(policyYAML: p.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off").confinesGuest {
+            return true
+        }
+        return (reported ?? GuestSandboxStatusStore.shared.status(for: p.id))?.filesystem == "enforced"
     }
 }
 

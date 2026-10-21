@@ -246,7 +246,7 @@ struct OpenShellPolicyEditor: View {
         let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
         return GuestSandboxStatusStore.shared.status(for: draft.id)?
             .needsAttention(sentryExpected: draft.effectiveKernelSentry != .off,
-                            filesystemExpected: sections.filesystemPolicy != nil || sections.process != nil) ?? false
+                            filesystemExpected: sections.confinesGuest) ?? false
     }
 
     /// The organization boundary: where it comes from, and whether this
@@ -325,7 +325,7 @@ struct OpenShellPolicyEditor: View {
     /// VM, and the kernel sentry that watches it from kernel space.
     @ViewBuilder private var guestSandboxSection: some View {
         let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
-        let confined = sections.filesystemPolicy != nil || sections.process != nil
+        let confined = sections.confinesGuest
         VStack(alignment: .leading, spacing: 6) {
             PolicyRow(title: "Filesystem & process",
                       caption: confined ? "The agent can only reach the paths the policy lists."
