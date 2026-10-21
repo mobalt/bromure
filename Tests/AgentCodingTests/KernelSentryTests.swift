@@ -501,10 +501,43 @@ struct GuestSandboxAttentionTests {
         let noSentry = try status(["filesystem": "enforced", "sentry": "unavailable"])
         #expect(!noSentry.needsAttention(sentryExpected: false))
         #expect(noSentry.needsAttention(sentryExpected: true))
-        // Off with a reason: a run_as failure when a filesystem policy was
-        // asked for; nothing at all when none was.
-        let off = try status(["filesystem": "off", "degraded_reason": "run_as_user sandbox: no such user"])
-        #expect(off.needsAttention(sentryExpected: false, filesystemExpected: true))
-        #expect(!off.needsAttention(sentryExpected: false, filesystemExpected: false))
+        // Finding (CWE-451): "Sandbox card warns when a process-only policy
+        // correctly leaves the filesystem off". Off is judged by the guest's
+        // own reason, not the editor's draft: a run_as identity that failed
+        // (or a reason not known to be intended) warns; a policy that asked
+        // nothing of the filesystem (process-only, no paths, no spec) doesn't.
+        for reason in ["cannot provision run_as identity: useradd failed",
+                       "cannot resolve run_as identity: no such user", "something unexpected"] {
+            let off = try status(["filesystem": "off", "degraded_reason": reason])
+            #expect(off.needsAttention(sentryExpected: false), "\(reason)")
+        }
+        for asked in ["filesystem_policy not configured", "no paths configured"] {
+            let off = try status(["filesystem": "off", "degraded_reason": asked, "strict_applied": true])
+            #expect(!off.needsAttention(sentryExpected: false), "\(asked)")
+        }
+        #expect(!(try status(["filesystem": "off"])).needsAttention(sentryExpected: false))
+        // Held for a required sentry: the spec asked for a ruleset, the
+        // early publish says off with no reason — not applied yet, not "off".
+        let held = try status(["filesystem": "off", "requested": ["filesystem": true, "process": false]])
+        #expect(held.filesystemNotYetApplied && !held.filesystemOffUnasked)
+        #expect(!(try status(["filesystem": "off", "requested": ["filesystem": false]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "off", "degraded_reason": "no paths configured",
+                              "requested": ["filesystem": true]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "enforced", "requested": ["filesystem": true]])).filesystemNotYetApplied)
+    }
+
+    @Test("the timeline names an off sandbox for what it is: failed, not applied yet, or no policy")
+    func timelineOff() throws {
+        func row(_ d: [String: AnyJSON]) throws -> SecurityTimeline.Event {
+            try #require(SecurityTimeline.map(profileID: UUID(), eventType: "sandbox.status", eventData: d, now: Date()))
+        }
+        let runAs = try row(["filesystem": .string("off"), "reason": .string("cannot resolve run_as identity: no such user")])
+        #expect(runAs.kind == .blocked && runAs.decision.contains("run_as"))
+        let held = try row(["filesystem": .string("off"), "requested_filesystem": .bool(true)])
+        #expect(held.kind == .info && held.decision == "not applied yet")
+        for reason in ["filesystem_policy not configured", "no paths configured"] {
+            let none = try row(["filesystem": .string("off"), "reason": .string(reason)])
+            #expect(none.kind == .info && none.decision == "no filesystem policy", "\(reason)")
+        }
     }
 }

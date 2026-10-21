@@ -544,7 +544,16 @@ public final class SecurityTimeline {
         case "sandbox.status":
             let fs = str(d, "filesystem") ?? "off"
             let strictFailed: Bool = { if case .bool(false)? = d["strict_applied"] { return true }; return false }()
-            let bad = fs == "failed" || fs == "degraded" || strictFailed
+            // An `off` the guest says failed (a run_as identity it couldn't
+            // set up) is a failure, not "no filesystem policy"; one asked for
+            // and not in force yet (held for the sentry) is a wait.
+            let offReason = fs == "off" ? (str(d, "reason") ?? "") : ""
+            let offFailed = !offReason.isEmpty && !GuestSandboxStatusStore.Status.filesystemOffAsAsked.contains(offReason)
+            let offWaiting: Bool = {
+                if fs == "off", offReason.isEmpty, case .bool(true)? = d["requested_filesystem"] { return true }
+                return false
+            }()
+            let bad = fs == "failed" || fs == "degraded" || strictFailed || offFailed
             var parts = [String(format: NSLocalizedString("filesystem %@", comment: "guest sandbox condition"), fs)]
             if let u = str(d, "run_as") { parts.append(String(format: NSLocalizedString("runs as %@", comment: "guest sandbox condition"), u)) }
             if let sc = str(d, "seccomp") { parts.append("seccomp \(sc)") }
@@ -558,6 +567,7 @@ public final class SecurityTimeline {
                        parts.joined(separator: " · "),
                        strictFailed ? NSLocalizedString("strict sandbox not applied — no session will start", comment: "Security Timeline decision")
                        : bad ? (str(d, "reason") ?? NSLocalizedString("not enforced", comment: "Security Timeline decision"))
+                           : offWaiting ? NSLocalizedString("not applied yet", comment: "Security Timeline decision: guest sandbox still being set up")
                            : off ? NSLocalizedString("no filesystem policy", comment: "Security Timeline decision")
                                  : NSLocalizedString("enforced", comment: "Security Timeline decision"),
                        bad ? .blocked : off ? .info : .allowed)
