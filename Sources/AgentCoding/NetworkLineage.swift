@@ -370,22 +370,49 @@ public final class NetworkLineage: @unchecked Sendable {
 
     /// The tool call whose command this argv runs, within `shellWindow` of
     /// the response. Agents wrap commands (Claude Code: `bash -c -l '…
-    /// eval '"'"'<cmd>'"'"' …'`), so both sides are compared with quoting and
-    /// whitespace removed.
+    /// eval '"'"'<cmd>'"'"' …'`), so both sides are cut into words with
+    /// quoting removed, and the command's words must appear in the argv's,
+    /// in order and whole (Finding CWE-670, "Tool-call matching treats a
+    /// 2-character substring as an exact link": a Bash call of `id` claimed
+    /// any argv containing those letters — `width`, a URL path — and, newest
+    /// first, stole longer commands it happened to sit inside). Of the calls
+    /// that match, the most specific (longest) command wins, newest on a tie;
+    /// only one of at least `exactMinLength` characters is an exact link.
     static func matchToolCall(argv: String, calls: [ToolCall], at: Date) -> (toolUseID: String, confidence: String)? {
         guard !argv.isEmpty else { return nil }
-        let a = normalize(argv)
+        let a = words(argv)
         let recent = calls.filter { at.timeIntervalSince($0.at) <= shellWindow && $0.command != nil }
-        // Newest first: an agent re-running a command means the latest call.
-        for c in recent.reversed() {
-            let n = normalize(c.command!)
-            if n.count >= 2, a.contains(n) { return (c.id, "exact") }
+        var best: (call: ToolCall, length: Int)?
+        for c in recent {
+            let w = words(c.command!)
+            let length = w.reduce(0) { $0 + $1.count }
+            guard length >= 2, contains(a, w) else { continue }
+            if best == nil || length > best!.length || (length == best!.length && c.at >= best!.call.at) {
+                best = (c, length)
+            }
         }
-        return nil
+        guard let best else { return nil }
+        return (best.call.id, best.length >= exactMinLength ? "exact" : "likely")
     }
 
-    static func normalize(_ s: String) -> String {
-        String(s.unicodeScalars.filter { !"'\"\\ \t\n".unicodeScalars.contains($0) }.map(Character.init))
+    /// Below this many characters (quoting and spaces aside) a command is
+    /// too common a word sequence to call its match exact (`id`, `ls -la`).
+    static let exactMinLength = 8
+
+    /// Words with quotes and backslashes removed (empty ones dropped).
+    static func words(_ s: String) -> [String] {
+        s.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }).map { w in
+            String(w.unicodeScalars.filter { !"'\"\\".unicodeScalars.contains($0) }.map(Character.init))
+        }.filter { !$0.isEmpty }
+    }
+
+    /// `needle` occurs in `haystack` as a contiguous run of whole words.
+    static func contains(_ haystack: [String], _ needle: [String]) -> Bool {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return false }
+        for i in 0...(haystack.count - needle.count) where haystack[i] == needle[0] {
+            if Array(haystack[i..<(i + needle.count)]) == needle { return true }
+        }
+        return false
     }
 
     static func u64(_ v: Any?) -> UInt64 {
