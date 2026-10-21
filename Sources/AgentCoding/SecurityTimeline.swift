@@ -298,6 +298,7 @@ public final class SecurityTimeline {
         if let n = e.count { d["n"] = n }
         if let t = e.eventType, let x = e.detail.flatMap(foundation) { d["y"] = t; d["x"] = x }
         if let ck = e.coalesceKey { d["ck"] = ck }
+        if let dn = e.denials { d["dn"] = dn }
         if let fw = e.firewall { d["fw"] = fw.wire }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
@@ -318,6 +319,7 @@ public final class SecurityTimeline {
                       workspace: d["w"] as? String, count: d["n"] as? Int,
                       eventType: d["y"] as? String, detail: anyJSON(d["x"]))
         e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
+        e.denials = d["dn"] as? Int
         e.firewall = Firewall(wire: d["fw"] as? [String: Any])
         return e
     }

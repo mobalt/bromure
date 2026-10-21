@@ -64,6 +64,9 @@ struct SecurityWindowQoLTests {
         tl.applyMirror([["engine": first.engine, "condition": first.condition, "decision": first.decision,
                          "kind": "blocked", "profileID": ws.uuidString, "dn": 3]], host: "ark")
         #expect(tl.allEvents.first { $0.machine == "ark" }?.occurrences == 3)
+        // …and so does the on-disk log the overview is rebuilt from at launch.
+        let line = try #require(SecurityTimeline.line(more))
+        #expect(SecurityTimeline.event(fromLine: line.dropLast())?.occurrences == 47)
     }
 
     @Test("History settings: unset means 90 days and 24 hours; 0 keeps everything")
