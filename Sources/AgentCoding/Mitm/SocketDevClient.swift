@@ -207,6 +207,18 @@ public actor SocketDevClient {
         "vulnerableDependency",
     ]
 
+    /// A socket.dev type that is a malware verdict, which the user can't
+    /// override per package (everything else in the compromise bucket —
+    /// install scripts, shell access, typosquat suspicions — they can).
+    static func isMalwareVerdict(_ type: String) -> Bool { alwaysBlockTypes.contains(type) }
+
+    /// The compromise issue a block reports: a malware verdict when there is
+    /// one (it can't be overridden, so it must not hide behind an install-
+    /// script alert that can), else the first.
+    static func blockingIssue(_ compromised: [Issue]) -> Issue? {
+        compromised.first(where: { isMalwareVerdict($0.type) }) ?? compromised.first
+    }
+
     /// Sorts socket.dev's issues into the two buckets the proxy filters on.
     static func classify(_ issues: [Issue]) -> CheckResult {
         var compromised: [Issue] = []

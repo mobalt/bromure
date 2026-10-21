@@ -4261,3 +4261,17 @@
 "“%@” wasn't wiped" = "「%@」未被抹除";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "在問題顯示期間，它已用目前的磁碟啟動（由自動化啟動），因此未抹除任何內容，它仍被標記為已遭入侵。請將其關閉後重新啟動以進行抹除。";
 "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "無法確定是哪個程式嘗試連線；啟用「Enforce binaries」時，規則必須指明程式。請重新嘗試連線，然後再允許。";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "儘管有供應鏈警告，仍要從工作區「%2$@」安裝 %1$@ 嗎？";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure 已封鎖 %1$@ %2$@ %3$@：%4$@\n\n只有在你信任此套件及其發行者時，才應繼續安裝。";
+"Allow %@ for this session" = "在本次工作階段中允許 %@";
+"Always allow %@ in this workspace" = "在此工作區中一律允許 %@";
+"Don't allow %@, and don't ask again this session" = "不允許 %@，並且本次工作階段中不再詢問";
+"downloaded — allowed by you despite: %@" = "已下載 — 儘管有以下警告，你仍允許了：%@";
+"Trusted packages" = "受信任的套件";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "當 OSV 或 socket.dev 封鎖某個套件時，Bromure 會詢問是否仍要安裝（僅本次工作階段或一律）。你一律允許的套件列在這裡，它們的下載會略過這些檢查。socket.dev 的惡意軟體判定永遠不會被略過。";
+"Install despite reputation warnings (format: `npm:workerd`)" = "儘管有信譽警告仍安裝（格式：`npm:workerd`）";
+"Always Allow %@ in This Workspace" = "在此工作區中一律允許 %@";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "儘管有信譽警告，仍信任此套件 — 此工作區中之後的下載不會再因此被封鎖";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "請在執行此工作區的 Mac 上，於其設定中更改受信任的套件。";

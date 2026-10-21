@@ -4258,3 +4258,17 @@
 "“%@” wasn't wiped" = "「%@」は消去されませんでした";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "質問が表示されている間に現在のディスクで起動したため（自動化が起動しました）、何も消去されず、侵害済みのままです。シャットダウンしてから再度起動すると消去できます。";
 "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "どのプログラムが接続しようとしたか特定できませんでした。「Enforce binaries」がオンのときは、ルールにプログラムを指定する必要があります。もう一度接続してから許可してください。";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "サプライチェーンの警告がありますが、ワークスペース「%2$@」から %1$@ をインストールしますか?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure は %1$@ %2$@ %3$@ をブロックしました: %4$@\n\nこのパッケージと公開元を信頼できる場合にのみインストールしてください。";
+"Allow %@ for this session" = "このセッションでは %@ を許可";
+"Always allow %@ in this workspace" = "このワークスペースで %@ を常に許可";
+"Don't allow %@, and don't ask again this session" = "%@ を許可せず、このセッションではもう確認しない";
+"downloaded — allowed by you despite: %@" = "ダウンロード済み — 次の警告がありますが、あなたが許可しました: %@";
+"Trusted packages" = "信頼するパッケージ";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "OSV または socket.dev がパッケージをブロックすると、Bromure はそれでもインストールするか (このセッションのみ、または常に) を確認します。常に許可したパッケージはここに表示され、そのダウンロードではこれらのチェックが省略されます。socket.dev によるマルウェア判定は回避されません。";
+"Install despite reputation warnings (format: `npm:workerd`)" = "評判の警告があってもインストール (形式: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "このワークスペースで %@ を常に許可";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "評判の警告がありますが、このパッケージを信頼します — このワークスペースでの以降のダウンロードはこの警告でブロックされません";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "このワークスペースの信頼するパッケージは、ワークスペースを実行している Mac の設定で変更してください。";

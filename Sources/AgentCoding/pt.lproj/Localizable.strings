@@ -4258,3 +4258,17 @@
 "“%@” wasn't wiped" = "«%@» não foi apagado";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Iniciou-se com o disco atual enquanto a pergunta estava aberta (uma automatização iniciou-o), por isso nada foi apagado e continua marcado como comprometido. Desligue-o e inicie-o novamente para o apagar.";
 "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Não foi possível saber qual programa tentou, e com «Enforce binaries» ativado uma regra deve indicar um. Tente a ligação novamente e depois permita-a.";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "Instalar %@ do espaço de trabalho “%@” apesar do aviso de cadeia de suprimentos?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "O Bromure bloqueou %1$@ %2$@ %3$@: %4$@\n\nInstale mesmo assim só se você confia neste pacote e no seu publicador.";
+"Allow %@ for this session" = "Permitir %@ nesta sessão";
+"Always allow %@ in this workspace" = "Sempre permitir %@ neste espaço de trabalho";
+"Don't allow %@, and don't ask again this session" = "Não permitir %@ e não perguntar de novo nesta sessão";
+"downloaded — allowed by you despite: %@" = "baixado — permitido por você apesar de: %@";
+"Trusted packages" = "Pacotes confiáveis";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "Quando o OSV ou o socket.dev bloqueia um pacote, o Bromure pergunta se deve instalá-lo mesmo assim (nesta sessão ou sempre). Os pacotes que você sempre permite ficam listados aqui; os downloads deles pulam essas verificações. Um veredito de malware do socket.dev nunca é ignorado.";
+"Install despite reputation warnings (format: `npm:workerd`)" = "Instalar apesar dos avisos de reputação (formato: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "Sempre permitir %@ neste espaço de trabalho";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Confiar neste pacote apesar do aviso de reputação — os próximos downloads neste espaço de trabalho não serão bloqueados por ele";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "Altere os pacotes confiáveis deste espaço de trabalho nos ajustes dele, no Mac que o executa.";

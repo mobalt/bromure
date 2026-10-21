@@ -2044,13 +2044,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 var scOutcome = "allowed"
                 var scReasonKind: String? = nil
                 var scReason: String? = nil
+                // A blocked package the user may let through (the timeline
+                // row's "Always allow" action), or one they did.
+                var scOverridable = false
                 let scProfileID = self.profileID
                 defer {
                     emitSupplyChainFetch(profileID: scProfileID,
                         ecosystem: ecosystem.rawValue,
                         package: pkg, version: version,
                         kind: "artifact", outcome: scOutcome,
-                        reasonKind: scReasonKind, reason: scReason)
+                        reasonKind: scReasonKind, reason: scReason,
+                        overridable: scOverridable)
                 }
 
                 // Three pre-flight checks before forward. Each may
@@ -2103,6 +2107,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 var verifyGaps: [String] = []
                 // Why each gave no verdict, in the words the prompt shows.
                 var verifyWhy: [String] = []
+                // What the reputation checks (OSV, socket.dev) found: the
+                // first block, applied after both ran unless the user
+                // overrides it (GitHub issue #54). A socket.dev malware
+                // verdict can't be overridden and wins over anything else.
+                var reputationBlock: (reason: String, kind: String, log: String, overridable: Bool)?
 
                 // 2. OSV check (free, no key, off by default).
                 if policy.osvEnabled {
@@ -2116,13 +2125,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
                                 "at \(policy.osvSeverity.displayName.lowercased()): " +
                                 "\(v.id) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
-                            scOutcome = "blocked"
-                            scReasonKind = "osv"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "osv", "OSV 451: \(pkg)@\(version) → \(v.id)", true)
                         }
                     } else {
                         // Lookup failed (network error, non-200, 429 rate-limit,
@@ -2139,32 +2142,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         ecosystem: ecosystem.rawValue, name: pkg, version: version,
                         apiKey: policy.socketAPIKey)
                   if case .success(let result) = socketLookup {
-                    if policy.socketBlockCompromised, let bad = result.compromised.first {
+                    if policy.socketBlockCompromised,
+                       let bad = SocketDevClient.blockingIssue(result.compromised) {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                             "flagged by socket.dev (\(bad.severity.rawValue)): " +
                             "\(bad.type) — \(bad.summary)"
-                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        SupplyChainLog.shared.record(
-                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]")
-                        scOutcome = "blocked"
-                        scReasonKind = "socket_compromised"
-                        scReason = reason
-                        return
+                        let malware = SocketDevClient.isMalwareVerdict(bad.type)
+                        if reputationBlock == nil || malware {
+                            reputationBlock = (reason, "socket_compromised",
+                                               "socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]",
+                                               !malware)
+                        }
                     }
-                    if policy.socketBlockCVE {
+                    if policy.socketBlockCVE, reputationBlock == nil {
                         let threshold = SocketDevClient.Severity.from(string: policy.socketCVESeverity.rawValue)
                         let bad = result.vulnerabilities.first { $0.severity.rank >= threshold.rank }
                         if let v = bad {
                             let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                                 "has known CVE per socket.dev (\(v.severity.rawValue)): " +
                                 "\(v.type) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]")
-                            scOutcome = "blocked"
-                            scReasonKind = "socket_cve"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "socket_cve",
+                                               "socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]", true)
                         }
                     }
                   } else if case .failure(let why) = socketLookup {
@@ -2173,6 +2171,36 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     verifyGaps.append("socket.dev")
                     verifyWhy.append(why.reason.explanation)
                   }
+                }
+
+                // 3a. The reputation verdict: blocked, unless the package is
+                //     on the workspace's override list or the user lets it
+                //     through now (malware verdicts never are).
+                if let block = reputationBlock {
+                    var allowed = false
+                    if block.overridable {
+                        if policy.reputationAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                            allowed = true
+                        } else {
+                            allowed = await supplyChainBroker.consentOverride(
+                                profileID: profileID, ecosystem: ecosystem.rawValue, name: pkg,
+                                version: version, reason: block.reason)
+                        }
+                    }
+                    if !allowed {
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: block.reason))
+                        SupplyChainLog.shared.record("[supply-chain] \(block.log)")
+                        scOutcome = "blocked"
+                        scReasonKind = block.kind
+                        scReason = block.reason
+                        scOverridable = block.overridable
+                        return
+                    }
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] overridden by the user: \(ecosystem.rawValue) \(pkg)@\(version) — \(block.reason)")
+                    scOutcome = "overridden"
+                    scReasonKind = block.kind
+                    scReason = block.reason
                 }
 
                 // 3b. Fail closed. An enabled reputation check couldn't reach
@@ -4954,7 +4982,8 @@ private func emitSupplyChainFetch(profileID: UUID,
                                    kind: String,
                                    outcome: String,
                                    reasonKind: String? = nil,
-                                   reason: String? = nil) {
+                                   reason: String? = nil,
+                                   overridable: Bool = false) {
     var data: [String: AnyJSON] = [
         "ecosystem": .string(ecosystem),
         "package": .string(package),
@@ -4964,6 +4993,7 @@ private func emitSupplyChainFetch(profileID: UUID,
     if let version { data["version"] = .string(version) }
     if let reasonKind { data["reason_kind"] = .string(reasonKind) }
     if let reason { data["reason"] = .string(reason) }
+    if overridable { data["overridable"] = .bool(true) }
     BACEventEmitter.shared.emitDetached(
         profileID: profileID,
         eventType: "supply_chain.fetch",

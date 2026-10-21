@@ -5040,8 +5040,33 @@ struct ProfileEditorView: View {
                 }
                 .padding(8)
             }
+
+            // GitHub issue #54: a package a reputation check blocks, that
+            // the user trusts, without turning the checks off.
+            GroupBox(label: Label(NSLocalizedString("Trusted packages", comment: "supply chain settings: reputation allowlist"),
+                                  systemImage: "checkmark.shield")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(NSLocalizedString("When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden.", comment: "supply chain settings: reputation allowlist"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    allowlistEditor(
+                        title: NSLocalizedString("Install despite reputation warnings (format: `npm:workerd`)", comment: "supply chain settings: reputation allowlist"),
+                        list: $draft.supplyChain.reputationAllowlist)
+                }
+                .padding(8)
+            }
         }
         .padding(16)
+        .onReceive(NotificationCenter.default.publisher(for: .bromureSupplyChainAllowlistChanged)) { note in
+            // Allowed elsewhere while this editor is open (the Security
+            // window, an override prompt): adopt it, so this older draft
+            // can't drop it on Save.
+            guard (note.object as? UUID) == draft.id, let entry = note.userInfo?["entry"] as? String,
+                  !draft.supplyChain.reputationAllowlist.contains(where: { $0.lowercased() == entry.lowercased() })
+            else { return }
+            draft.supplyChain.reputationAllowlist.append(entry)
+        }
     }
 
     /// Compact list-editor reused for the per-package allowlists.

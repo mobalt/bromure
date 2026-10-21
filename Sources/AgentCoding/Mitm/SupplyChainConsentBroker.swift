@@ -42,7 +42,7 @@ public actor SupplyChainConsentBroker {
         let scopeDisplayName: String
     }
 
-    private static func storeKey(profileID: UUID, scope: String) -> String {
+    static func storeKey(profileID: UUID, scope: String) -> String {
         profileID.uuidString + "|" + scope
     }
 
@@ -165,6 +165,86 @@ public actor SupplyChainConsentBroker {
         return allow
     }
 
+    // MARK: Reputation overrides
+
+    static func overrideScope(ecosystem: String, name: String) -> String {
+        "override:\(ecosystem):\(name.lowercased())"
+    }
+
+    /// The answers to "a reputation check blocked this package — install it
+    /// anyway?", in order; the last is the deny (also no answer).
+    enum OverrideChoice: Int, CaseIterable {
+        case allowSession, allowAlways, denySession, notNow
+    }
+
+    /// Saves an "always allow" answer in the workspace's reputation
+    /// allowlist (`ecosystem:name`); set by the app.
+    private var persistOverride: (@Sendable (UUID, String) -> Void)?
+    public func setPersistOverride(_ f: @escaping @Sendable (UUID, String) -> Void) { persistOverride = f }
+
+    /// A reputation check (OSV, socket.dev) blocked `name`: let the user
+    /// install it anyway, instead of a silent 451 that pushes them to turn
+    /// supply-chain checks off altogether (GitHub issue #54). Answers cover
+    /// the package (any version) — for the rest of the session, or always
+    /// (saved to the workspace's allowlist); "don't allow, don't ask again"
+    /// is remembered for the session too, so the same install stays quiet.
+    /// "Not now" — and no answer — refuse it for a minute. One question per
+    /// package at a time.
+    public func consentOverride(profileID: UUID, ecosystem: String, name: String, version: String,
+                                reason: String) async -> Bool {
+        let key = Self.storeKey(profileID: profileID, scope: Self.overrideScope(ecosystem: ecosystem, name: name))
+        if let known = decided(key) { return known }
+        if pending[key] != nil {
+            return await withCheckedContinuation { pending[key, default: []].append($0) }
+        }
+        pending[key] = []
+        let profileName = profileNames[profileID] ?? "(unknown profile)"
+        let title = String(format: NSLocalizedString(
+            "Install %@ from workspace “%@” despite its supply-chain warning?",
+            comment: "Supply chain: override a reputation block (package, workspace)"), name, profileName)
+        let message = String(format: NSLocalizedString(
+            "Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher.",
+            comment: "Supply chain: override prompt body (ecosystem, package, version, reason)"),
+                             ecosystem, name, version, reason)
+        let choices = OverrideChoice.allCases.map { c -> String in
+            switch c {
+            case .allowSession:
+                return String(format: NSLocalizedString("Allow %@ for this session", comment: "Supply chain: override for the session"), name)
+            case .allowAlways:
+                return String(format: NSLocalizedString("Always allow %@ in this workspace", comment: "Supply chain: override saved to the workspace's allowlist"), name)
+            case .denySession:
+                return String(format: NSLocalizedString("Don't allow %@, and don't ask again this session",
+                                                        comment: "Supply chain: keep the block, stay quiet"), name)
+            case .notNow:
+                return NSLocalizedString("Not now", comment: "Supply chain: keep the block for now")
+            }
+        }
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: message,
+                                             choices: choices, denyIndex: OverrideChoice.notNow.rawValue,
+                                             style: .warning)
+        let choice = OverrideChoice(rawValue: idx ?? -1) ?? .notNow
+        let allow = recordOverride(choice, key: key, label: name, now: Date())
+        if choice == .allowAlways { persistOverride?(profileID, "\(ecosystem):\(name)") }
+        let waiters = pending.removeValue(forKey: key) ?? []
+        for w in waiters { w.resume(returning: allow) }
+        return allow
+    }
+
+    /// Store an answer to the override question; true = install.
+    func recordOverride(_ choice: OverrideChoice, key: String, label: String, now: Date) -> Bool {
+        switch choice {
+        case .allowSession, .allowAlways:
+            grants[key] = Grant(expiration: .distantFuture, scopeDisplayName: label, isSessionScoped: true)
+            return true
+        case .denySession:
+            denies[key] = DenyMemory(expiration: .distantFuture, scopeDisplayName: label)
+            return false
+        case .notNow:
+            denies[key] = DenyMemory(expiration: now.addingTimeInterval(Self.denyTTL), scopeDisplayName: label)
+            return false
+        }
+    }
+
     // MARK: Unverified packages
 
     /// The scope every unverified package of a workspace shares: "all
@@ -248,7 +328,7 @@ public actor SupplyChainConsentBroker {
     }
 
     /// A live decision for `key`: true (grant), false (deny), nil (ask).
-    private func decided(_ key: String, now: Date = Date()) -> Bool? {
+    func decided(_ key: String, now: Date = Date()) -> Bool? {
         if let d = denies[key] {
             if d.expiration > now { return false }
             denies.removeValue(forKey: key)

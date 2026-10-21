@@ -2781,6 +2781,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // refreshStreamingState() via the non-forcing `loadedMitmEngine`
             // handle (profiles.didSet must never spawn the engine early).
             self.loadedMitmEngine = e
+            // A supply-chain override prompt's "Always allow" saves to the
+            // workspace's reputation allowlist.
+            self.wireSupplyChainOverrides(e.supplyChainBroker)
             if BACEnrollmentStore.load() != nil {
                 let up = BACTraceUploader()
                 up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))

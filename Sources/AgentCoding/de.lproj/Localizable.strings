@@ -4258,3 +4258,17 @@
 "“%@” wasn't wiped" = "„%@“ wurde nicht gelöscht";
 "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Es wurde mit seinem bisherigen Datenträger gestartet, während die Frage offen war (eine Automation hat es gestartet). Daher wurde nichts gelöscht, und es ist weiterhin als kompromittiert markiert. Fahren Sie es herunter und starten Sie es erneut, um es zu löschen.";
 "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Es ließ sich nicht feststellen, welches Programm es versucht hat, und mit „Enforce binaries“ muss eine Regel eines nennen. Versuchen Sie die Verbindung erneut und erlauben Sie sie dann.";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "%@ aus dem Workspace „%@“ trotz Lieferketten-Warnung installieren?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure hat %1$@ %2$@ %3$@ blockiert: %4$@\n\nInstallieren Sie es nur, wenn Sie diesem Paket und seinem Herausgeber vertrauen.";
+"Allow %@ for this session" = "%@ für diese Sitzung erlauben";
+"Always allow %@ in this workspace" = "%@ in diesem Workspace immer erlauben";
+"Don't allow %@, and don't ask again this session" = "%@ nicht erlauben und in dieser Sitzung nicht mehr fragen";
+"downloaded — allowed by you despite: %@" = "heruntergeladen — von Ihnen erlaubt trotz: %@";
+"Trusted packages" = "Vertrauenswürdige Pakete";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "Wenn OSV oder socket.dev ein Paket blockiert, fragt Bromure, ob es trotzdem installiert werden soll (für diese Sitzung oder immer). Immer erlaubte Pakete stehen hier; ihre Downloads überspringen diese Prüfungen. Ein Malware-Befund von socket.dev wird nie übergangen.";
+"Install despite reputation warnings (format: `npm:workerd`)" = "Trotz Reputationswarnungen installieren (Format: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "%@ in diesem Workspace immer erlauben";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Diesem Paket trotz Reputationswarnung vertrauen — spätere Downloads in diesem Workspace werden dadurch nicht mehr blockiert";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "Ändern Sie die vertrauenswürdigen Pakete dieses Workspace in seinen Einstellungen auf dem Mac, auf dem er läuft.";
