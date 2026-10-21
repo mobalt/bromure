@@ -62,10 +62,17 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// rule it adds, so the rule works at once and stays narrow.
     private var recentExes: [String: (exe: String, at: Date)] = [:]
 
-    func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int) {
+    /// `replace: false` fills only destinations with no entry inside the
+    /// hour: for names the connection is only GUESSED to be for (every DNS
+    /// name cached for its IP), which mustn't displace the program attested
+    /// for one of them.
+    func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int, replace: Bool = true) {
         lock.lock(); defer { lock.unlock() }
+        let cutoff = Date().addingTimeInterval(-3600)
         for d in destinations where !d.isEmpty {
-            recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, Date())
+            let key = "\(profileID.uuidString)|\(d.lowercased())|\(port)"
+            if !replace, let held = recentExes[key], held.at > cutoff, held.exe != exe { continue }
+            recentExes[key] = (exe, Date())
         }
         if recentExes.count > 2048 {
             let cutoff = Date().addingTimeInterval(-3600)
@@ -73,13 +80,28 @@ public final class BinaryIdentityService: @unchecked Sendable {
         }
     }
 
-    /// The program that last connected to one of `destinations` on `port`
-    /// within the hour, as the attestor reported it.
+    /// The MiTM learned the flow's name (SNI or Host header) after asking
+    /// by IP: file the attested program under the name as well, which is
+    /// what the blocked row shows and what Allow looks it up by.
+    public func noteHost(_ identity: OpenShellPolicy.BinaryIdentity?, profileID: UUID, host: String?, port: Int) {
+        guard let identity, let host, !host.isEmpty, EgressPolicy.parseIPv4Address(host) == nil else { return }
+        noteExe(identity.exe, profileID: profileID, destinations: [host], port: port)
+    }
+
+    /// The program that connected to `destinations` on `port` within the
+    /// hour, as the attestor reported it — the FIRST destination that has
+    /// one, in the order given (a hostname, then its IP). Not the newest
+    /// across them: an IP is shared (a CDN address, or any guest process that
+    /// dials it after a deny), so a later program there must not replace the
+    /// one attested for the name on the row (Finding CWE-284, "Drawer Allow
+    /// names whichever program last used the destination IP").
     public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {
         lock.lock(); defer { lock.unlock() }
         let cutoff = Date().addingTimeInterval(-3600)
-        return destinations.compactMap { recentExes["\(profileID.uuidString)|\($0.lowercased())|\(port)"] }
-            .filter { $0.at > cutoff }.max { $0.at < $1.at }?.exe
+        for d in destinations {
+            if let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
+        }
+        return nil
     }
 
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
@@ -157,7 +179,10 @@ public final class BinaryIdentityService: @unchecked Sendable {
         let dst = EgressPolicy.ipv4String(dstIP)
         Task {
             let id = await self.identity(profileID: profileID, sport: sport, dst: dst, dport: dport)
-            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport)) }
+            // The names are every one cached for this IP — a guess at what
+            // the connection was for (a shared CDN address has many): they
+            // don't replace the program attested for any of them.
+            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport), replace: false) }
             let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
             self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, Date()); self.lock.unlock()
         }
@@ -360,6 +385,46 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         /// times (kill-server, last window closed, …).
         public var serverRestarts: Int
         public var receivedAt: Date
+        /// The booted spec asked for a filesystem ruleset (`requested.filesystem`).
+        public var filesystemRequested: Bool? = nil
+
+        /// The filesystem sandbox isn't doing what was asked: Landlock failed
+        /// (an unreadable spec, an unsafe socket layout, a crashed supervisor)
+        /// or best effort degraded to nothing — the session may run
+        /// unconfined, and only these two fields say so.
+        public var filesystemFailed: Bool { filesystem == "failed" || filesystem == "degraded" }
+
+        /// `off` because nothing was asked of the filesystem: no spec, no
+        /// filesystem_policy (a process-only policy), or one with no paths.
+        static let filesystemOffAsAsked: Set<String> = ["filesystem_policy not configured", "no paths configured"]
+
+        /// The filesystem sandbox is off for a reason that isn't the policy's
+        /// own: a run_as identity that couldn't be provisioned or resolved
+        /// (off, with that reason), or any reason not known to be intended.
+        public var filesystemOffUnasked: Bool {
+            guard filesystem == "off", let reason = degradedReason, !reason.isEmpty else { return false }
+            return !Self.filesystemOffAsAsked.contains(reason)
+        }
+
+        /// The booted policy asked for a ruleset and none is in force yet,
+        /// with no failure said: the sandbox is still being assembled (held
+        /// for a required sentry). Not a fault, but not "off" either.
+        public var filesystemNotYetApplied: Bool {
+            filesystem == "off" && (degradedReason ?? "").isEmpty && filesystemRequested == true
+        }
+
+        /// Anything the sandbox reported as not working as asked. The
+        /// sentry counts only when the workspace wants one. A filesystem
+        /// sandbox reported `off` counts only when the guest's own reason
+        /// says the apply failed (Finding CWE-451, "Sandbox card warns when
+        /// a process-only policy correctly leaves the filesystem off"): it
+        /// was judged against the editor's unsaved draft, and a `process`
+        /// section — or a filesystem_policy with no paths — warned forever.
+        public func needsAttention(sentryExpected: Bool) -> Bool {
+            filesystemFailed || strictApplied == false || !warnings.isEmpty
+                || (sentry == "unavailable" && sentryExpected)
+                || filesystemOffUnasked
+        }
     }
 
     private let lock = NSLock()
@@ -376,8 +441,23 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         return statuses[profileID]
     }
 
+    /// The sentry's own state from the latest report, including one sent while
+    /// the sandbox was still `pending` (and so not recorded as a Status): a
+    /// required sentry is loaded before the supervisor publishes, and its
+    /// `waiting` must still be seen.
+    private var sentryStates: [UUID: (state: String, reason: String?)] = [:]
+    public func sentryState(for profileID: UUID) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return statuses[profileID]?.sentry ?? sentryStates[profileID]?.state
+    }
+    /// Why the sentry is unavailable, from the same latest report.
+    public func sentryReason(for profileID: UUID) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return statuses[profileID]?.sentryReason ?? sentryStates[profileID]?.reason
+    }
+
     public func reset(profileID: UUID) {
-        lock.lock(); statuses[profileID] = nil; lock.unlock()
+        lock.lock(); statuses[profileID] = nil; sentryStates[profileID] = nil; lock.unlock()
         onChange?(profileID)
     }
 
@@ -387,6 +467,9 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         // host to fetch its module.
         let kernels = [r["sentry_kernel"] as? String].compactMap { $0 } + (r["installed_kernels"] as? [String] ?? [])
         if !kernels.isEmpty { onKernels?(profileID, kernels, r["sentry"] as? String == "waiting") }
+        if let sentry = r["sentry"] as? String {
+            lock.lock(); sentryStates[profileID] = (sentry, r["sentry_reason"] as? String); lock.unlock()
+        }
         // The guest hasn't assembled its sandbox yet: nothing to record, and
         // nothing to cross-check (an early "off" would read as an impostor).
         if r["filesystem"] as? String == "pending" { return }
@@ -406,7 +489,8 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
             additionsReadOnly: additions?["read_only"] as? [String] ?? [],
             warnings: r["warnings"] as? [String] ?? [],
             serverRestarts: r["server_restarts"] as? Int ?? 0,
-            receivedAt: now)
+            receivedAt: now,
+            filesystemRequested: (r["requested"] as? [String: Any])?["filesystem"] as? Bool)
         lock.lock()
         let previous = statuses[profileID]
         statuses[profileID] = st
@@ -446,6 +530,7 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
                               : st.filesystem == "off" ? "off" : "enforced"),
         ]
         if let v = st.degradedReason { data["reason"] = .string(v) }
+        if let v = st.filesystemRequested { data["requested_filesystem"] = .bool(v) }
         if let v = st.landlockABI { data["landlock_abi"] = .int(v) }
         if let v = st.seccomp { data["seccomp"] = .string(v) }
         if let v = st.runAsUser { data["run_as"] = .string(v) }

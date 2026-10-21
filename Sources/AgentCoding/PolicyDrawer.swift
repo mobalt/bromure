@@ -77,6 +77,13 @@ struct PolicyDrawer: View {
         .onReceive(NotificationCenter.default.publisher(for: OpenShellAdvisor.changedNotification)) { _ in
             reloadProposals()
         }
+        // Closing only hides the drawer (its view, and this clock, live on),
+        // so each open — not just the first appearance — and the close itself
+        // mark what was on screen as seen.
+        .onChange(of: list.policyDrawerOpen) { _, open in
+            if open { reloadProposals() }
+            PolicyDrawer.markSeen(list, closing: !open)
+        }
         .onReceive(clock) { now = $0; markSeen() }
     }
 
@@ -257,7 +264,7 @@ struct PolicyDrawer: View {
         if isOpenShell {
             Button("Allow") { allowOpenShell(item, profile) }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-                .help(Text(BinaryIdentityService.shared.recentExe(profileID: profile.id, destinations: [item.host], port: item.port) != nil
+                .help(Text(BinaryIdentityService.shared.recentExe(profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) != nil
                            ? "Add a rule for this host and port, for the program that tried"
                            : "Add a rule for this host and port"))
         } else if let target = FirewallRuleActions.targets(for: item.fw).first,
@@ -294,9 +301,9 @@ struct PolicyDrawer: View {
 
     private func allowOpenShell(_ item: Blocked, _ profile: Profile) {
         busy.insert(item.key)
-        let pid = profile.id, host = item.host, port = item.port, key = item.key
+        let pid = profile.id, host = item.host, port = item.port, key = item.key, ip = item.fw.ip
         Task { @MainActor in
-            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port)
+            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, ip: ip)
             busy.remove(key)
             if let error { errors[key] = error } else { allowed.insert(key); errors[key] = nil }
         }
@@ -596,9 +603,14 @@ struct PolicyDrawer: View {
     // MARK: Seen
 
     /// The toolbar badge counts blocks newer than this.
-    private func markSeen() {
-        guard let id = list.stageProfileID else { return }
-        list.policyDrawerSeen[id] = Date()
+    private func markSeen() { PolicyDrawer.markSeen(list) }
+
+    /// Only what was on screen counts as seen: while the drawer is open (or
+    /// as it closes). The hidden drawer's clock and a workspace switch with
+    /// the drawer closed used to mark it too, so the badge stayed at 0.
+    @MainActor static func markSeen(_ list: SessionListModel, closing: Bool = false, now: Date = Date()) {
+        guard list.policyDrawerOpen || closing, let id = list.stageProfileID else { return }
+        list.policyDrawerSeen[id] = now
     }
 
     /// Distinct destinations blocked since the drawer was last seen (the

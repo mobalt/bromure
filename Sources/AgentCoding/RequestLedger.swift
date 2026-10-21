@@ -93,7 +93,12 @@ final class RequestLedger: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// One flush at a time, snapshot through write: an older report's
+    /// rename can't land over a newer one's.
+    private let writeLock = NSLock()
+
     func flush() {
+        writeLock.lock(); defer { writeLock.unlock() }
         let r = report()
         guard (r["requests"] as? Int ?? 0) > 0 else { return }
         if let url = reportURL,

@@ -111,4 +111,67 @@ struct SystemPackagesTests {
         #expect(String(decoding: data, as: UTF8.self).contains("sandboxSystemPackages"))
         #expect(!String(decoding: data, as: UTF8.self).contains("sandboxHomePackages"))
     }
+
+    /// Finding (CWE-362): "A second Install click starts another root
+    /// apt-get and can overwrite success". The pending check and the
+    /// `.installing` write were two lock acquisitions.
+    @Test("Two approvals and a reject at once: one apt run, and its result stands")
+    func oneInstall() async throws {
+        let a = OpenShellAdvisor()
+        let calls = Calls()
+        a.systemPackagesProvider = { _ in true }
+        a.installPackages = { _, _, pkgs in
+            calls.lock.lock(); calls.installs.append(pkgs); let n = calls.installs.count; calls.lock.unlock()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            return n == 1 ? (0, "installed") : (100, "E: Could not get lock /var/lib/dpkg/lock-frontend")
+        }
+        let pid = UUID()
+        let (status, body) = await call(a, pid, "POST", "/v1/packages", ["manager": "apt", "packages": ["jq"]])
+        #expect(status == 202)
+        let id = try #require(body["id"] as? String)
+        await withTaskGroup(of: Void.self) { g in
+            g.addTask { await a.approvePackages(id: id, profileID: pid) }
+            g.addTask { await a.approvePackages(id: id, profileID: pid) }
+            g.addTask {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                a.rejectPackages(id: id, profileID: pid, reason: "too late")
+            }
+        }
+        #expect(calls.installs.count == 1)
+        let r = try #require(a.packageRequest(id: id, profileID: pid))
+        #expect(r.status == .installed && r.exitCode == 0)
+        // Once it left pending, neither a reject nor another approval moves it.
+        a.rejectPackages(id: id, profileID: pid, reason: "")
+        await a.approvePackages(id: id, profileID: pid)
+        #expect(a.packageRequest(id: id, profileID: pid)?.status == .installed && calls.installs.count == 1)
+    }
+
+    @Test("Approve from many threads at once (the drawer and the control socket): never two installs")
+    func approveRace() async throws {
+        let a = OpenShellAdvisor()
+        final class Per: @unchecked Sendable { var counts: [String: Int] = [:]; let lock = NSLock() }
+        let per = Per()
+        a.systemPackagesProvider = { _ in true }
+        a.installPackages = { _, _, pkgs in
+            per.lock.lock(); per.counts[pkgs[0], default: 0] += 1; per.lock.unlock()
+            return (0, "ok")
+        }
+        let pid = UUID()
+        var ids: [String] = []
+        for n in 0..<90 {          // the advisor keeps 100 per workspace
+            let (_, body) = await call(a, pid, "POST", "/v1/packages", ["manager": "apt", "packages": ["pkg\(n)"]])
+            ids.append(try #require(body["id"] as? String))
+        }
+        // Each request approved from 4 threads released together.
+        let all = ids
+        DispatchQueue.concurrentPerform(iterations: all.count * 4) { k in
+            let id = all[k / 4]
+            let done = DispatchSemaphore(value: 0)
+            Task.detached { await a.approvePackages(id: id, profileID: pid); done.signal() }
+            done.wait()
+        }
+        let twice = per.counts.filter { $0.value > 1 }
+        #expect(twice.isEmpty, "installed more than once: \(twice.count) request(s)")
+        #expect(per.counts.count == 90)
+    }
 }

@@ -4289,3 +4289,20 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "The answer couldn't be sent.";
 "Your answer is already on its way." = "Your answer is already on its way.";
+"“%@” wasn't wiped" = "“%@” wasn't wiped";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "Install %@ from workspace “%@” despite its supply-chain warning?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher.";
+"Allow %@ for this session" = "Allow %@ for this session";
+"Always allow %@ in this workspace" = "Always allow %@ in this workspace";
+"Don't allow %@, and don't ask again this session" = "Don't allow %@, and don't ask again this session";
+"downloaded — allowed by you despite: %@" = "downloaded — allowed by you despite: %@";
+"Trusted packages" = "Trusted packages";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden.";
+"Install despite reputation warnings (format: `npm:workerd`)" = "Install despite reputation warnings (format: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "Always Allow %@ in This Workspace";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "Change this workspace's trusted packages in its settings on the Mac that runs it.";

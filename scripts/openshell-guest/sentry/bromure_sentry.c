@@ -349,10 +349,17 @@ static void sentry_tally(enum bromure_sentry_tally which)
 		atomic64_inc(&state.tallies[which]);
 }
 
-/* `(pid, start_ns)` is a process's identity; see "Process lineage" below. */
+/*
+ * `(pid, start_ns)` is a process's identity; see "Process lineage" below.
+ * `pid` is the thread-group id, so the time is the group leader's: every
+ * thread has its own start_boottime, and an event (or a fork) from a worker
+ * thread -- Go's os/exec, a Python thread -- would otherwise name a process
+ * the host never saw exec. (An exec from a non-leader thread takes the
+ * leader's start time in de_thread, so exec events agree.)
+ */
 static u64 sentry_start_ns(struct task_struct *task)
 {
-	return task ? task->start_boottime : 0;
+	return task ? READ_ONCE(task->group_leader)->start_boottime : 0;
 }
 
 

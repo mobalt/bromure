@@ -35,6 +35,11 @@ enabled() { case "${1:-}" in 1|true|TRUE|yes) return 0;; *) return 1;; esac; }
 # Must match ImageCatalogStore.pinnedPublicKeyBase64 / SUPublicEDKey.
 SENTRY_CATALOG_PUBLIC_KEY="${SENTRY_CATALOG_PUBLIC_KEY:-G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=}"
 
+# The out dir comes from the build container (`docker cp` keeps symlinks):
+# a planted link would be signed/published as a module, or written through.
+LINK=$(find "$OUT" -type l -print -quit)
+[ -z "$LINK" ] || { echo "ERROR: $LINK is a symlink — the out dir must hold real files only"; exit 1; }
+
 json() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const v=process.argv[2].split(".").reduce((o,k)=>o?.[k],j);process.stdout.write(Array.isArray(v)?v.join(" "):String(v??""))' "$1" "$2"; }
 
 HASH=$(json "$OUT/manifest.json" sourceHash)
@@ -43,8 +48,16 @@ FAILED=$(json "$OUT/manifest.json" failed)
 echo "source $HASH — built: ${BUILT:-none}; failed: ${FAILED:-none}"
 
 if [ -z "$BUILT" ]; then
-    echo "nothing new to publish."
-    exit 0
+    # Nothing new — unless the published catalog lost its module signatures
+    # (a bucket write can strip them without breaking the catalog signature,
+    # and apps then refuse the catalog): re-sign and republish it.
+    if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --verify "$OUT/previous-catalog.json" \
+            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" >/dev/null 2>&1; then
+        echo "nothing new built, but the published catalog doesn't verify: republishing it."
+    else
+        echo "nothing new to publish."
+        exit 0
+    fi
 fi
 
 if ! enabled "$DRY_RUN"; then

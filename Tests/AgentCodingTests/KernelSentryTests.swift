@@ -270,6 +270,57 @@ struct KernelSentryTests {
         #expect(a.flatMap { KernelSentryTests.S($0["reason"]) }?.contains("6.8.0-142-generic") == true)
     }
 
+    /// Finding (CWE-670): "Sentry status waiting is judged as a missing module
+    /// after the boot budget". The guest reports `waiting` while it fetches
+    /// or builds a module (minutes); only `pending` was exempt, so at 90 s a
+    /// required sentry tripped the watchdog (weight 20) mid-load.
+    @Test("A guest still fetching or building the module isn't absent; past the loader's worst case it is")
+    func waitingIsNotAbsent() {
+        let id = UUID()
+        GuestSandboxStatusStore.shared.update(profileID: id, report: [
+            "event": "sandbox_status", "filesystem": "off", "sentry": "waiting",
+        ])
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id) }
+        let b = SentryBridge(profileID: id, requirement: .hard, restoring: false)
+        let tap = Tap(); b.tap = { tap.add($0, $1) }
+        let t0 = Date()
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + 600), running: true)
+        #expect(tap.alarms("tampering").isEmpty && tap.alarms("sentry_unavailable").isEmpty)
+        // Parked on "waiting" past every legitimate load: judged as absent.
+        b.checkLiveness(now: t0.addingTimeInterval(KernelSentryService.bootBudget + KernelSentryService.loadBudget + 1),
+                        running: true)
+        #expect(tap.alarms("tampering").count == 1)
+        #expect(KernelSentryService.isLoading("waiting") && KernelSentryService.isLoading("pending"))
+
+        // A required sentry loads before the supervisor publishes: its
+        // "waiting" arrives with filesystem still "pending" (no Status
+        // recorded) and must count all the same.
+        let id2 = UUID()
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "waiting",
+        ])
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id2) }
+        #expect(GuestSandboxStatusStore.shared.status(for: id2) == nil)
+        #expect(GuestSandboxStatusStore.shared.sentryState(for: id2) == "waiting")
+        let b2 = SentryBridge(profileID: id2, requirement: .hard, restoring: false)
+        let tap2 = Tap(); b2.tap = { tap2.add($0, $1) }
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
+        // The load then fails, still before the supervisor publishes: a
+        // failure to report with its reason, not tampering.
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "unavailable",
+            "sentry_reason": "no module for 6.8.0-150-generic",
+        ])
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 900), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
+        let u = tap2.alarms("sentry_unavailable").first
+        #expect(u.flatMap { KernelSentryTests.I($0["weight"]) } == 0)
+        #expect(u.flatMap { KernelSentryTests.S($0["reason"]) }?.contains("6.8.0-150-generic") == true)
+        #expect(!KernelSentryService.isLoading("running") && !KernelSentryService.isLoading("unavailable"))
+    }
+
     @Test("Cross-check with the attestor's digest and status catches an impostor")
     func crossCheck() {
         let (b, g, tap) = connect(nil, hello())
@@ -421,5 +472,72 @@ struct KernelSentryTests {
         #expect(tap.all.filter { $0.0 == "sandbox.activity" }.count == 2)          // denials grew
         b._testTallies(["allowed_file_ops": 900, "denied_file_ops": 2, "denied_syscalls": 0], now: t0 + 400)
         #expect(tap.all.filter { $0.0 == "sandbox.activity" }.count == 3)          // interval elapsed
+    }
+}
+
+/// Finding (CWE-451): "OpenShell Sandbox group stays collapsed when the
+/// filesystem sandbox failed or degraded". The Sandbox card's warning read
+/// only the strict revocation, warnings and the sentry; a Landlock failure
+/// or a best-effort degrade sets only `filesystem` and `degraded_reason`.
+@Suite("Guest sandbox status: a failed or degraded filesystem sandbox needs attention", .serialized)
+struct GuestSandboxAttentionTests {
+    func status(_ report: [String: Any]) throws -> GuestSandboxStatusStore.Status {
+        let id = UUID()
+        defer { GuestSandboxStatusStore.shared.reset(profileID: id) }
+        GuestSandboxStatusStore.shared.update(profileID: id, report: ["event": "sandbox_status"].merging(report) { $1 })
+        return try #require(GuestSandboxStatusStore.shared.status(for: id))
+    }
+
+    @Test("failed and degraded need attention with no warning; enforced doesn't; the sentry counts only when wanted")
+    func attention() throws {
+        let failed = try status(["filesystem": "failed", "degraded_reason": "unreadable spec: bad yaml"])
+        #expect(failed.warnings.isEmpty)
+        #expect(failed.needsAttention(sentryExpected: false))
+        let degraded = try status(["filesystem": "degraded",
+                                   "degraded_reason": "Landlock filesystem sandbox unavailable: no ABI"])
+        #expect(degraded.needsAttention(sentryExpected: false))
+        let fine = try status(["filesystem": "enforced"])
+        #expect(!fine.needsAttention(sentryExpected: true))
+        let noSentry = try status(["filesystem": "enforced", "sentry": "unavailable"])
+        #expect(!noSentry.needsAttention(sentryExpected: false))
+        #expect(noSentry.needsAttention(sentryExpected: true))
+        // Finding (CWE-451): "Sandbox card warns when a process-only policy
+        // correctly leaves the filesystem off". Off is judged by the guest's
+        // own reason, not the editor's draft: a run_as identity that failed
+        // (or a reason not known to be intended) warns; a policy that asked
+        // nothing of the filesystem (process-only, no paths, no spec) doesn't.
+        for reason in ["cannot provision run_as identity: useradd failed",
+                       "cannot resolve run_as identity: no such user", "something unexpected"] {
+            let off = try status(["filesystem": "off", "degraded_reason": reason])
+            #expect(off.needsAttention(sentryExpected: false), "\(reason)")
+        }
+        for asked in ["filesystem_policy not configured", "no paths configured"] {
+            let off = try status(["filesystem": "off", "degraded_reason": asked, "strict_applied": true])
+            #expect(!off.needsAttention(sentryExpected: false), "\(asked)")
+        }
+        #expect(!(try status(["filesystem": "off"])).needsAttention(sentryExpected: false))
+        // Held for a required sentry: the spec asked for a ruleset, the
+        // early publish says off with no reason — not applied yet, not "off".
+        let held = try status(["filesystem": "off", "requested": ["filesystem": true, "process": false]])
+        #expect(held.filesystemNotYetApplied && !held.filesystemOffUnasked)
+        #expect(!(try status(["filesystem": "off", "requested": ["filesystem": false]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "off", "degraded_reason": "no paths configured",
+                              "requested": ["filesystem": true]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "enforced", "requested": ["filesystem": true]])).filesystemNotYetApplied)
+    }
+
+    @Test("the timeline names an off sandbox for what it is: failed, not applied yet, or no policy")
+    func timelineOff() throws {
+        func row(_ d: [String: AnyJSON]) throws -> SecurityTimeline.Event {
+            try #require(SecurityTimeline.map(profileID: UUID(), eventType: "sandbox.status", eventData: d, now: Date()))
+        }
+        let runAs = try row(["filesystem": .string("off"), "reason": .string("cannot resolve run_as identity: no such user")])
+        #expect(runAs.kind == .blocked && runAs.decision.contains("run_as"))
+        let held = try row(["filesystem": .string("off"), "requested_filesystem": .bool(true)])
+        #expect(held.kind == .info && held.decision == "not applied yet")
+        for reason in ["filesystem_policy not configured", "no paths configured"] {
+            let none = try row(["filesystem": .string("off"), "reason": .string(reason)])
+            #expect(none.kind == .info && none.decision == "no filesystem policy", "\(reason)")
+        }
     }
 }

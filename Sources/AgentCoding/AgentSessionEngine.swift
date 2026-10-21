@@ -1875,6 +1875,14 @@ final class AgentSessionEngine {
     /// `remotely` for a fat client's click: the start's prompts go to that
     /// client (`PendingPromptBroker`), never a modal on this Mac. Time the
     /// client spends on such a prompt doesn't count against the boot.
+    /// Whether a boot wait goes on: within its deadline; past it, while the
+    /// guest's sentry was loading within `settleGrace`, up to the cap.
+    static func bootGoesOn(now: Date, deadline: Date, sentryCap: Date, lastLoading: Date?) -> Bool {
+        if now < deadline { return true }
+        guard now < sentryCap, let last = lastLoading else { return false }
+        return now < last.addingTimeInterval(BootBudget.settleGrace)
+    }
+
     func ensureUp(_ profileID: UUID, quietly: Bool = false, remotely: Bool = false) async -> Bool {
         guard let delegate else { return false }
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
@@ -1892,9 +1900,20 @@ final class AgentSessionEngine {
         }
         defer { pendingBoots.remove(profileID) }
         var deadline = Date().addingTimeInterval(Self.bootTimeout)
+        // A guest still loading a required kernel sentry is still booting:
+        // waited out up to the sentry's worst case (BootBudget.workspace).
+        let sentryCap = Date().addingTimeInterval(Self.bootTimeout + KernelSentryService.loadBudget)
         // Cancelled, the sleep throws at once: without this check the loop
         // execs into the machine back to back until the boot timeout.
-        while Date() < deadline, !Task.isCancelled {
+        // When the guest last said its sentry was loading: past the deadline
+        // the boot goes on while it does, and `settleGrace` after (the server
+        // it then starts) — as BootBudget, sampled every turn.
+        var lastLoading: Date?
+        while !Task.isCancelled {
+            let now = Date()
+            if BootBudget.sentryLoading(profileID) { lastLoading = now }
+            guard Self.bootGoesOn(now: now, deadline: deadline, sentryCap: sentryCap, lastLoading: lastLoading)
+            else { break }
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
                 deadline = Date().addingTimeInterval(Self.bootTimeout)

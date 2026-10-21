@@ -89,6 +89,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     private let lock = NSLock()
     private var packageRequests: [UUID: [PackageRequest]] = [:]
     private var proposals: [UUID: [Proposal]] = [:]
+    /// Proposals an approval is applying right now ("profileID|id").
+    private var applyingProposals: Set<String> = []
     private var denials: [UUID: [Denial]] = [:]
     private var nextID = 1
 
@@ -104,6 +106,9 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     public var applyApproved: (@Sendable (UUID, Proposal) async -> String?) = { _, _ in "advisor not wired" }
     /// Whether the workspace takes system-package requests.
     public var systemPackagesProvider: (@Sendable (UUID) -> Bool) = { _ in false }
+    /// Enforce binaries is on (a network rule then applies only to the
+    /// programs it lists); set by the app.
+    public var enforceBinariesProvider: (@Sendable (UUID) -> Bool) = { _ in false }
     /// Install approved packages in the guest as root. Returns (exit code,
     /// output).
     public var installPackages: (@Sendable (UUID, String, [String]) async -> (Int, String)) = { _, _, _ in (1, "not wired") }
@@ -135,7 +140,7 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// and port, no inspection — the user can approve it or wait for the
     /// agent's narrower L7 proposal, which supersedes it.
     public func recordDenial(profileID: UUID, layer: String, host: String, port: Int,
-                             method: String?, path: String?, reason: String) {
+                             method: String?, path: String?, reason: String, ip: String? = nil) {
         guard policyProvider(profileID) != nil else { return }
         lock.lock()
         var list = denials[profileID] ?? []
@@ -155,16 +160,23 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         }
         lock.unlock()
         guard !exists else { return }
-        _ = enqueue(profileID: profileID, rule: Self.allowRule(profileID: profileID, host: host, port: port),
+        let rule = Self.allowRule(profileID: profileID, host: host, port: port, ip: ip)
+        // Enforce binaries on and no program known: the rule would list none
+        // and so allow nothing. Don't draft a proposal that can't work.
+        if rule.binaries.isEmpty, enforceBinariesProvider(profileID) { return }
+        _ = enqueue(profileID: profileID, rule: rule,
                     source: "mechanistic", intent: "Drafted from a blocked connection to \(host):\(port)")
     }
 
     /// One host and port, no inspection. When the attestor named the program
     /// that tried (Enforce binaries is on), the rule lists it: a rule without
     /// `binaries` allows nothing there.
-    static func allowRule(profileID: UUID, host: String, port: Int) -> OpenShellPolicy.NetworkRule {
+    /// The program is looked up by every key the blocked row shows: the host
+    /// (SNI / Host header) and the destination IP.
+    static func allowRule(profileID: UUID, host: String, port: Int, ip: String? = nil) -> OpenShellPolicy.NetworkRule {
         let h = host.lowercased()
-        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID, destinations: [h], port: port)
+        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID,
+                                                         destinations: [h] + (ip.map { [$0] } ?? []), port: port)
         func slug(_ s: String) -> String { s.map { $0.isLetter || $0.isNumber ? $0 : "_" }.reduce(into: "") { $0.append($1) } }
         var key = "allow_" + slug(h) + "_\(port)"
         if let exe { key += "_" + slug((exe as NSString).lastPathComponent) }
@@ -177,8 +189,14 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// The user allowed a blocked destination (the Sandbox drawer): add the
     /// rule now, through the same validation and apply path as an approval,
     /// and settle any draft for it. Returns an error message, or nil.
-    public func allow(profileID: UUID, host: String, port: Int) async -> String? {
-        let rule = Self.allowRule(profileID: profileID, host: host, port: port)
+    public func allow(profileID: UUID, host: String, port: Int, ip: String? = nil) async -> String? {
+        let rule = Self.allowRule(profileID: profileID, host: host, port: port, ip: ip)
+        // A rule with no program allows nothing while Enforce binaries is on:
+        // saying "Allowed" would be untrue, and the next try would still fail.
+        if rule.binaries.isEmpty, enforceBinariesProvider(profileID) {
+            return NSLocalizedString("Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.",
+                                     comment: "network drawer: allow refused, no program known")
+        }
         let id: String
         switch enqueue(profileID: profileID, rule: rule, source: "user", intent: "Allowed from the Sandbox drawer") {
         case .ok(let v): id = v
@@ -190,7 +208,10 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         lock.lock()
         for i in (proposals[profileID] ?? []).indices {
             let p = proposals[profileID]![i]
-            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port {
+            // Not one an approval is applying: it ends approved, not
+            // rejected while its rule is being saved.
+            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port,
+               !applyingProposals.contains("\(profileID)|\(p.id)") {
                 proposals[profileID]![i].status = .rejected
                 proposals[profileID]![i].rejectionReason = "allowed by hand"
             }
@@ -239,6 +260,7 @@ public final class OpenShellAdvisor: @unchecked Sendable {
             for i in (proposals[profileID] ?? []).indices {
                 let p = proposals[profileID]![i]
                 if p.source == "mechanistic", p.status == .pending,
+                   !applyingProposals.contains("\(profileID)|\(p.id)"),     // being approved: it stands
                    rule.endpoints.contains(where: { $0.host == p.host && $0.ports.contains(p.port) }) {
                     proposals[profileID]![i].status = .rejected
                     proposals[profileID]![i].rejectionReason = "superseded by an agent-authored proposal"
@@ -307,10 +329,17 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     }
 
     public func approve(id: String, profileID: UUID, auto: Bool = false) async {
-        guard let p = proposal(id: id, profileID: profileID), p.status == .pending else { return }
+        // Claimed under the lock with the pending check: a second approval
+        // (or a reject) while this one applies the rule does nothing, rather
+        // than applying it twice or being overwritten (as for packages).
+        lock.lock()
+        guard let p = proposals[profileID]?.first(where: { $0.id == id }), p.status == .pending,
+              applyingProposals.insert("\(profileID)|\(id)").inserted else { lock.unlock(); return }
+        lock.unlock()
         let error = await applyApproved(profileID, p)
         lock.lock()
-        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id }) {
+        applyingProposals.remove("\(profileID)|\(id)")
+        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
             if let error {
                 proposals[profileID]![i].status = .rejected
                 proposals[profileID]![i].rejectionReason = "could not be applied: \(error)"
@@ -328,13 +357,18 @@ public final class OpenShellAdvisor: @unchecked Sendable {
 
     public func reject(id: String, profileID: UUID, reason: String) {
         lock.lock()
-        if let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
+        var updated: Proposal?
+        if !applyingProposals.contains("\(profileID)|\(id)"),
+           let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
             proposals[profileID]![i].status = .rejected
             proposals[profileID]![i].rejectionReason = reason.isEmpty ? nil : reason
+            updated = proposals[profileID]![i]
         }
-        let updated = proposals[profileID]?.first { $0.id == id }
         lock.unlock()
-        if let updated { emit(updated, status: "rejected") }
+        // Only a reject that took: one ignored (being applied, or already
+        // settled) says nothing.
+        guard let updated else { return }
+        emit(updated, status: "rejected")
         notify()
     }
 
@@ -486,12 +520,31 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         return .ok(r)
     }
 
+    /// Moves request `id` out of `pending` under one lock: the request, when
+    /// this call is the one that moved it; nil when it had already left
+    /// (Finding CWE-362, "A second Install click starts another root
+    /// apt-get and can overwrite success": the pending check and the
+    /// `.installing` write were two lock acquisitions, so two clicks — or the
+    /// drawer and the control-socket route — both installed, and a reject
+    /// between them was overwritten).
+    private func claimPending(_ id: String, _ profileID: UUID, _ change: (inout PackageRequest) -> Void) -> PackageRequest? {
+        lock.lock()
+        guard let i = packageRequests[profileID]?.firstIndex(where: { $0.id == id }),
+              packageRequests[profileID]![i].status == .pending else { lock.unlock(); return nil }
+        let before = packageRequests[profileID]![i]
+        change(&packageRequests[profileID]![i])
+        lock.unlock()
+        notify()
+        return before
+    }
+
     /// The user approved: install now (returns once the install finished).
+    /// Only the approval that moved the request to `.installing` runs apt.
     public func approvePackages(id: String, profileID: UUID) async {
-        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
-        updatePackage(id, profileID) { $0.status = .installing }
+        guard let r = claimPending(id, profileID, { $0.status = .installing }) else { return }
         let (code, output) = await installPackages(profileID, r.manager, r.packages)
         updatePackage(id, profileID) {
+            guard $0.status == .installing else { return }
             $0.status = code == 0 ? .installed : .failed
             $0.exitCode = code
             $0.output = String(output.suffix(16_000))
@@ -502,8 +555,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     }
 
     public func rejectPackages(id: String, profileID: UUID, reason: String) {
-        guard let r = packageRequest(id: id, profileID: profileID), r.status == .pending else { return }
-        updatePackage(id, profileID) { $0.status = .rejected; $0.reason = reason.isEmpty ? nil : reason }
+        guard let r = claimPending(id, profileID, { $0.status = .rejected; $0.reason = reason.isEmpty ? nil : reason })
+        else { return }
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.package_request", eventData: [
             "manager": .string(r.manager), "packages": .array(r.packages.map { .string($0) }), "status": .string("rejected")])
     }

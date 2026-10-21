@@ -173,6 +173,26 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
+    /// The client port a connection may label its flow with: the one its
+    /// preamble names, only when that line was seen (and counted) at once.
+    static func claimedSport(parsed: Int?, peeked: Int?) -> Int? {
+        guard let parsed, parsed == peeked else { return nil }
+        return parsed
+    }
+
+    /// The preamble's client port, read without consuming the stream (the
+    /// request read that follows still sees it), waiting briefly for the
+    /// first bytes: agentd writes the line before any client byte.
+    static func peekPreambleSport(fd: Int32, waitMs: Int32 = 500) -> Int? {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, waitMs) > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 160)
+        let n = recv(fd, &buf, buf.count, MSG_PEEK)
+        guard n > 0 else { return nil }
+        var d = Data(buf.prefix(n))
+        return stripClientPreamble(&d)
+    }
+
     func run() async {
         defer { closeFD() }
         do {
@@ -190,13 +210,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
         //    request carries headers and possibly a body after it, and one
         //    non-ASCII byte there must not make the whole request "malformed".
+        // A preamble's claim is counted from its first line, before the
+        // request is read (see NetworkLineage.noteClaimant).
+        let peekedSport = Self.peekPreambleSport(fd: fd)
+        let claim = peekedSport.map { NetworkLineage.shared.noteClaimant(profileID: profileID, sport: $0) }
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
         // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
         // client socket this request came from, which the kernel sentry
         // reports as a loopback flow. It ties the CONNECT target to the
         // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
-        let clientSport = Self.stripClientPreamble(&connectReq)
+        // The target is only ever recorded for a connection counted above:
+        // one whose line didn't arrive at once (agentd's always does) can't
+        // label a flow, so it can't dodge the claimant count either.
+        let clientSport = Self.claimedSport(parsed: Self.stripClientPreamble(&connectReq), peeked: peekedSport)
         guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
               let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
                                         encoding: .isoLatin1) else {
@@ -227,7 +254,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let afterScheme = target[scheme.upperBound...]
             let authority = String(afterScheme.prefix { $0 != "/" })
             let (host, port) = parseHTTPHostPort(authority)   // default 80
-            if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
+            if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
             let originPath = String(afterScheme.dropFirst(authority.count))
             let path = originPath.isEmpty ? "/" : originPath
 
@@ -254,7 +281,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
-        if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
+        if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
 
         // Connection-layer egress verdict for the cooperative-proxy path. The
         // transparent path enforces this in acceptTransparentFlow, but proxied
@@ -1613,10 +1640,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // An OpenShell message policy needs the opaque pump's per-message
             // gate, so it takes precedence: policy enforcement is never traded
             // for scanning.
-            let contentGuard = (insecure || messagePolicy != nil || messageTransform != nil) ? nil
-                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID,
-                                      conversation: SquelchRewriter.sessionKey(
-                                        headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self)))
+            let wsConversation = SquelchRewriter.sessionKey(
+                headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self))
+            let onPolicyPump = messagePolicy != nil || messageTransform != nil
+            let contentGuard = (insecure || onPolicyPump) ? nil
+                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID, conversation: wsConversation)
+            // Squelch on the policy pump too: client text trimmed ahead of the
+            // OpenShell rewrites, server events read for the calls a chained
+            // turn's bare results are matched with. (It has no other socket
+            // path; PII / prompt injection still skip this pump.)
+            let squelchOnPump = !insecure && onPolicyPump
+                && WSContentGuard.squelchApplies(host: host, profileID: profileID)
+            if squelchOnPump {
+                messageTransform = WSContentGuard.squelchingTransform(then: messageTransform, profileID: profileID,
+                                                                      conversation: wsConversation)
+            }
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
                 rawRequest: upgradeRequest,
@@ -1626,6 +1664,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 messageTransform: messageTransform,
                 onViolation: onViolation,
                 contentGuard: contentGuard,
+                squelchLearnFor: squelchOnPump ? profileID : nil,
                 onUpstreamMessage: realtimeTap.map { tap in
                     { @Sendable msg in tap.handle(msg) }
                 })
@@ -2003,13 +2042,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 var scOutcome = "allowed"
                 var scReasonKind: String? = nil
                 var scReason: String? = nil
+                // A blocked package the user may let through (the timeline
+                // row's "Always allow" action), or one they did.
+                var scOverridable = false
                 let scProfileID = self.profileID
                 defer {
                     emitSupplyChainFetch(profileID: scProfileID,
                         ecosystem: ecosystem.rawValue,
                         package: pkg, version: version,
                         kind: "artifact", outcome: scOutcome,
-                        reasonKind: scReasonKind, reason: scReason)
+                        reasonKind: scReasonKind, reason: scReason,
+                        overridable: scOverridable)
                 }
 
                 // Three pre-flight checks before forward. Each may
@@ -2062,6 +2105,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 var verifyGaps: [String] = []
                 // Why each gave no verdict, in the words the prompt shows.
                 var verifyWhy: [String] = []
+                // What the reputation checks (OSV, socket.dev) found: the
+                // first block, applied after both ran unless the user
+                // overrides it (GitHub issue #54). A socket.dev malware
+                // verdict can't be overridden and wins over anything else.
+                var reputationBlock: (reason: String, kind: String, log: String, overridable: Bool)?
 
                 // 2. OSV check (free, no key, off by default).
                 if policy.osvEnabled {
@@ -2075,13 +2123,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
                                 "at \(policy.osvSeverity.displayName.lowercased()): " +
                                 "\(v.id) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
-                            scOutcome = "blocked"
-                            scReasonKind = "osv"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "osv", "OSV 451: \(pkg)@\(version) → \(v.id)", true)
                         }
                     } else {
                         // Lookup failed (network error, non-200, 429 rate-limit,
@@ -2098,32 +2140,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         ecosystem: ecosystem.rawValue, name: pkg, version: version,
                         apiKey: policy.socketAPIKey)
                   if case .success(let result) = socketLookup {
-                    if policy.socketBlockCompromised, let bad = result.compromised.first {
+                    if policy.socketBlockCompromised,
+                       let bad = SocketDevClient.blockingIssue(result.compromised) {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                             "flagged by socket.dev (\(bad.severity.rawValue)): " +
                             "\(bad.type) — \(bad.summary)"
-                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        SupplyChainLog.shared.record(
-                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]")
-                        scOutcome = "blocked"
-                        scReasonKind = "socket_compromised"
-                        scReason = reason
-                        return
+                        let malware = SocketDevClient.isMalwareVerdict(bad.type)
+                        if reputationBlock == nil || malware {
+                            reputationBlock = (reason, "socket_compromised",
+                                               "socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]",
+                                               !malware)
+                        }
                     }
-                    if policy.socketBlockCVE {
+                    if policy.socketBlockCVE, reputationBlock == nil {
                         let threshold = SocketDevClient.Severity.from(string: policy.socketCVESeverity.rawValue)
                         let bad = result.vulnerabilities.first { $0.severity.rank >= threshold.rank }
                         if let v = bad {
                             let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                                 "has known CVE per socket.dev (\(v.severity.rawValue)): " +
                                 "\(v.type) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]")
-                            scOutcome = "blocked"
-                            scReasonKind = "socket_cve"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "socket_cve",
+                                               "socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]", true)
                         }
                     }
                   } else if case .failure(let why) = socketLookup {
@@ -2132,6 +2169,36 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     verifyGaps.append("socket.dev")
                     verifyWhy.append(why.reason.explanation)
                   }
+                }
+
+                // 3a. The reputation verdict: blocked, unless the package is
+                //     on the workspace's override list or the user lets it
+                //     through now (malware verdicts never are).
+                if let block = reputationBlock {
+                    var allowed = false
+                    if block.overridable {
+                        if policy.reputationAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                            allowed = true
+                        } else {
+                            allowed = await supplyChainBroker.consentOverride(
+                                profileID: profileID, ecosystem: ecosystem.rawValue, name: pkg,
+                                version: version, reason: block.reason)
+                        }
+                    }
+                    if !allowed {
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: block.reason))
+                        SupplyChainLog.shared.record("[supply-chain] \(block.log)")
+                        scOutcome = "blocked"
+                        scReasonKind = block.kind
+                        scReason = block.reason
+                        scOverridable = block.overridable
+                        return
+                    }
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] overridden by the user: \(ecosystem.rawValue) \(pkg)@\(version) — \(block.reason)")
+                    scOutcome = "overridden"
+                    scReasonKind = block.kind
+                    scReason = block.reason
                 }
 
                 // 3b. Fail closed. An enabled reputation check couldn't reach
@@ -2660,6 +2727,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                         messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)? = nil,
                                         onViolation: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                                         contentGuard: WSContentGuard? = nil,
+                                        squelchLearnFor: UUID? = nil,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
         // This path bypasses URLSession, so it must resolve the same
         // upstream TLS material `ClientCertChallengeDelegate` supplies on
@@ -2816,9 +2884,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSInflater(noContextTakeover: deflate!.serverNoContextTakeover) : nil
         let c2uCollector = captureBody
             ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
+        // Squelch and the realtime tap read whole server messages (as the
+        // content-guard relay does, up to its 32 MB), not the trace's 1 MB
+        // preview: a tool call with a long argument, or the response.completed
+        // that carries it, is one big event that a cut-off prefix can't parse.
+        let learnCap = (squelchLearnFor != nil || onUpstreamMessage != nil)
+            ? WSMessageAssembler.maxMessage : WSTraceCollector.perMessageCap
         let u2cCollector = captureBody
-            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
-        u2cCollector?.onMessage = onUpstreamMessage
+            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater, deliverCap: learnCap) : nil
+        // Squelch's server side on the pump: the model's calls, learned from
+        // every server text message — through the trace collector when there
+        // is one, else a parser that keeps nothing.
+        let learn: (@Sendable (WSMessage) -> Void)? = squelchLearnFor.map { pid in
+            { msg in
+                if msg.kind == .text, !msg.truncated {
+                    SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid)
+                }
+            }
+        }
+        let u2cLearner = (u2cCollector == nil && learn != nil)
+            ? WSTraceCollector(direction: .upstreamToClient,
+                               inflater: deflate.map { WSInflater(noContextTakeover: $0.serverNoContextTakeover) },
+                               retainsMessages: false, deliverCap: learnCap) : nil
+        u2cLearner?.onMessage = learn
+        if let learn {
+            let tap = onUpstreamMessage
+            u2cCollector?.onMessage = { msg in learn(msg); tap?(msg) }
+        } else {
+            u2cCollector?.onMessage = onUpstreamMessage
+        }
         // OpenShell per-message inspection of client text (see caller).
         let inspector = messagePolicy.map { decide in
             OpenShellWebSocket.ClientStream(compression: deflate != nil, decide: { text in
@@ -2887,7 +2981,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); u2cLearner?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
@@ -4892,7 +4986,8 @@ private func emitSupplyChainFetch(profileID: UUID,
                                    kind: String,
                                    outcome: String,
                                    reasonKind: String? = nil,
-                                   reason: String? = nil) {
+                                   reason: String? = nil,
+                                   overridable: Bool = false) {
     var data: [String: AnyJSON] = [
         "ecosystem": .string(ecosystem),
         "package": .string(package),
@@ -4902,6 +4997,7 @@ private func emitSupplyChainFetch(profileID: UUID,
     if let version { data["version"] = .string(version) }
     if let reasonKind { data["reason_kind"] = .string(reasonKind) }
     if let reason { data["reason"] = .string(reason) }
+    if overridable { data["overridable"] = .bool(true) }
     BACEventEmitter.shared.emitDetached(
         profileID: profileID,
         eventType: "supply_chain.fetch",

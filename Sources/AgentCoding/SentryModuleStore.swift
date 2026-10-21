@@ -136,8 +136,19 @@ public final class SentryModuleStore: @unchecked Sendable {
     private let fm = FileManager.default
     private let lock = NSLock()
     private var catalogs: [String: SentryModuleCatalog] = [:]
-    private var inflight: [String: Task<String?, Never>] = [:]
+    private var inflight: [String: Task<Failure?, Never>] = [:]
+
+    /// Why a module isn't cached. `definitive`: it won't change this boot —
+    /// the signed catalog has no module for the kernel, or no trusted one —
+    /// so a waiting guest is told to stop. Otherwise (offline, a failed or
+    /// corrupted download, a cache write) it may on the next try.
+    public struct Failure: Sendable, Equatable {
+        public let reason: String
+        public let definitive: Bool
+    }
     private var catalogFetchedAt: [String: Date] = [:]
+    /// When a fetched catalog was last accepted (cached as current).
+    private var catalogAcceptedAt: [String: Date] = [:]
 
     public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
                 publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64,
@@ -183,8 +194,16 @@ public final class SentryModuleStore: @unchecked Sendable {
         root.appendingPathComponent(hash, isDirectory: true).appendingPathComponent("catalog.json")
     }
 
+    /// The catalog's signature doesn't cover the per-module signatures, so
+    /// whoever can write the bucket could strip them (and leave the catalog
+    /// signature valid): every module then read as unsigned and the guest
+    /// gave up on its sentry. A catalog is taken only when every module's own
+    /// signature verifies too; anything less keeps the one already cached.
     private func accept(_ c: SentryModuleCatalog, for hash: String) -> Bool {
-        c.isWellFormed(for: hash) && (!requireSignature || c.isSignatureValid(publicKeyBase64: publicKeyBase64))
+        guard c.isWellFormed(for: hash) else { return false }
+        guard requireSignature else { return true }
+        return c.isSignatureValid(publicKeyBase64: publicKeyBase64)
+            && c.modules.allSatisfy { c.isModuleSignatureValid($0, publicKeyBase64: publicKeyBase64) }
     }
 
     /// The last verified catalog for `hash` (memory, else disk, re-verified:
@@ -205,11 +224,22 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// doesn't verify or is older than what's cached.
     @discardableResult
     public func refreshCatalog(_ hash: String, force: Bool = false) async -> SentryModuleCatalog? {
+        await fetchCatalog(hash, force: force).catalog
+    }
+
+    /// `refreshCatalog`, saying whether the catalog returned is one the
+    /// server just served and this store accepted (`fresh`) — or the cached
+    /// one it fell back to (offline, non-200, undecodable, rejected, older).
+    /// Only a fresh catalog proves what isn't published (Finding CWE-670, "A
+    /// failed sentry-catalog refresh is treated as proof the kernel was never
+    /// published").
+    private func fetchCatalog(_ hash: String, force: Bool) async -> (catalog: SentryModuleCatalog?, fresh: Bool) {
         lock.lock()
         let recent = catalogFetchedAt[hash].map { Date().timeIntervalSince($0) < 60 } ?? false
+        let acceptedRecently = catalogAcceptedAt[hash].map { Date().timeIntervalSince($0) < 60 } ?? false
         lock.unlock()
         let cached = cachedCatalog(hash)
-        if recent && !force { return cached }
+        if recent && !force { return (cached, acceptedRecently && cached != nil) }
         let url = base.appendingPathComponent("sentry/\(hash)/catalog.json")
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -218,21 +248,21 @@ public final class SentryModuleStore: @unchecked Sendable {
               let fetched = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data)
         else {
             Self.log("catalog for source \(hash.prefix(12)) unavailable from \(url.host ?? "?"); using \(cached == nil ? "nothing" : "the cached one")")
-            return cached
+            return (cached, false)
         }
         lock.lock(); catalogFetchedAt[hash] = Date(); lock.unlock()
         guard accept(fetched, for: hash) else {
             Self.log("REJECTED the catalog for source \(hash.prefix(12)): bad signature or shape")
-            return cached
+            return (cached, false)
         }
         if let old = cached?.signature?.signedAt, let new = fetched.signature?.signedAt, new < old {
             Self.log("ignored a catalog signed \(new), older than the cached \(old)")
-            return cached
+            return (cached, false)
         }
         try? fm.createDirectory(at: catalogFile(hash).deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: catalogFile(hash), options: .atomic)
-        lock.lock(); catalogs[hash] = fetched; lock.unlock()
-        return fetched
+        lock.lock(); catalogs[hash] = fetched; catalogAcceptedAt[hash] = Date(); lock.unlock()
+        return (fetched, true)
     }
 
     // MARK: Modules
@@ -265,13 +295,20 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// Make sure `kernel`'s module is cached. Returns nil on success, else why
     /// not (one line, for the log and the guest-facing reason).
     public func ensure(kernel: String, hash: String) async -> String? {
-        guard SentryModuleCatalog.isKernelName(kernel) else { return "not a kernel release: \(kernel)" }
+        await ensureOutcome(kernel: kernel, hash: hash)?.reason
+    }
+
+    /// `ensure`, saying whether the failure is definitive.
+    public func ensureOutcome(kernel: String, hash: String) async -> Failure? {
+        guard SentryModuleCatalog.isKernelName(kernel) else {
+            return Failure(reason: "not a kernel release: \(kernel)", definitive: true)
+        }
         if verifiedModule(kernel: kernel, hash: hash) != nil { return nil }
         let key = "\(hash)|\(kernel)"
         lock.lock()
         if let t = inflight[key] { lock.unlock(); return await t.value }
-        let task = Task<String?, Never> { [weak self] in
-            guard let self else { return "store gone" }
+        let task = Task<Failure?, Never> { [weak self] in
+            guard let self else { return Failure(reason: "store gone", definitive: false) }
             return await self.download(kernel: kernel, hash: hash)
         }
         inflight[key] = task
@@ -281,32 +318,40 @@ public final class SentryModuleStore: @unchecked Sendable {
         return result
     }
 
-    private func download(kernel: String, hash: String) async -> String? {
+    private func download(kernel: String, hash: String) async -> Failure? {
+        func transient(_ r: String) -> Failure { Failure(reason: r, definitive: false) }
+        func definitive(_ r: String) -> Failure { Failure(reason: r, definitive: true) }
         var catalog = cachedCatalog(hash)
+        var fresh = false
         if catalog?.module(for: kernel) == nil {
             // A new kernel may have been published since the cached catalog.
-            catalog = await refreshCatalog(hash, force: catalog != nil)
+            // Always fetched: the guest's wait paces these retries, and a
+            // rejected first fetch mustn't skip the network for a minute.
+            (catalog, fresh) = await fetchCatalog(hash, force: true)
         }
-        guard let catalog else { return "no module catalog for this Bromure version (offline?)" }
+        guard let catalog else { return transient("no module catalog for this Bromure version (offline?)") }
         guard let entry = catalog.module(for: kernel) else {
-            return "no module published for \(kernel) yet"
+            // Only the server's current catalog says it isn't published: the
+            // cached one we fell back to may simply predate it.
+            return fresh ? definitive("no module published for \(kernel) yet")
+                         : transient("couldn't refresh the module catalog to look for \(kernel)")
         }
         guard moduleTrusted(entry, in: catalog) else {
             Self.log("REJECTED the \(kernel) module: missing or invalid module signature")
-            return "the \(kernel) module isn't signed by Bromure"
+            return definitive("the \(kernel) module isn't signed by Bromure")
         }
         let url = base.appendingPathComponent(entry.path)
         guard let (data, response) = try? await session.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200 else {
-            return "download of the \(kernel) module failed"
+            return transient("download of the \(kernel) module failed")
         }
         guard data.count == entry.bytes, Self.sha256Hex(data) == entry.sha256.lowercased() else {
             Self.log("REJECTED the \(kernel) module: sha256/size don't match the signed catalog")
-            return "the downloaded \(kernel) module didn't match its signed checksum"
+            return transient("the downloaded \(kernel) module didn't match its signed checksum")
         }
         let dest = cacheFile(kernel, hash)
         try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        do { try data.write(to: dest, options: .atomic) } catch { return "couldn't cache the module: \(error.localizedDescription)" }
+        do { try data.write(to: dest, options: .atomic) } catch { return transient("couldn't cache the module: \(error.localizedDescription)") }
         Self.log("cached the sentry module for \(kernel) (source \(hash.prefix(12)))")
         return nil
     }
@@ -338,6 +383,12 @@ public final class SentryModuleStore: @unchecked Sendable {
         }
         return staged.sorted()
     }
+
+    /// How long a guest waits for its module at boot (bromure-sentryd's
+    /// BROMURE_SENTRY_WAIT_S), and how often a transient failure is retried
+    /// within it.
+    public static let guestWait: TimeInterval = 45
+    public static let retryInterval: TimeInterval = 5
 
     /// `bromure_sentry-<kernel>.unavailable` (one line: the host's reason)
     /// beside where the module would be: a guest waiting for that kernel

@@ -51,6 +51,7 @@ import json
 import os
 import pwd
 import re
+import select
 import signal
 import socket
 import struct
@@ -1537,6 +1538,78 @@ SANDBOX_CGROUP_NAME = "bromure-sandbox"
 SENTRY_STATUS_PATH = os.path.join(RUN_DIR, "sentry.json")
 SENTRY_PHASE_PATH = "/sys/module/bromure_sentry/parameters/phase"
 SENTRY_CGROUP_PATH = "/sys/module/bromure_sentry/parameters/sandbox_cgroup"
+# The loader's unit (agentd starts it; it may wait for a module and build one).
+SENTRY_UNIT = "bromure-sentryd"
+# Its worst case: the host wait, then apt and make at 900 s each.
+SENTRY_SETTLE_S = 45 + 900 + 900 + 60
+SENTRY_UNIT_GRACE_S = 10.0
+
+
+def _unit_active(unit):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class SentryHold(object):
+    """`sentry.requirement: hard` = no workload before the sentry watches.
+
+    The loader runs in its own unit and can take minutes for a kernel the host
+    has no module staged for, so the supervisor can't simply wait for it before
+    serving: agentd needs the control socket to come up. Instead, while held,
+    the supervisor starts no tmux server and runs no `exec` -- nothing of the
+    workload's -- until the loader settles: running, or unavailable with its
+    reason (the host judges that per the requirement). A loader whose unit is
+    gone without a verdict, or one past its own worst case, releases the hold,
+    so a dead loader can't keep the workspace sessionless forever.
+    """
+
+    def __init__(self, hard, unit_active=_unit_active, now=time.time,
+                 deadline_s=SENTRY_SETTLE_S, grace_s=SENTRY_UNIT_GRACE_S,
+                 status_path=None):
+        self.hard = bool(hard)
+        self.unit_active = unit_active
+        self.now = now
+        self.started = now()
+        self.deadline_s = deadline_s
+        self.grace_s = grace_s
+        self.status_path = status_path or SENTRY_STATUS_PATH
+        self.released = not self.hard
+
+    def state(self):
+        try:
+            with open(self.status_path) as handle:
+                return (json.load(handle) or {}).get("sentry")
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def held(self):
+        """True while the workload must wait. Once released, stays released."""
+        if self.released:
+            return False
+        state = self.state()
+        elapsed = self.now() - self.started
+        if state in ("running", "unavailable", "off"):
+            why = "the sentry settled: %s" % state
+        elif elapsed > self.deadline_s:
+            why = "no sentry verdict after %.0fs" % self.deadline_s
+        elif elapsed > self.grace_s and not self.unit_active(SENTRY_UNIT):
+            why = "the sentry loader ended without a verdict (%s)" % state
+        else:
+            return True
+        self.released = True
+        log("sentry hold released after %.0fs: %s" % (elapsed, why))
+        return False
+
+    def wait(self, poll=1.0):
+        while self.held():
+            time.sleep(poll)
+
+
+WAITING_FOR_SENTRY = ("waiting for the kernel sentry to load (requirement: hard); "
+                      "the workload starts once it does")
 
 
 def mark_sentry_session():
@@ -1682,49 +1755,275 @@ def is_descendant_of(pid, ancestor):
 # package gets installed, as root, and only by exact name: a name is
 # [a-z0-9][a-z0-9+.-]* (optionally =version or /release), never an option, a
 # path or a .deb, so nothing on the request line can change what apt does.
+#
+# The shape alone isn't enough: apt reads a name that isn't exactly a package
+# as something else. A trailing `-` removes (`python3-` uninstalls python3
+# and everything that needs it), a trailing `+` installs, and failing those
+# the name is tried as a glob, then a regex (`a.+` selects most of the
+# archive). So each name must be an exact binary package in apt's cache
+# before apt-get sees it; one that isn't is refused, never passed on.
 
 _APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64})?$")
 
 
-def apt_install(packages):
-    """Install `packages` with apt-get. Returns (exit code, output tail)."""
+# One deadline for the whole call -- the list refresh and the install, with
+# its retry -- and the caller (agentd, then the host) waits longer than it,
+# so nothing up the chain reports "failed" while apt is still running. A step
+# that overruns it, or whose caller hung up, is stopped -- apt and every
+# process it started -- with SIGTERM first: SIGKILL mid-unpack leaves dpkg
+# interrupted.
+APT_DEADLINE_S = 1800
+APT_STOP_GRACE_S = 120
+# One install at a time: a second approval (the same names asked again while
+# the first is still in dpkg) waits for it rather than racing a second apt.
+_APT_LOCK = threading.Lock()
+
+
+def _proc_table():
+    """{pid: (ppid, start, state)} for every process; `start` tells a reused
+    pid apart. /proc on the guest; `ps` elsewhere (the tests run on macOS)."""
+    table = {}
+    if os.path.isdir("/proc/self"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % name) as handle:
+                    rest = handle.read().rsplit(")", 1)[-1].split()
+                table[int(name)] = (int(rest[1]), rest[19], rest[0])
+            except (OSError, IndexError, ValueError):
+                pass
+        return table
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return table
+    for line in out.splitlines():
+        f = line.split(None, 3)
+        if len(f) == 4 and f[0].isdigit() and f[1].isdigit():
+            table[int(f[0])] = (int(f[1]), f[3].strip(), f[2][:1])
+    return table
+
+
+def _apt_tree(root, known):
+    """Update `known` ({pid: start}): drop the members that have exited, add
+    every live descendant of `root` (None once apt itself is reaped: its pid
+    may be reused) or of a member. A member stays one after its parent dies
+    and it is reparented -- which is what dpkg is once apt is gone."""
+    table = _proc_table()
+    for pid, start in list(known.items()):
+        row = table.get(pid)
+        if row is None or row[1] != start or row[2] == "Z":
+            del known[pid]
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, start, state) in table.items():
+            if pid not in known and state != "Z" and (ppid == root or ppid in known):
+                known[pid] = start
+                grew = True
+    return known
+
+
+def _apt_stop(proc):
+    """Stop apt and everything it started, and return only once all of it
+    has exited.
+
+    apt runs dpkg (`--unpack`, `--configure --pending`) in a session of its
+    own, so a signal to apt's process group never reaches dpkg or the
+    maintainer scripts under it: apt died at once, dpkg went on configuring
+    as root after this returned, and the install lock let a second apt in
+    beside it. (Finding CWE-670, "apt stop signals only apt-get's process
+    group, so dpkg and maintainer scripts keep running".) So the whole tree
+    is tracked by pid, through the reparenting, and SIGTERMed; whatever is
+    left after APT_STOP_GRACE_S is SIGKILLed."""
+    tree = _apt_tree(proc.pid, {})
+    signalled = set()
+
+    def send(sig):
+        if proc.returncode is None:       # once reaped, its pgid may be reused
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass
+        for pid in list(tree):
+            if sig == signal.SIGTERM and pid in signalled:
+                continue
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+            signalled.add(pid)
+
+    send(signal.SIGTERM)
+    grace = time.time() + APT_STOP_GRACE_S
+    killed_at = None
+    while True:
+        done = proc.poll() is not None
+        _apt_tree(None if done else proc.pid, tree)
+        if done and not tree:
+            return
+        if killed_at is None and time.time() > grace:
+            send(signal.SIGKILL)
+            killed_at = time.time()
+        elif killed_at is None:
+            send(signal.SIGTERM)          # anything started since the last look
+        elif time.time() - killed_at > 30:
+            # Unkillable (D state): leave it rather than hang the caller.
+            log("apt: still running after SIGKILL: %s" % sorted(tree))
+            proc.wait()
+            return
+        else:
+            send(signal.SIGKILL)
+        time.sleep(0.2)
+
+
+def _apt_step(argv, env, deadline, cancelled):
+    """Run one apt command. (exit code, output, stopped-why or None)."""
+    try:
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        return 1, "%s: %s" % (argv[0], exc), None
+    chunks = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    why = None
+    while True:
+        try:
+            proc.wait(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if time.time() > deadline:
+            why = "took longer than %ds" % APT_DEADLINE_S
+        elif cancelled():
+            why = "the request was abandoned"
+        if why:
+            log("apt: stopping %s: %s" % (" ".join(argv[:2]), why))
+            _apt_stop(proc)
+            break
+    reader.join(timeout=5)
+    out = b"".join(c for c in chunks if c).decode("utf-8", "replace")
+    if why:
+        out += "\n%s stopped: %s" % (argv[0], why)
+    return proc.returncode, out, why
+
+
+def _apt_package(spec):
+    """The package name in `spec` (before its `=version` or `/release`)."""
+    return re.split(r"[=/]", spec, 1)[0]
+
+
+def _apt_is_package(name, run):
+    """`name` is exactly one binary package's name in the apt cache.
+
+    `apt-cache show` falls back to a glob or regex as well when the name
+    isn't a package, so every record it prints must carry this very name.
+    """
+    code, out = run(["apt-cache", "show", "--no-all-versions", "--", name])
+    if code != 0:
+        return False
+    found = [line[len("Package:"):].strip() for line in out.splitlines()
+             if line.startswith("Package:")]
+    return bool(found) and all(p == name for p in found)
+
+
+def apt_install(packages, cancelled=lambda: False, run=None):
+    """Install `packages` with apt-get. Returns (exit code, output tail).
+
+    `cancelled()` is polled while apt runs: True = the caller has gone, and
+    apt is stopped before this returns. `run(argv)` -> (exit code, output)
+    runs one apt step (tests stub it); the default stops a step at the
+    call's deadline or when the caller goes.
+    """
     if not isinstance(packages, list) or not packages or len(packages) > 20 \
             or not all(isinstance(p, str) and _APT_NAME.match(p) and not p.endswith(".deb")
                        for p in packages):
         return 2, "refused: not a list of 1 to 20 package names"
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive",
                APT_LISTCHANGES_FRONTEND="none", NEEDRESTART_MODE="a")
-    cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
-    log("apt_install %s" % " ".join(packages))
+    deadline = time.time() + APT_DEADLINE_S
+    stopped = []
+    if run is None:
+        def run(argv):
+            code, out, why = _apt_step(argv, env, deadline, cancelled)
+            if why:
+                stopped.append(why)
+            return code, out
+    # The exact-name checks and their list refresh run under the lock and
+    # inside the deadline too: they're apt calls like the install.
+    if not _APT_LOCK.acquire(timeout=APT_DEADLINE_S):
+        return 75, "another package install is still running"
+    try:
+        log("apt_install %s" % " ".join(packages))
+        out = ""
+        updated = False
 
-    def run(argv):
-        try:
-            p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               timeout=840)
-            return p.returncode, p.stdout.decode("utf-8", "replace")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return 1, "apt-get: %s" % exc
+        def unknown():
+            return [p for p in packages
+                    if not stopped and not _apt_is_package(_apt_package(p), run)]
 
-    code, out = run(cmd)
-    # The image ships without package lists (or with stale ones): refresh
-    # once and retry.
-    if code != 0 and ("Unable to locate package" in out or "has no installation candidate" in out
-                      or "Failed to fetch" in out):
-        ucode, uout = run(["apt-get", "update"])
-        out += "\n" + uout
-        if ucode == 0:
-            code, out2 = run(cmd)
-            out += "\n" + out2
-    log("apt_install %s: exit %d" % (" ".join(packages), code))
-    return code, out[-16000:]
+        # The image ships without package lists (or with stale ones): a name
+        # apt doesn't know yet gets one refresh before it's refused.
+        missing = unknown()
+        if missing and not stopped:
+            ucode, uout = run(["apt-get", "update"])
+            out += uout
+            updated = ucode == 0 and not stopped
+            if updated:
+                missing = unknown()
+        if stopped:
+            log("apt_install %s: stopped: %s" % (" ".join(packages), stopped[0]))
+            return 1, out[-16000:]
+        if missing:
+            log("apt_install %s: refused, not package names: %s" % (" ".join(packages), " ".join(missing)))
+            return 2, (out + "\nrefused: no package is named exactly %s" % ", ".join(missing))[-16000:]
+
+        cmd = ["apt-get", "install", "-y", "--no-install-recommends", "--"] + packages
+        code, out2 = run(cmd)
+        out += ("\n" if out else "") + out2
+        # Not after a stop: that's the answer.
+        if not stopped and code != 0 and not updated and "Failed to fetch" in out2:
+            ucode, uout = run(["apt-get", "update"])
+            out += "\n" + uout
+            if ucode == 0 and not stopped:
+                code, out2 = run(cmd)
+                out += "\n" + out2
+        if stopped and code == 0:
+            code = 1
+        log("apt_install %s: exit %d" % (" ".join(packages), code))
+        return code, out[-16000:]
+    finally:
+        _APT_LOCK.release()
+
+
+def _peer_gone(conn):
+    """The client end of `conn` has closed (or errored)."""
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+        if not ready:
+            return False
+        return conn.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
 
 
 class Supervisor(object):
-    def __init__(self, plan, status, agentd_pid):
+    def __init__(self, plan, status, agentd_pid, sentry_hold=None):
         self.plan = plan
         self.status = status
+        self.sentry_hold = sentry_hold or SentryHold(False)
         self.agentd_pid = agentd_pid
         self.starts = 0            # supervisor-performed starts, total
+        # One start at a time: the hard-sentry settle thread and agentd's
+        # `start` (create_session) arrive together, and start_server unlinks
+        # the socket first — the second would delete the first's live server's
+        # socket (Finding CWE-362, "Hard-sentry settle and the boot start both
+        # launch tmux and unlink its socket"). Held from the "already
+        # running?" check through the publish, so the second caller finds it.
+        self._start_lock = threading.Lock()
         self.start_times = []
         self.last_start = 0.0
         # A session exists only once agentd says so. The supervisor starting a
@@ -1894,12 +2193,18 @@ class Supervisor(object):
         return True, None
 
     def start(self, reason):
+        with self._start_lock:
+            return self._start_locked(reason)
+
+    def _start_locked(self, reason):
         # "Is one already running" comes FIRST. Asking for a server that exists
         # is not a start and must never be refused by the rate limiter -- an
         # earlier version checked the limiter first and turned a no-op request
         # into a failure.
         if server_pid() is not None:
             return True, None
+        if self.sentry_hold.held():
+            return False, WAITING_FOR_SENTRY
         allowed, why = self.may_start()
         if not allowed:
             log("refusing to start the server (%s): %s" % (reason, why))
@@ -1908,6 +2213,11 @@ class Supervisor(object):
         self.start_times.append(self.last_start)
         outcome, report = start_server(self.plan, self.live_agentd_pid())
         self.starts += 1
+        # The hold's flag goes in the same publish as the started server (or
+        # its failure): cleared any earlier, a republish in between (the
+        # sentry's status changing) would announce the socket of a server
+        # that isn't listening yet.
+        self.status["sentry_hold"] = False
         self.publish(outcome, report)
         if report["ok"]:
             if self.first_server_at is None:
@@ -2073,7 +2383,8 @@ class Supervisor(object):
             # Only agentd gets here (the peer checks above), and only for a
             # package the user approved on the host. Long: no socket timeout.
             conn.settimeout(None)
-            code, output = apt_install(request.get("packages"))
+            code, output = apt_install(request.get("packages"),
+                                       cancelled=lambda: _peer_gone(conn))
             conn.sendall((json.dumps({"ok": code == 0, "exit_code": code,
                                       "output": output}) + "\n").encode())
         elif op == "poweroff":
@@ -2099,6 +2410,14 @@ class Supervisor(object):
         thread: an interactive shell here lasts as long as the user's session,
         and a single-threaded supervisor would stop answering anything else.
         """
+        if self.sentry_hold.held():
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            conn.sendall((json.dumps({"ok": False, "reason": WAITING_FOR_SENTRY}) + "\n").encode())
+            return
         pid, error = exec_in_sandbox(
             self.plan, self.live_agentd_pid(),
             request.get("argv"), request.get("cwd"), request.get("env"),
@@ -2662,7 +2981,32 @@ def main():
     mark_sentry_cgroup(sandbox_cgroup)
 
     agentd_pid = _agentd_pid()
-    supervisor = Supervisor(plan, status, agentd_pid)
+    hard = ((spec.get("sentry") or {}).get("enabled")
+            and (spec.get("sentry") or {}).get("requirement") == "hard")
+    supervisor = Supervisor(plan, status, agentd_pid, SentryHold(hard))
+
+    if supervisor.sentry_hold.held():
+        # Serve the control socket now (agentd waits for it) and start the
+        # server only once the sentry has settled; until then `start` and
+        # `exec` answer that they're waiting.
+        log(WAITING_FOR_SENTRY)
+        # Said in the status so agentd doesn't take the published socket
+        # paths for a running server: nothing serves the workload yet.
+        supervisor.status["sentry_hold"] = True
+        supervisor.publish()
+
+        def _start_when_settled():
+            supervisor.sentry_hold.wait()
+            ok, why = supervisor.start("initial, after the sentry")   # clears sentry_hold
+            if not ok:
+                log("initial start failed: %s" % why)
+                supervisor.publish()
+            return ok
+        if os.environ.get("BROMURE_SANDBOXD_ONESHOT"):
+            return 0 if _start_when_settled() else 1
+        threading.Thread(target=_start_when_settled, daemon=True).start()
+        supervisor.serve_control()
+        return 0
 
     ok, why = supervisor.start("initial")
     if not ok:

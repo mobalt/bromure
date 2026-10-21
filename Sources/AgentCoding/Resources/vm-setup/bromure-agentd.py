@@ -159,6 +159,14 @@ OPENSHELL_SPEC = os.path.join(META, "openshell-sandbox.json")
 SANDBOX_RUN_DIR = os.environ.get("BROMURE_RUN_DIR", "/run/bromure-sandbox")
 SANDBOX_STATUS = os.path.join(SANDBOX_RUN_DIR, "status.json")
 SANDBOX_CTL = os.path.join(SANDBOX_RUN_DIR, "ctl.sock")
+# bromure-sentryd's own status (`sentry`: waiting / running / unavailable / off).
+SENTRY_STATUS = os.path.join(SANDBOX_RUN_DIR, "sentry.json")
+# The loader runs in its own unit, never inline in a root script with a short
+# timeout: for a kernel the host has no module staged for yet it waits for one
+# (up to BROMURE_SENTRY_WAIT_S), then may build one here (apt + make, minutes).
+SENTRY_UNIT = "bromure-sentryd"
+# The longest that can take: its wait, then apt and make at 900 s each.
+SENTRY_SETTLE_S = 45 + 900 + 900 + 60
 _SANDBOX = {}          # the applied status, or {} when there is no sandbox
 
 
@@ -228,6 +236,10 @@ def _tmux_argv():
     return ["tmux", "-S", socket_path] if socket_path else ["tmux"]
 
 
+# bromure-sandboxd's APT_DEADLINE_S (1800) + APT_STOP_GRACE_S (120), and a margin.
+APT_REPLY_WAIT_S = 1800 + 120 + 60
+
+
 def _sandbox_ctl_request(request, timeout=20.0):
     """One JSON request to bromure-sandboxd; its reply, or None. The reply may
     be larger than one recv (an install's output), so read to the newline."""
@@ -289,6 +301,17 @@ _GIT_SAFE_ENV = {
     "GIT_ASKPASS": "/bin/false",
     "GIT_ALLOW_PROTOCOL": "file",
 }
+
+
+# What a network git call (a review's fetch) may be told to use. Never `file`
+# or `ext`: see `_ws_run`.
+_GIT_NETWORK_PROTOCOLS = frozenset(("https", "ssh"))
+# All a network git call keeps of agentd's environment.
+_GIT_NETWORK_ENV_KEEP = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+))
 
 
 class SandboxRoutingError(RuntimeError):
@@ -414,10 +437,21 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         # the caller's env win, because the caller's env losing to the hardening
         # is the behaviour that protects every other call site -- and because
         # `git_protocols=` is grep-able, which "it works if you set the right
-        # variable" is not. `file` stays in the set regardless; `ext` is never
-        # added, since `ext::` is arbitrary command execution.
+        # variable" is not.
+        #
+        # The list REPLACES `file`, never adds to it. GIT_ALLOW_PROTOCOL is a
+        # whitelist that overrides `protocol.file.allow=never`, so keeping
+        # `file` in a network fetch's set let the repository's own config run
+        # a program: `remote.origin.uploadpack=<script>` on a file origin, or
+        # an `url.file://….insteadOf=https://…` rewrite of an https one, both
+        # exec'd locally (measured on git 2.43). `ext` (arbitrary command
+        # execution) and `file` are refused outright.
         if git_protocols:
-            env["GIT_ALLOW_PROTOCOL"] = "file:" + git_protocols
+            allowed = git_protocols.split(":")
+            if not allowed or any(p not in _GIT_NETWORK_PROTOCOLS for p in allowed):
+                raise ValueError("git_protocols may only name %s, not %r"
+                                 % ("/".join(sorted(_GIT_NETWORK_PROTOCOLS)), git_protocols))
+            env["GIT_ALLOW_PROTOCOL"] = git_protocols
     # The caller's own values win: this supplies a default, it does not override.
     for key, value in _ca_trust_for_exec().items():
         env.setdefault(key, value)
@@ -462,18 +496,32 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
             "up -- and if the command genuinely must not be confined, say so "
             "through _run_unconfined(args, reason=...)." % (args[:2],))
     if not _SANDBOX.get("control_socket"):
-        run_env = dict(os.environ)
+        # A network git call gets the git-safety variables and the few it
+        # needs to reach the network, not agentd's whole environment (any
+        # GIT_* there — GIT_SSH_COMMAND, GIT_CONFIG_* — would undo the flags).
+        if git_protocols:
+            run_env = {k: v for k, v in os.environ.items() if k in _GIT_NETWORK_ENV_KEEP}
+        else:
+            run_env = dict(os.environ)
         run_env.update(env)
         return subprocess.run(args, capture_output=capture_output, text=text,
                               timeout=timeout, cwd=cwd, check=check,
                               stdout=stdout, stderr=stderr,
                               env=run_env if env else None, **kwargs)
 
-    def _sink(requested, fallback_pipe):
+    def _sink(requested, fallback_pipe, merge_into=None):
         """(child_fd, read_fd) for one output stream."""
         if requested is None or requested is subprocess.PIPE or capture_output:
             return fallback_pipe
-        if isinstance(requested, int):
+        # subprocess's own markers are negative ints, not descriptors:
+        # `os.dup(DEVNULL)` raised EBADF before the supervisor was asked, so
+        # every sandboxed call passing `_DEVNULL` (the review base fetch, its
+        # `_commit_exists`, worktree checks) died, taking its thread along.
+        if requested == subprocess.DEVNULL:
+            return os.open(os.devnull, os.O_WRONLY), None
+        if requested == subprocess.STDOUT and merge_into is not None:
+            return os.dup(merge_into), None
+        if isinstance(requested, int) and requested >= 0:
             return os.dup(requested), None
         if hasattr(requested, "fileno"):
             return os.dup(requested.fileno()), None
@@ -482,7 +530,7 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
     out_child, out_read = _sink(stdout, (out_w, out_r))
-    err_child, err_read = _sink(stderr, (err_w, err_r))
+    err_child, err_read = _sink(stderr, (err_w, err_r), merge_into=out_child)
     if out_child is not out_w:
         os.close(out_w)
         os.close(out_r)
@@ -692,7 +740,18 @@ def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
 _SANDBOX_READY = threading.Event()
 
 
-def sandbox_gate(timeout=90.0):
+# bromure-sandboxd's hard-sentry hold lasts at most this (SENTRY_SETTLE_S),
+# plus a margin for the supervisor to start the server after it.
+_SENTRY_HOLD_MAX_S = 45 + 900 + 900 + 60 + 60
+
+
+def _sentry_held():
+    """bromure-sandboxd is holding the workload for a required sentry. Read
+    fresh each time: a cached status would hold forever once it said so."""
+    return bool(_load_sandbox_status().get("sentry_hold"))
+
+
+def sandbox_gate(timeout=90.0, through_sentry_hold=False):
     """Block until the sandbox is in place, for anything that touches the
     workspace. Returns (ok, reason).
 
@@ -738,13 +797,25 @@ def sandbox_gate(timeout=90.0):
     if _SANDBOX_READY.is_set():
         return True, None
 
-    deadline = time.time() + timeout
+    # A hard-sentry hold (Finding CWE-670, "Hard-sentry hold fails unattended
+    # boots at 180s while the module is still loading"): the supervisor
+    # publishes its socket paths before the sentry settles but serves no
+    # workload until it does, so a published `tmux_socket` isn't a server
+    # yet — waited out here instead of refused with 126 by the supervisor.
+    # An interactive attach (a terminal pane) waits through the whole hold,
+    # which the supervisor bounds itself; anything else keeps `timeout`.
+    started = time.time()
+    deadline = started + timeout
     strict_ok = supervisor_ok = False
-    while time.time() < deadline:
+    held = False
+    while time.time() < deadline or (through_sentry_hold and held
+                                      and time.time() < started + _SENTRY_HOLD_MAX_S):
         strict_ok = (not strict_sandbox_requested()) or strict_sandbox_applied()
+        held = openshell_requested() and _sentry_held()
         supervisor_ok = (not openshell_requested()
-                         or bool(_SANDBOX.get("tmux_socket")
-                                 or _load_sandbox_status().get("tmux_socket")))
+                         or (not held
+                             and bool(_SANDBOX.get("tmux_socket")
+                                      or _load_sandbox_status().get("tmux_socket"))))
         if strict_ok and supervisor_ok:
             _SANDBOX_READY.set()
             return True, None
@@ -754,9 +825,11 @@ def sandbox_gate(timeout=90.0):
     # Name the half that is missing. "still starting" on its own sent a whole
     # round looking at the wrong daemon.
     waiting_for = []
+    if held:
+        waiting_for.append("the kernel sentry to load (requirement: hard)")
     if not strict_ok:
         waiting_for.append("the strict revocation (%s)" % STRICT_DONE)
-    if not supervisor_ok:
+    if not supervisor_ok and not held:
         waiting_for.append("the sandbox supervisor (%s)"
                            % (_SANDBOX.get("degraded_reason")
                               or _SANDBOX.get("server_error") or "no status yet"))
@@ -778,19 +851,29 @@ def ensure_sandbox_server(reason="", timeout=20.0):
         return False
     if _has_session():
         return True
-    reply = _sandbox_ctl("start")
-    if reply is None or not reply.get("ok"):
-        log("sandbox", "supervisor would not start a server%s: %s"
-            % (" (%s)" % reason if reason else "",
-               (reply or {}).get("reason", "no reply")))
-        return False
-    _load_sandbox_status()
     deadline = time.time() + timeout
+    # Asked again while the deadline lasts: a start that loses to another one
+    # in flight (the hard-sentry settle starting the server at the same
+    # moment) is answered once that one is done — a one-shot ask returned
+    # False, and create_session then never sent session_ready.
+    while True:
+        reply = _sandbox_ctl("start")
+        if reply is not None and reply.get("ok"):
+            break
+        if _has_session():
+            return True
+        if time.time() >= deadline:
+            log("sandbox", "supervisor would not start a server%s: %s"
+                % (" (%s)" % reason if reason else "",
+                   (reply or {}).get("reason", "no reply")))
+            return False
+        time.sleep(1.0)
+    _load_sandbox_status()
     while time.time() < deadline:
         if _has_session():
             return True
         time.sleep(0.2)
-    return False
+    return _has_session()
 # New shells (the initial window + plain new-tab) open here. Without an
 # explicit -c, tmux windows inherit the server's start directory, which
 # under systemd is "/" — so pin it to the user's home.
@@ -1379,9 +1462,12 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         # strict sandbox, and the sandboxed agent can't reach the supervisor.
         apt = req.get("apt_install")
         if isinstance(apt, dict):
+            # Longer than the supervisor's own deadline for the whole install
+            # (APT_DEADLINE_S plus its stop grace), so "no reply" never means
+            # "apt is still running": the supervisor always answers first.
             reply = _sandbox_ctl_request({"op": "apt_install",
                                           "packages": apt.get("packages") or []},
-                                         timeout=900.0)
+                                         timeout=APT_REPLY_WAIT_S)
             if reply is None:
                 resp = {"exit_code": 1, "output": "no reply from the sandbox supervisor"}
             else:
@@ -1412,7 +1498,7 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 # first, then block.
                 replenished = True
                 replenish_fn()
-            ready, why = sandbox_gate()
+            ready, why = sandbox_gate(through_sentry_hold=bool(req.get("interactive")))
             if not ready:
                 log("shell", "refusing a workspace request: %s" % why)
                 resp_data = json.dumps({
@@ -2794,8 +2880,17 @@ def docker_err(msg):
     _atomic_publish(".docker-error.tmp", "docker-error.txt", msg)
 
 
+# The automation run a refusal belongs to (set by _automation_run): its slug
+# rides on the error's first line, so the host marks that run failed rather
+# than leaving it "launched" (Finding CWE-670, "A review whose base cannot be
+# fetched is recorded as a successful launch").
+_RUN_CTX = threading.local()
+
+
 def worktree_err(msg):
-    _atomic_publish(".worktree-error.tmp", "worktree-error.txt", msg)
+    slug = getattr(_RUN_CTX, "slug", None)
+    _atomic_publish(".worktree-error.tmp", "worktree-error.txt",
+                    ("run-slug: %s\n" % slug if slug else "") + msg)
 
 
 def docker_run_status(state, image, done, total):
@@ -4620,6 +4715,14 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
 
 
 def _automation_run(cwd, slug, display, tool, prompt_b64, mode="", base=""):
+    _RUN_CTX.slug = slug
+    try:
+        _automation_run_body(cwd, slug, display, tool, prompt_b64, mode, base)
+    finally:
+        _RUN_CTX.slug = None
+
+
+def _automation_run_body(cwd, slug, display, tool, prompt_b64, mode="", base=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
     Unattended, so the agent launches in yolo mode (no trust/permission
@@ -4647,9 +4750,16 @@ def _automation_run(cwd, slug, display, tool, prompt_b64, mode="", base=""):
                      "git repository first" % cwd)
         return
     if root:
+        start = ""
+        if base:
+            start = _resolve_run_base(cwd, base)
+            if start is None:
+                # Never review some other commit as the one asked for.
+                worktree_err("%s: %s isn't in %s, even after fetching origin — "
+                             "the run didn't start" % (mode or "automation", base, cwd))
+                return
         _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True,
-                         task=(mode == "task"),
-                         base=_resolve_run_base(cwd, base) if base else "",
+                         task=(mode == "task"), base=start,
                          review=(mode == "review"))
     elif mode == "task":
         # A plain tab has no branch, so the card could never leave In
@@ -4665,30 +4775,87 @@ def _commit_exists(cwd, ref):
                           stderr=_DEVNULL).returncode == 0
 
 
+# The ssh a network fetch uses: no config files (no ProxyCommand from the
+# workspace), never interactive.
+_FETCH_SSH_COMMAND = "/usr/bin/ssh -F /dev/null -o BatchMode=yes"
+
+# The cooperative proxy's variables, as proxy.env gives them to shells (this
+# service never sources it): with transparent interception off, an https
+# origin is reached only through that proxy.
+_FETCH_PROXY_KEYS = frozenset(("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                               "NO_PROXY", "no_proxy"))
+
+
+def _meta_proxy_env():
+    out = {}
+    try:
+        with open(os.path.join(META, "proxy.env")) as f:
+            for line in f:
+                # Read as the shell would: a later line wins, and a
+                # profile's own (shell-quoted) export loses its quotes.
+                m = re.match(r"^export ([A-Za-z_]+)=(.*)$", line.strip())
+                if not m or m.group(1) not in _FETCH_PROXY_KEYS:
+                    continue
+                try:
+                    words = shlex.split(m.group(2))
+                except ValueError:
+                    continue
+                if len(words) == 1:
+                    out[m.group(1)] = words[0]
+    except OSError:
+        pass
+    return out
+
+
+# The fetch a review run makes for a base its checkout lacks. The upload
+# pack is pinned to git's own on the command line (it beats any
+# remote.origin.uploadpack the repository sets), and receive-pack with it.
+def _review_fetch_argv(cwd):
+    return ["git", "-C", cwd,
+            "-c", "remote.origin.uploadpack=git-upload-pack",
+            "-c", "remote.origin.receivepack=git-receive-pack",
+            "fetch", "--quiet", "--upload-pack=git-upload-pack", "origin"]
+
+
 def _resolve_run_base(cwd, base):
     """The start point a review run is pinned to, if the checkout has it —
     fetching once when it doesn't (a checkout cloned weeks ago lags the
-    branch the host just asked GitHub about). "" = start from the
-    checkout's HEAD: the prompt then tells the agent how to catch up, so a
-    failed fetch degrades the run instead of failing it."""
+    branch the host just asked GitHub about). None = the base asked for
+    isn't there even after the fetch: the caller refuses the run rather
+    than review some other commit (HEAD) as if it were the one asked."""
     if not base or base.startswith("-"):
-        return ""
+        return None
     if _commit_exists(cwd, base):
         return base
     try:
         # The only network git call in this file, so the only one that needs a
         # transport beyond `file`. ssh as well as https: a workspace's `origin`
         # may be either, and which one is not ours to assume.
-        _ws_run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
-                       stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
-                       git_protocols="https:ssh",
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        # GIT_SSH_COMMAND, because `_harden_argv` pins core.sshCommand to
+        # /bin/false for every git call (so a repository can't name its own
+        # ssh): without it an ssh origin's fetch ran /bin/false and exited
+        # 128, quietly. It overrides that config and any GIT_SSH_COMMAND in
+        # agentd's environment; `-F /dev/null` skips user and system ssh
+        # config, so a workspace ProxyCommand / LocalCommand can't run;
+        # BatchMode never prompts. SSH_AUTH_SOCK, because the only key the
+        # VM has is the host's, through agentd's own bridge: agentd's
+        # environment never had it (it comes from proxy.env, which shells
+        # and `vm exec` source and this service doesn't), so an ssh origin
+        # had nothing to authenticate with and the base stayed on HEAD.
+        p = _ws_run(_review_fetch_argv(cwd),
+                    stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
+                    git_protocols="https:ssh",
+                    env=dict(_meta_proxy_env(),
+                             GIT_SSH_COMMAND=_FETCH_SSH_COMMAND,
+                             SSH_AUTH_SOCK=SSH_AGENT_UNIX_PATH))
+        if getattr(p, "returncode", 0) != 0:
+            log("automation", "fetch for %s exited %s" % (base, p.returncode))
     except Exception as e:
         log("automation", "fetch for %s failed: %s" % (base, e))
     if _commit_exists(cwd, base):
         return base
-    log("automation", "review base %s not found — starting from HEAD" % base)
-    return ""
+    log("automation", "review base %s not found, even after fetching origin" % base)
+    return None
 
 
 _AUTOMATIONS_MCP_SHIM = "/mnt/bromure-meta/bromure-automations-mcp.py"
@@ -5872,6 +6039,66 @@ def command_loop_service():
 
 
 # ── session lifecycle ───────────────────────────────────────────────────────
+def _sentry_requirement():
+    try:
+        with open(OPENSHELL_SPEC) as f:
+            spec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return ((spec.get("sentry") or {}) if isinstance(spec, dict) else {}).get("requirement")
+
+
+def _sentry_state():
+    try:
+        with open(SENTRY_STATUS) as f:
+            return (json.load(f) or {}).get("sentry")
+    except (OSError, ValueError):
+        return None
+
+
+def _unit_active(unit):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _await_hard_sentry(deadline_s=SENTRY_SETTLE_S, poll=1.0, grace=10.0):
+    """`requirement: hard` = no agent code before the sentry watches.
+
+    The loader runs in its own unit (see task_strict_sandbox); this holds the
+    session until it has settled -- running, or unavailable with its reason
+    (the host then refuses per the requirement). It stops waiting when the
+    loader's unit is gone without a verdict, and after the loader's own worst
+    case, so a dead loader can't hold the workspace forever. Meanwhile the
+    status says `waiting`, which the host shows. Returns the final state.
+    """
+    if _sentry_requirement() != "hard":
+        return None
+    started = time.time()
+    last_log = 0.0
+    while True:
+        state = _sentry_state()
+        if state in ("running", "unavailable", "off"):
+            break
+        # A few seconds' grace: the unit may not be listed active yet.
+        if time.time() - started > grace and not _unit_active(SENTRY_UNIT):
+            log("sentry", "the loader ended without a verdict (state %r); starting the "
+                          "session — the host judges the missing sentry" % state)
+            break
+        if time.time() - started > deadline_s:
+            log("sentry", "no verdict after %.0fs; starting the session" % deadline_s)
+            break
+        if time.time() - last_log >= 60:
+            last_log = time.time()
+            log("sentry", "requirement hard: holding the session until the sentry "
+                          "settles (%s)" % (state or "no status yet"))
+        time.sleep(poll)
+    log("sentry", "settled after %.0fs: %s" % (time.time() - started, state))
+    return state
+
+
 def create_session():
     """Create the single tmux session the tabs live in (startup one-shot).
 
@@ -5885,6 +6112,7 @@ def create_session():
                        "start an unconfined session")
         return
     if openshell_requested():
+        _await_hard_sentry()
         started = time.time()
         if not ensure_sandbox_server("session startup"):
             log("session", "gave up after %.0fs (%s); not starting a session"
@@ -6290,9 +6518,11 @@ def _approve_claude_api_key(suffix):
 
 
 # Claude Code permissions.allow rules merged into settings.json (mirrors
-# Profile.swift's claudeAlwaysAllowed).
+# Profile.swift's claudeAlwaysAllowed). The inbox is read-only unprompted.
 _CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display",
-                          "Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+                          "Read(~/.bromure/inbox/**)"]
+# Seeded by earlier builds, taken back out (claudeRetractedRules).
+_CLAUDE_RETRACTED_RULES = ["Edit(~/.bromure/inbox/**)"]
 # Merged into permissions.additionalDirectories (claudeInboxDirectory):
 # the delegation inbox, where other agents' files land.
 _CLAUDE_INBOX_DIR = "~/.bromure/inbox"
@@ -6381,6 +6611,7 @@ def _seed_claude_settings():
     # guardrails kept blocking it. Merged, never replacing the user's list.
     allow = perms.get("allow")
     allow = allow if isinstance(allow, list) else []
+    allow = [r for r in allow if r not in _CLAUDE_RETRACTED_RULES]
     for rule in _CLAUDE_ALWAYS_ALLOWED:
         if rule not in allow:
             allow.append(rule)
@@ -6442,7 +6673,11 @@ def _seed_claude_settings():
                                  + _keep_others("UserPromptSubmit"))
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
     hooks["PostToolUse"] = _hook_cmd("policy") + _keep_others("PostToolUse")
-    hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
+    # Stop drains the notes too: one written after the blocked tool's
+    # PostToolUse ran would otherwise wait for the next message. One `stop`
+    # command (an event's hooks run in parallel): it reports `done` only when
+    # no note kept the turn going (host Profile.swift twin).
+    hooks["Stop"] = _hook_cmd("stop") + _keep_others("Stop")
     hooks["Notification"] = _hook_cmd("needsInput") + _keep_others("Notification")
     # A refused turn fires StopFailure, not Stop (host Profile.swift twin).
     hooks["StopFailure"] = _hook_cmd("needsInput") + _keep_others("StopFailure")
@@ -7447,14 +7682,18 @@ if [ -r %(attestd)s ]; then
   fi
 fi
 # The kernel sentry, then the sandbox supervisor. Both are root-only and both
-# must exist before the revocation; the sentry additionally has to load before
-# it raises lockdown, after which no unsigned module loads at all.
+# must be started before the revocation; the sentry additionally has to load
+# before it raises lockdown, after which no unsigned module loads at all.
+#
+# The sentry loader runs in ITS OWN UNIT, not inline. For a kernel the host has
+# no module staged for yet it waits for one and may then build one here -- far
+# longer than this script's 60 s. Inline, the timeout killed the script before
+# the supervisor started and before the revocation below: a workspace with no
+# sandbox, no session and sudo intact. A `hard` sentry holds the SESSION
+# instead (create_session waits for the loader to finish).
 if [ -r %(spec)s ] && [ -r %(sentryd)s ]; then
-  # `env %(setenv)s`, because `sudo` strips the environment and sentryd is run
-  # directly rather than through systemd-run. Without it the BROMURE_* overrides
-  # never reach it -- which is why the sentry's own boot path could not be
-  # exercised by a test, the same gap that hid attestd's startup bug.
-  env %(plainenv)s /usr/bin/python3 %(sentryd)s >/dev/null 2>&1
+  systemctl reset-failed %(sentryunit)s >/dev/null 2>&1
+  systemd-run --unit=%(sentryunit)s --collect -p Restart=no %(setenv)s /usr/bin/python3 %(sentryd)s >/dev/null 2>&1
 fi
 if [ -r %(spec)s ] && [ -r %(sandboxd)s ]; then
   # Clear any leftover failed unit first: a unit that hit systemd's start limit
@@ -7506,7 +7745,7 @@ touch %(done)s
 [ -f /run/bromure-attestd.ready ]
 """ % {"attestd": shlex.quote(attestd), "sentryd": shlex.quote(sentryd),
        "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
-       "plainenv": _plain_setenv(),
+       "sentryunit": SENTRY_UNIT,
        "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
        "strictd": shlex.quote(strictd), "done": STRICT_DONE}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
@@ -7575,13 +7814,16 @@ def task_openshell_root_helpers():
 
     loader = os.path.join(META, "bromure-sentryd")
     if os.access(loader, os.R_OK):
-        # `env` with the overrides, because `sudo` strips the environment and
-        # this is the non-strict twin of the root script's sentry branch. In
-        # production the list is empty and this is `sudo -n env python3 loader`.
-        p = subprocess.run(["sudo", "-n", "env", *_plain_setenv_args(),
-                            "/usr/bin/python3", loader],
-                           capture_output=True, text=True, timeout=900)
-        log("sentry", "loader exit=%d %s"
+        # Its own unit, as in the strict root script: the loader's wait and
+        # local build can outlast any timeout here, and a timeout would skip
+        # starting the supervisor below. A `hard` sentry holds the session.
+        subprocess.run(["sudo", "-n", "systemctl", "reset-failed", SENTRY_UNIT],
+                       capture_output=True, timeout=30)
+        p = subprocess.run(
+            ["sudo", "-n", "systemd-run", "--unit=" + SENTRY_UNIT, "--collect",
+             "-p", "Restart=no", *_systemd_setenv_args(), "/usr/bin/python3", loader],
+            capture_output=True, text=True, timeout=120)
+        log("sentry", "loader started exit=%d %s"
             % (p.returncode, p.stderr.strip()[-200:]))
 
     launcher = os.path.join(META, "bromure-sandboxd")

@@ -186,9 +186,27 @@ pipeline {
                         # Most days no new kernel has shipped and every source's
                         # catalog is complete: nothing to sign or upload, so skip
                         # building the publisher image (and its npm install).
+                        # Unless a published catalog no longer verifies (a bucket
+                        # write stripped its module signatures: the app refuses it
+                        # whole) — then publish-sentry-modules.sh republishes it.
+                        # make-sentry-catalog.mjs needs only node builtins, so a
+                        # bare node image checks it; files go in by tar (no mounts
+                        # on this daemon, as docker cp above).
                         if ! grep -L '"built": \\[\\]' sentry-ci/out-*/manifest.json | grep -q .; then
-                            echo "No new modules for any source: nothing to publish."
-                            exit 0
+                            pub=$(sed -n 's/.*SENTRY_CATALOG_PUBLIC_KEY:-\\([^}]*\\)}.*/\\1/p' scripts/publish-sentry-modules.sh)
+                            if tar -cf - tools/make-sentry-catalog.mjs $(ls sentry-ci/out-*/previous-catalog.json 2>/dev/null) \\
+                                | docker run -i --rm -e PUB="$pub" node:22-bookworm-slim sh -euc '
+                                    mkdir -p /w/empty && cd /w && tar -xf -
+                                    for c in sentry-ci/out-*/previous-catalog.json; do
+                                        [ -f "$c" ] || continue
+                                        h=$(node -e "console.log(JSON.parse(require(\\"fs\\").readFileSync(process.argv[1])).sourceHash)" "$c")
+                                        node tools/make-sentry-catalog.mjs --verify "$c" --source-hash "$h" \\
+                                            --modules /w/empty --public-key "$PUB" || exit 1
+                                    done'; then
+                                echo "No new modules for any source: nothing to publish."
+                                exit 0
+                            fi
+                            echo "A published catalog fails verification: republishing."
                         fi
                         # The publisher image: node + the release tools (socket.dev-
                         # wrapped install, like the other pipelines) + this run's outputs.

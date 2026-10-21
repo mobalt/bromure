@@ -114,6 +114,23 @@ struct SentryModuleStoreTests {
         #expect(SentryModuleStore.sourceHash(of: dir) == "ce5871986055601b2c373551dd5915bfe18b6be62419036566a2cb194ad87a9a")
     }
 
+    /// The module CI builds (scripts/openshell-guest/sentry, Jenkinsfile.sentry's
+    /// SENTRY_DIR) and the copy the app ships and hashes (vm-setup/sentry-dist)
+    /// must be the same bytes: otherwise the app asks for a source hash nothing
+    /// is published under, and a fix to one never reaches a guest.
+    @Test("The bundled sentry source is the one CI builds")
+    func bundledSourceMatchesCI() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ci = root.appendingPathComponent("scripts/openshell-guest/sentry")
+        let bundled = root.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/sentry-dist/src")
+        for f in ["Makefile", "bromure_sentry.c", "bromure_sentry.h"] {
+            #expect(try Data(contentsOf: ci.appendingPathComponent(f)) == Data(contentsOf: bundled.appendingPathComponent(f)),
+                    "\(f) differs")
+        }
+        #expect(SentryModuleStore.sourceHash(of: ci) == SentryModuleStore.sourceHash(of: bundled))
+    }
+
     @Test("Download, verify, cache, stage; a second ask doesn't hit the network")
     func downloadAndStage() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
@@ -170,6 +187,78 @@ struct SentryModuleStoreTests {
         #expect(await lax.ensure(kernel: "../../etc", hash: Self.hash)?.hasPrefix("not a kernel release") == true)
     }
 
+    /// Finding (CWE-670): "A transient module download failure aborts the
+    /// guest wait for good". Every failure wrote the `.unavailable` marker
+    /// that ends the guest's 45 s wait — a failed download or an offline
+    /// catalog included. Only a definitive one does now.
+    @Test("A missing or untrusted module is definitive; offline, a failed or corrupted download aren't")
+    func definitiveOrTransient() async throws {
+        let k = "6.8.0-142-generic"
+        // Offline / refused catalog: retry.
+        let off = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let s1 = store(host: off, root: tempDir())
+        #expect(await s1.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        // A kernel the signed catalog doesn't list: stop waiting.
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        serveCatalog(host)
+        let s2 = store(host: host, root: tempDir())
+        let none = await s2.ensureOutcome(kernel: "6.8.0-150-generic", hash: Self.hash)
+        #expect(none?.definitive == true && none?.reason.contains("no module published") == true)
+        #expect(await s2.ensureOutcome(kernel: "../../etc", hash: Self.hash)?.definitive == true)
+        // A failed download, then a corrupted one: retry.
+        let s3 = store(host: host, root: tempDir())
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 503, Data())
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 200, Data("module-A-bytez".utf8))
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash)?.definitive == false)
+        // …and once it's served right, the retry succeeds.
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/\(k)/bromure_sentry-\(k)-b714b2e23f3f.ko", 200, Data("module-A-bytes".utf8))
+        #expect(await s3.ensureOutcome(kernel: k, hash: Self.hash) == nil)
+    }
+
+    /// Finding (CWE-670): "A failed sentry-catalog refresh is treated as
+    /// proof the kernel was never published". A cached catalog without the
+    /// kernel forces a refresh; when that failed, the cached one came back
+    /// and its missing entry was reported definitive, ending the guest's wait.
+    @Test("A kernel missing from the cached catalog is definitive only when a fresh catalog agrees")
+    func failedRefreshIsTransient() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        let k = "6.8.0-150-generic"          // published after the cached catalog
+        serveCatalog(host)
+        let s = store(host: host, root: root)
+        #expect(await s.refreshCatalog(Self.hash, force: true)?.modules.count == 2)
+        let path = "/sentry/\(Self.hash)/catalog.json"
+        // The refresh fails: a server error, a body that doesn't decode, a
+        // catalog that doesn't verify, the server gone — all retried.
+        var unsigned = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        unsigned.signature = nil
+        for (status, body) in [(503, Data()), (200, Data("<html>".utf8)),
+                               (200, try JSONEncoder().encode(unsigned)), (404, Data())] {
+            SentryStubProtocol.serve(host, path, status, body)
+            let f = await s.ensureOutcome(kernel: k, hash: Self.hash)
+            #expect(f?.definitive == false, "HTTP \(status) \(body.count) bytes: \(f?.reason ?? "nil")")
+        }
+        // The server's current catalog still doesn't list it: now it's definitive.
+        serveCatalog(host)
+        let none = await s.ensureOutcome(kernel: k, hash: Self.hash)
+        #expect(none?.definitive == true && none?.reason.contains("no module published") == true)
+    }
+
+    @Test("With nothing cached, a rejected first catalog doesn't stop the retries from fetching")
+    func rejectedFirstCatalogRetries() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        var unsigned = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        unsigned.signature = nil
+        serveCatalog(host, String(data: try JSONEncoder().encode(unsigned), encoding: .utf8)!)
+        let s = store(host: host, root: root)
+        #expect(await s.ensureOutcome(kernel: "6.8.0-142-generic", hash: Self.hash)?.definitive == false)
+        // Fixed on the server seconds later: the next retry gets it.
+        serveCatalog(host)
+        #expect(await s.ensureOutcome(kernel: "6.8.0-142-generic", hash: Self.hash) == nil)
+    }
+
     @Test("An older catalog never replaces a newer cached one")
     func rollbackGuard() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
@@ -211,19 +300,89 @@ struct SentryModuleStoreTests {
         #expect(String(decoding: payload, as: UTF8.self).hasPrefix("bromure-sentry-module-v1\n"))
     }
 
-    @Test("A module without its own valid signature is refused even when the catalog is signed")
-    func unsignedModuleRefused() async throws {
+    /// Finding (CWE-347): "Sentry catalog signature omits module
+    /// signatures, so a bucket write disables every prebuilt module" — the
+    /// catalog signature doesn't cover the per-module signatures, so a
+    /// bucket write could strip them and the still-"valid" catalog replaced
+    /// the good cached one. A catalog is taken only when every module's own
+    /// signature verifies too.
+    @Test("A catalog with a stripped module signature is refused whole, and the cached one is kept")
+    func strippedModuleSignatureKeepsCache() async throws {
         let host = "cdn-\(UUID().uuidString.prefix(8)).test"
         let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
-        var c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
-        // Strip the module signature but keep the catalog signature valid
-        // (module signatures aren't part of the catalog payload).
-        c.modules = c.modules.map { var m = $0; if m.kernel == "6.8.0-142-generic" { m.signature = nil }; return m }
-        #expect(c.isSignatureValid(publicKeyBase64: Self.testPublicKey))
-        serveCatalog(host, String(data: try JSONEncoder().encode(c), encoding: .utf8)!)
         let s = store(host: host, root: root)
-        #expect(await s.ensure(kernel: "6.8.0-142-generic", hash: Self.hash) == "the 6.8.0-142-generic module isn't signed by Bromure")
+        serveCatalog(host)
+        #expect(await s.refreshCatalog(Self.hash, force: true)?.modules.count == 2)
+
+        var c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        c.modules = c.modules.map { var m = $0; if m.kernel == "6.8.0-142-generic" { m.signature = nil }; return m }
+        // Module signatures aren't part of the catalog payload: still "valid".
+        #expect(c.isSignatureValid(publicKeyBase64: Self.testPublicKey))
+        // Same signedAt: the rollback guard lets it through, only the module check stops it.
+        serveCatalog(host, String(data: try JSONEncoder().encode(c), encoding: .utf8)!)
+        let kept = await s.refreshCatalog(Self.hash, force: true)
+        #expect(kept?.modules.allSatisfy { $0.signature != nil } == true)
+        #expect(await s.ensure(kernel: "6.8.0-142-generic", hash: Self.hash) == nil)
         #expect(await s.ensure(kernel: "6.8.0-139-generic", hash: Self.hash) == nil)
+
+        // With nothing cached there's no catalog to fall back to.
+        let fresh = store(host: host, root: tempDir())
+        #expect(await fresh.ensure(kernel: "6.8.0-139-generic", hash: Self.hash)?.contains("no module catalog") == true)
+    }
+
+    @Test("The publisher re-signs kept statements a bucket write stripped, and refuses when nothing vouches for them")
+    func publisherResignsStrippedModules() throws {
+        let tools = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("tools/make-sentry-catalog.mjs")
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let driver = dir.appendingPathComponent("drive.mjs")
+        try #"""
+        import { generateKeyPairSync, createPublicKey } from "node:crypto";
+        import { execFileSync } from "node:child_process";
+        import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+        const [tool, dir] = process.argv.slice(2);
+        const hash = "a".repeat(64);
+        const { privateKey } = generateKeyPairSync("ed25519");
+        const env = { ...process.env, SPARKLE_PRIVATE_KEY: privateKey.export({ format: "der", type: "pkcs8" }).subarray(16).toString("base64") };
+        const pub = createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(12).toString("base64");
+        const run = (mods, extra) => { try { execFileSync("node", [tool, "--source-hash", hash, "--modules", mods, "--public-key", pub, ...extra], { env, stdio: "pipe" }); return 0; } catch (e) { return e.status; } };
+        const a = `${dir}/a`, b = `${dir}/b`, none = `${dir}/none`;
+        for (const d of [a, b, none]) mkdirSync(d);
+        writeFileSync(`${a}/bromure_sentry-6.8.0-139-generic.ko`, "module-A");
+        writeFileSync(`${a}/bromure_sentry-6.8.0-142-generic.ko`, "module-B-bytes");
+        const out = {};
+        out.first = run(a, ["--out", `${dir}/c1.json`]);
+        const c1 = JSON.parse(readFileSync(`${dir}/c1.json`, "utf8"));
+        // A bucket write strips every module signature; the catalog signature still verifies.
+        const stripped = { ...c1, modules: c1.modules.map(({ signature, ...m }) => m) };
+        writeFileSync(`${dir}/stripped.json`, JSON.stringify(stripped));
+        out.verifyStripped = run(none, ["--verify", `${dir}/stripped.json`]);
+        out.merge = run(none, ["--previous", `${dir}/stripped.json`, "--out", `${dir}/c2.json`]);
+        const c2 = JSON.parse(readFileSync(`${dir}/c2.json`, "utf8"));
+        out.resignedSame = c2.modules.every((m, i) => m.signature === c1.modules[i].signature);
+        out.verifyMerged = run(none, ["--verify", `${dir}/c2.json`]);
+        // Unsigned previous with stripped entries: nothing vouches for them.
+        const { signature, ...unsignedPrev } = stripped;
+        writeFileSync(`${dir}/unsigned.json`, JSON.stringify(unsignedPrev));
+        out.unvouched = run(none, ["--previous", `${dir}/unsigned.json`, "--out", `${dir}/c3.json`]);
+        // …unless the kernels are rebuilt in this run: their old entries aren't checked.
+        out.rebuilt = run(a, ["--previous", `${dir}/unsigned.json`, "--out", `${dir}/c4.json`]);
+        console.log(JSON.stringify(out));
+        """#.write(to: driver, atomically: true, encoding: .utf8)
+        let p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["node", driver.path, tools.path, dir.path]
+        p.standardOutput = pipe
+        try p.run(); p.waitUntilExit()
+        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let r = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any], "driver said: \(text)")
+        #expect(r["first"] as? Int == 0)
+        #expect(r["verifyStripped"] as? Int == 3)   // a module signature that doesn't verify: the wrong-key exit
+        #expect(r["merge"] as? Int == 0)
+        #expect(r["resignedSame"] as? Bool == true)
+        #expect(r["verifyMerged"] as? Int == 0)
+        #expect(r["unvouched"] as? Int == 1)
+        #expect(r["rebuilt"] as? Int == 0)
     }
 
 }

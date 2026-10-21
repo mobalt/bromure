@@ -296,6 +296,16 @@ def spawn_background_wait():
     return True
 
 
+def _late_prebuilt():
+    """A module the host staged after the wait ended, matching this kernel."""
+    path = prebuilt_module()
+    if path:
+        magic = vermagic_of(path)
+        if magic and not magic.startswith(kernel_release()):
+            return None
+    return path
+
+
 def already_loaded():
     return os.path.isdir("/sys/module/%s" % MODULE_NAME)
 
@@ -483,10 +493,19 @@ def main():
 
     if not path:
         # Asked and not delivered, or this is the background waiter and its wait
-        # is over. Build one here, which is slow but needs nobody else.
+        # is over. Build one here, which is slow but needs nobody else — unless
+        # the host's module lands meanwhile (it keeps retrying a transient
+        # download failure for the length of the wait): that one wins.
         staged = available_prebuilts()
-        path, reason = build_locally()
-        source = "built-locally"
+        path = _late_prebuilt()
+        if path:
+            source = "prebuilt (staged by the host on request)"
+        else:
+            path, reason = build_locally()
+            source = "built-locally"
+            late = _late_prebuilt()
+            if late:
+                path, source = late, "prebuilt (staged by the host on request)"
         if not path:
             # The host's OWN words when it gave them, because "the host did not
             # deliver one within 45s" is a guess and `no module published for

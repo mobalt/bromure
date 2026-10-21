@@ -2825,6 +2825,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // refreshStreamingState() via the non-forcing `loadedMitmEngine`
             // handle (profiles.didSet must never spawn the engine early).
             self.loadedMitmEngine = e
+            // A supply-chain override prompt's "Always allow" saves to the
+            // workspace's reputation allowlist.
+            self.wireSupplyChainOverrides(e.supplyChainBroker)
             if BACEnrollmentStore.load() != nil {
                 let up = BACTraceUploader()
                 up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))
@@ -10823,11 +10826,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // System packages on request: an approved package is installed by
         // the guest's root supervisor (agentd → sandboxd), never by the agent.
         advisor.systemPackagesProvider = { modes.systemPackagesOn($0) }
+        advisor.enforceBinariesProvider = { [weak engine] in
+            engine?.guardrailsConfig(for: $0)?.egressPolicy?.enforceBinaries == true
+        }
         advisor.installPackages = { [weak self] pid, manager, packages in
             guard let self else { return (1, "the app is going away") }
             do {
+                // No reply deadline here (guestJSONRequest waits for agentd):
+                // the guest answers only once apt has finished or been
+                // stopped, so a failure shown is never one still running.
                 let reply = try await self.guestJSONRequest(
-                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 900])
+                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 2000])
                 return (reply["exit_code"] as? Int ?? 1, reply["output"] as? String ?? "")
             } catch {
                 return (1, "\(error)")
@@ -10861,6 +10870,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     func persistEditedProfile(_ profile: inout Profile, editing: Profile?,
                               generateSSH: Bool, policySource: String = "user") throws {
+        // The organization boundary is a hard gate on every save, whichever
+        // path it came from (the Sandbox drawer's Allow used to skip it).
+        if let refusal = OpenShellGovernance.shared.refusal(saving: profile, editing: editing) {
+            throw refusal
+        }
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
@@ -11694,6 +11708,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 .filter { !freshFakes.contains($0.fake) }
             engine.swapper.setMap(TokenMap(entries: fresh.entries + preserved),
                                   for: profile.id)
+            // …and the rest of what the kubeconfigs need, as at launch: a
+            // kubeconfig imported while the VM runs must be trusted (its
+            // cluster CA) and authenticated (its client certificate) now.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
         }
 
         // Rewrite the guest-side credential files with the freshly-minted
@@ -12166,9 +12184,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
             guard launchQuestions.begin(profile.id) else { return }
-            let wiped = confirmWipeAndProceed(profile: profile)
+            let wipe = confirmWipeAndProceed(profile: profile)
             launchQuestions.end(profile.id)
-            if !wiped {
+            switch wipe {
+            case .wiped: break
+            case .cancelled: return
+            case .diskInUse:
+                // Confirmed, but not carried out: say so, never wipe the open disk.
+                showWipeSkipped(profile)
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -12283,27 +12306,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             engine.swapper.setMap(tokenMap, for: profile.id)
 
-            // Per-host client identities for upstream mTLS (kubectl
-            // → API server).
-            for ident in kubeMat.clientIdentities {
-                engine.clientIdentities.setIdentity(
-                    ident.identity, host: ident.host, profileID: profile.id,
-                    consentCredentialID: ident.consentCredentialID,
-                    consentDisplayName: ident.consentDisplayName)
-            }
-            // Per-host CA overrides so the proxy can verify private
-            // API-server certs that don't chain to macOS roots.
-            for entry in kubeMat.clusterCAs {
-                engine.clusterCAs.setCA(
-                    pem: entry.caPEM, host: entry.host, profileID: profile.id)
-            }
-            // Exec-credential poller: refreshes the swap map on a
-            // schedule for each context. Cancelled in unregister.
-            if !kubeMat.execContexts.isEmpty {
-                engine.execPoller.start(kubeMat.execContexts,
-                                        profileID: profile.id,
-                                        swapper: engine.swapper)
-            }
+            // Client identities for upstream mTLS (kubectl → API server),
+            // each cluster's own CA (private API-server certs don't chain to
+            // macOS roots), and the exec-credential pollers.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
 
             // 1Password: manual tokens whose value is an `op://` reference are
             // resolved host-side. The plan already minted a stable fake from the
@@ -14505,7 +14511,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var asking = true
         defer { if asking { launchQuestions.end(profile.id) } }
         if SessionDisk.isCompromised(profile: profile, store: store) {
-            guard await confirmWipeAndProceedAsync(profile: profile) else { return }
+            switch await confirmWipeAndProceedAsync(profile: profile) {
+            case .wiped: break
+            case .cancelled: return
+            case .diskInUse:
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                launchQuestions.end(profile.id); asking = false
+                let (title, message) = Self.wipeSkippedParts(profile.name)
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                return
+            }
         }
         let current = readCurrentBaseVersion()
         if baseImageUpgradeOfferDue(profile, current: current),
@@ -14586,7 +14604,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    private func confirmWipeAndProceed(profile: Profile) -> Bool {
+    /// How a compromise-wipe question ended.
+    enum CompromiseWipe: Equatable {
+        case cancelled
+        case wiped
+        /// "Wipe and Launch", but a boot began while the question was up and
+        /// has the disk open: nothing was wiped, and the user is told so.
+        case diskInUse
+    }
+
+    static func compromiseWipe(confirmed: Bool, wiped: () -> Bool) -> CompromiseWipe {
+        guard confirmed else { return .cancelled }
+        return wiped() ? .wiped : .diskInUse
+    }
+
+    static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.",
+            comment: "compromise wipe skipped"))
+    }
+
+    private func showWipeSkipped(_ profile: Profile) {
+        let (title, message) = Self.wipeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
+    private func confirmWipeAndProceed(profile: Profile) -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         do {
             let alert = NSAlert()
@@ -14607,24 +14656,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // first button so the user has to click it explicitly.
             alert.buttons.first?.keyEquivalent = ""
             NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            let confirmed = alert.runModal() == .alertFirstButtonReturn
+            return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
         }
-        return wipeCompromised(profile: profile)
     }
 
     /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
     /// suspends on the broker (the main queue keeps draining, so the fat
     /// client actually receives and can answer the prompt) instead of pumping
     /// the run loop from inside a control-socket callout.
-    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> Bool {
+    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         // Fallback (timeout / client gone) is Cancel — never auto-wipe.
-        guard await PendingPromptBroker.shared.askAsync(
+        let confirmed = await PendingPromptBroker.shared.askAsync(
             profileID: profile.id, title: title, message: info,
             buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
                       NSLocalizedString("Cancel", comment: "")],
-            fallback: 1) == 0 else { return false }
-        return wipeCompromised(profile: profile)
+            fallback: 1) == 0
+        return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
     }
 
     /// True while a compromise alert is up on screen. The swap-time
@@ -14997,23 +15046,49 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             Task { @MainActor [weak self] in
                 let meta = self?.runningSessions[pid]?.sandbox.sessionDisk?.metadataDirectory
                 Task.detached {
-                    var failures: [String: String] = [:]
-                    for kernel in kernels {
-                        if let why = await store.ensure(kernel: kernel, hash: hash) {
-                            failures[kernel] = why
-                            if waiting || kernel == kernels.first {
-                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): \(kernel): \(why)")
+                    // Only a workspace whose spec is active has a sentry dir.
+                    let dir = meta?.appendingPathComponent("sentry", isDirectory: true)
+                    // A waiting guest gives up after ~45 s; a transient failure
+                    // (offline, a failed download) is retried within that,
+                    // and each success is staged at once.
+                    let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
+                    let short = String(pid.uuidString.prefix(8))
+                    // Each kernel on its own, in parallel, staged (or marked
+                    // unavailable) the moment ITS answer is in: the guest
+                    // reports the running kernel first and then every
+                    // installed one, and a slow download for another kernel
+                    // must not hold back the one it's waiting for.
+                    @Sendable func settle(_ kernel: String, attempt: Int) async -> Bool {
+                        let f = await store.ensureOutcome(kernel: kernel, hash: hash)
+                        if let f, attempt == 0, waiting || kernel == kernels.first {
+                            SentryModuleStore.log("\(short): \(kernel): \(f.reason)")
+                        }
+                        if let dir, FileManager.default.fileExists(atPath: dir.path) {
+                            if let f, f.definitive {
+                                // A guest waiting for a module none will come
+                                // for stops at once, with the host's reason —
+                                // only then: a transient failure leaves it waiting.
+                                store.markUnavailable([kernel: f.reason], in: dir)
+                            } else if f == nil, !store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
+                                SentryModuleStore.log("\(short): staged \(kernel) into the running VM\(waiting ? " (the guest is waiting)" : "")")
                             }
                         }
+                        return f.map { !$0.definitive } ?? false     // retry?
                     }
-                    // Only a workspace whose spec is active has a sentry dir.
-                    guard let dir = meta?.appendingPathComponent("sentry", isDirectory: true),
-                          FileManager.default.fileExists(atPath: dir.path) else { return }
-                    // A guest waiting for a module none will come for stops
-                    // waiting at once, with the host's reason.
-                    store.markUnavailable(failures, in: dir)
-                    let staged = store.stage(kernels: kernels, hash: hash, into: dir)
-                    SentryModuleStore.log("\(pid.uuidString.prefix(8)): staged \(staged) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                    var pending = kernels
+                    var attempt = 0
+                    while !pending.isEmpty {
+                        let round = attempt
+                        pending = await withTaskGroup(of: (String, Bool).self) { group in
+                            for kernel in pending { group.addTask { (kernel, await settle(kernel, attempt: round)) } }
+                            var retry: [String] = []
+                            for await (kernel, again) in group where again { retry.append(kernel) }
+                            return retry
+                        }
+                        attempt += 1
+                        guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
+                        try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
+                    }
                 }
             }
         }
@@ -15306,10 +15381,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerError(message)
             }
         }
-        sandbox.onWorktreeError = { [weak self] message in
+        sandbox.onWorktreeError = { [weak self] raw in
             Task { @MainActor in
                 guard let self else { return }
+                // An automation (or task) run's refusal names its slug on the
+                // first line: that run failed — it isn't left "launched".
+                let (slug, message) = Self.splitWorktreeError(raw)
                 SupplyChainLog.shared.record("[worktree] \(message)")
+                if let slug {
+                    self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message)
+                    self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message)
+                }
                 // NON-BLOCKING. A modal runModal() here froze the main run loop
                 // — and with it the automation server that POST /sessions waits
                 // on — so one failed worktree wedged the whole app (and hung the

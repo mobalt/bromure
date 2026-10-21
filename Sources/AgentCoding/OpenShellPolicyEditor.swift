@@ -16,6 +16,7 @@ struct FirewallEditor: View {
     @State private var engine: Engine = .firewall
     @State private var loaded = false
     @State private var confirmDiscard = false
+    @StateObject private var sentryFloor = KernelSentryFloorWatch()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -49,12 +50,24 @@ struct FirewallEditor: View {
                                       logAllowed: $draft.logAllowedConnections,
                                       onEdited: onEdited, showsHeader: false)
                 }
-                if draft.kernelSentry != .off {
-                    // Left on from before the sentry came with the OpenShell engine.
+                // Left on from before the sentry came with the OpenShell engine
+                // — or required by the organization, which turning it off
+                // can't go below.
+                switch Self.firewallSentryCard(draft, floor: sentryFloor.floor) {
+                case .none:
+                    EmptyView()
+                case .canTurnOff:
                     PolicyCard(nil) {
                         PolicyRow(title: "Kernel sentry is still on",
                                   caption: "It belongs to the OpenShell engine now.") {
                             Button("Turn off") { draft.kernelSentry = .off }
+                        }
+                    }
+                case .required(let floor):
+                    PolicyCard(nil) {
+                        PolicyRow(title: "Kernel sentry is still on",
+                                  caption: "Your organization requires at least \(floor.label).") {
+                            EmptyView()
                         }
                     }
                 }
@@ -74,7 +87,7 @@ struct FirewallEditor: View {
                 engine = .firewall
             }
         } message: {
-            Text("The workspace's OpenShell policy will be removed and the kernel sentry turned off. Export the policy first if you want to keep it.")
+            Text(Self.discardMessage(floor: OpenShellGovernance.shared.kernelSentryFloor))
         }
     }
 
@@ -88,8 +101,36 @@ struct FirewallEditor: View {
             if draft.kernelSentry == .off { draft.kernelSentry = .bestEffort }
             engine = .openShell
         case .firewall:
-            if draft.usesOpenShellPolicy { confirmDiscard = true } else { draft.kernelSentry = .off; engine = .firewall }
+            if draft.usesOpenShellPolicy { confirmDiscard = true }
+            else { draft.kernelSentry = .off; engine = .firewall }
         }
+    }
+
+    enum SentryCard: Equatable { case none, canTurnOff, required(KernelSentryMode) }
+
+    /// The firewall pane's sentry card, from the mode that actually applies:
+    /// nothing when it's off; "turn off" when the workspace's own setting
+    /// is above the organization's minimum; the minimum otherwise.
+    ///
+    /// Turning it off (and leaving the OpenShell engine) stores `.off`, never
+    /// the minimum: the minimum is applied where the sentry starts
+    /// (`Profile.effectiveKernelSentry`) and follows the organization. A
+    /// stored copy outlived it — a Turn off clicked after the minimum rose
+    /// to Required kept the workspace on Required once it dropped again.
+    /// (Finding CWE-670, "Firewall sentry card stays stale after the
+    /// organization floor changes, and Turn off can save a higher mode".)
+    static func firewallSentryCard(_ p: Profile, floor: KernelSentryMode) -> SentryCard {
+        let applied = p.kernelSentry.rank >= floor.rank ? p.kernelSentry : floor
+        if applied == .off { return .none }
+        return p.kernelSentry.rank > floor.rank ? .canTurnOff : .required(floor)
+    }
+
+    /// What discarding the policy does to the sentry, as it will actually
+    /// apply: off, unless the organization requires it.
+    static func discardMessage(floor: KernelSentryMode) -> String {
+        floor == .off
+            ? NSLocalizedString("The workspace's OpenShell policy will be removed and the kernel sentry turned off. Export the policy first if you want to keep it.", comment: "discard OpenShell policy")
+            : String(format: NSLocalizedString("The workspace's OpenShell policy will be removed. The kernel sentry stays on (%@): your organization requires it. Export the policy first if you want to keep it.", comment: "discard OpenShell policy, sentry floor"), floor.label)
     }
 }
 
@@ -211,9 +252,8 @@ struct OpenShellPolicyEditor: View {
     /// The VM reported the sandbox or the sentry not working as asked: the
     /// Sandbox group opens by itself so it's seen.
     private var sandboxNeedsAttention: Bool {
-        guard let st = GuestSandboxStatusStore.shared.status(for: draft.id) else { return false }
-        return st.strictApplied == false || !st.warnings.isEmpty
-            || (st.sentry == "unavailable" && draft.effectiveKernelSentry != .off)
+        GuestSandboxStatusStore.shared.status(for: draft.id)?
+            .needsAttention(sentryExpected: draft.effectiveKernelSentry != .off) ?? false
     }
 
     /// The organization boundary: where it comes from, and whether this
@@ -292,7 +332,7 @@ struct OpenShellPolicyEditor: View {
     /// VM, and the kernel sentry that watches it from kernel space.
     @ViewBuilder private var guestSandboxSection: some View {
         let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
-        let confined = sections.filesystemPolicy != nil || sections.process != nil
+        let confined = sections.confinesGuest
         VStack(alignment: .leading, spacing: 6) {
             PolicyRow(title: "Filesystem & process",
                       caption: confined ? "The agent can only reach the paths the policy lists."
@@ -308,11 +348,16 @@ struct OpenShellPolicyEditor: View {
                              tone: .warn)
             }
             if let st = GuestSandboxStatusStore.shared.status(for: draft.id) {
-                PolicyStatus(text: "Filesystem \(st.filesystem)"
+                // Orange only for what didn't go as asked: a failed or
+                // degraded ruleset, an `off` the guest says failed, or one
+                // asked for and not in force yet — never the policy's own
+                // "not configured" / "no paths configured".
+                PolicyStatus(text: (st.filesystemNotYetApplied ? "Filesystem not applied yet" : "Filesystem \(st.filesystem)")
                                  + (st.degradedReason.map { " (\($0))" } ?? "")
                                  + (st.runAsUser.map { " · runs as \($0)" } ?? "")
                                  + (st.landlockABI.map { " · Landlock ABI \($0)" } ?? ""),
-                             tone: st.degradedReason == nil ? .ok : .warn)
+                             tone: st.filesystem == "failed" ? .bad
+                                 : (st.filesystemFailed || st.filesystemOffUnasked || st.filesystemNotYetApplied) ? .warn : .ok)
                 if st.strictApplied == false {
                     PolicyStatus(text: NSLocalizedString("The strict sandbox didn't fully apply in the VM, so no session will start and binary rules fail closed. Restarting the VM retries it.", comment: "sandbox status"),
                                  tone: .bad)
@@ -537,9 +582,10 @@ struct OpenShellPolicyEditor: View {
 /// to the Bromure Firewall turns it off.
 struct KernelSentrySection: View {
     @Binding var draft: Profile
+    @StateObject private var sentryFloor = KernelSentryFloorWatch()
 
     var body: some View {
-        let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
+        let floor = sentryFloor.floor
         VStack(alignment: .leading, spacing: 10) {
             if draft.effectiveKernelSentry == .off {
                 // A workspace set up before the sentry came with the engine.
@@ -720,5 +766,29 @@ struct OpenShellCredentialsSection: View {
     private func detachProvider(_ a: OpenShellProviderAttachment) {
         draft.manualTokens.removeAll { a.tokenIDs.contains($0.id) }
         draft.openShellProviders.removeAll { $0.id == a.id }
+    }
+}
+
+/// The organization's minimum kernel sentry, kept current for views: the
+/// enrollment heartbeat changes it at any time (`OpenShellGovernance`'s
+/// changedNotification), and a view that read it once in `body` went on
+/// drawing the old one until something else redrew it.
+@MainActor
+final class KernelSentryFloorWatch: ObservableObject {
+    @Published private(set) var floor: KernelSentryMode
+    private let center: NotificationCenter
+    private var observer: NSObjectProtocol?
+
+    init(center: NotificationCenter = .default,
+         read: @escaping @MainActor () -> KernelSentryMode = { OpenShellGovernance.shared.kernelSentryFloor }) {
+        self.center = center
+        floor = read()
+        observer = center.addObserver(forName: OpenShellGovernance.changedNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.floor = read() }
+        }
+    }
+
+    deinit {
+        if let observer { center.removeObserver(observer) }
     }
 }

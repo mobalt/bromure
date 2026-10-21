@@ -29,7 +29,8 @@
  *   against --public-key first, so a tampered bucket can't smuggle entries in.
  */
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync,
+         unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export const MAGIC = "bromure-sentry-modules-v1";
@@ -44,6 +45,40 @@ export function moduleSigningPayload(sourceHash, m) {
                       `sha256=${m.sha256.toLowerCase()}`, `bytes=${m.bytes}`].join("\n"), "utf8");
 }
 const KERNEL_RE = /^[0-9][0-9A-Za-z.+~-]*$/;
+
+// The modules dir comes out of the build container (`docker cp` keeps
+// symlinks), and this runs on the machine holding the signing key: a planted
+// link must never be read as a module (its target signed and published) nor
+// written through (catalog/signature JSON clobbering ~/.ssh or the key file).
+// Every path here is opened without following a final symlink, and the
+// directory itself must be a real one.
+const die = (msg) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(1); };
+function lexists(path) {
+  try { lstatSync(path); return true; } catch (e) { if (e.code === "ENOENT") return false; throw e; }
+}
+export function requireRealDir(dir) {
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) die(`${dir} must be a directory, not a symlink`);
+}
+export function readNoFollow(path) {
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (e) { if (e.code === "ELOOP") die(`${path} is a symlink — refusing it`); throw e; }
+  try {
+    if (!fstatSync(fd).isFile()) die(`${path} isn't a regular file`);
+    return readFileSync(fd);
+  } finally { closeSync(fd); }
+}
+export function writeNoFollow(path, text) {
+  // Replace the entry itself (never what a link there points at), then
+  // create a fresh file that can't already exist or be a link.
+  if (lexists(path)) {
+    if (lstatSync(path).isDirectory()) die(`${path} is a directory`);
+    unlinkSync(path);
+  }
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  try { writeSync(fd, text); } finally { closeSync(fd); }
+}
 
 const args = process.argv.slice(2);
 function opt(name) {
@@ -80,8 +115,8 @@ function publicKeyFromRaw(b64) {
 }
 
 function headersOf(txtPath) {
-  if (!existsSync(txtPath)) return undefined;
-  const line = readFileSync(txtPath, "utf8").split("\n").find((l) => l.startsWith("headers:"));
+  if (!lexists(txtPath)) return undefined;
+  const line = readNoFollow(txtPath).toString("utf8").split("\n").find((l) => l.startsWith("headers:"));
   return line ? line.slice("headers:".length).trim() : undefined;
 }
 
@@ -93,21 +128,28 @@ const verifyPath = opt("verify");
 if (verifyPath) {
   const pub = publicKeyFromRaw(req("public-key"));
   const dir = req("modules");
-  const cat = JSON.parse(readFileSync(verifyPath, "utf8"));
-  const fail = (msg) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(1); };
+  requireRealDir(dir);
+  // Exit 3 = a signature doesn't verify against the pinned key (the key is
+  // wrong); 1 = anything else (a module, a .sig or the catalog itself), so a
+  // caller can tell a wrong key from a bad build.
+  const WRONG_KEY = 3;
+  const fail = (msg, code = 1) => { console.error(`make-sentry-catalog: ${msg}`); process.exit(code); };
+  let cat;
+  try { cat = JSON.parse(readNoFollow(verifyPath).toString("utf8")); }
+  catch (e) { fail(`can't read ${verifyPath}: ${e.message}`); }
   if (cat.sourceHash !== req("source-hash").toLowerCase()) fail(`catalog is for ${cat.sourceHash}`);
   if (!cat.signature) fail("catalog is unsigned");
   if (!verify(null, signingPayload(cat, cat.signature.signedAt), pub, Buffer.from(cat.signature.edSignature, "base64")))
-    fail("catalog signature does NOT verify against the pinned key");
+    fail("catalog signature does NOT verify against the pinned key", WRONG_KEY);
   for (const m of cat.modules) {
     if (!m.signature || !verify(null, moduleSigningPayload(cat.sourceHash, m), pub, Buffer.from(m.signature, "base64")))
-      fail(`module ${m.kernel}: signature does NOT verify`);
+      fail(`module ${m.kernel}: signature does NOT verify against the pinned key`, WRONG_KEY);
     const file = join(dir, `bromure_sentry-${m.kernel}.ko`);
-    if (!existsSync(file)) continue;   // published earlier, not rebuilt here
-    const body = readFileSync(file);
+    if (!lexists(file)) continue;   // published earlier, not rebuilt here
+    const body = readNoFollow(file);
     if (body.length !== m.bytes || createHash("sha256").update(body).digest("hex") !== m.sha256.toLowerCase())
       fail(`module ${m.kernel}: ${file} doesn't match the catalog`);
-    const sig = existsSync(`${file}.sig`) && JSON.parse(readFileSync(`${file}.sig`, "utf8"));
+    const sig = lexists(`${file}.sig`) && JSON.parse(readNoFollow(`${file}.sig`).toString("utf8"));
     if (!sig || sig.edSignature !== m.signature) fail(`module ${m.kernel}: ${file}.sig is missing or differs`);
   }
   console.log(`make-sentry-catalog: ${verifyPath} verifies (${cat.modules.length} kernel(s), signed ${cat.signature.signedAt})`);
@@ -117,14 +159,18 @@ if (verifyPath) {
 const sourceHash = req("source-hash").toLowerCase();
 if (!/^[0-9a-f]{64}$/.test(sourceHash)) { console.error("make-sentry-catalog: bad --source-hash"); process.exit(2); }
 const modulesDir = req("modules");
+requireRealDir(modulesDir);
 const out = req("out");
 const prefix = `sentry/${sourceHash}/`;
 
 const byKernel = new Map();
 
 const previousPath = opt("previous");
-if (previousPath && existsSync(previousPath)) {
-  const prev = JSON.parse(readFileSync(previousPath, "utf8"));
+// The previous catalog's own signature verified: its entries' kernel, path,
+// sha256 and size are vouched for by the release key.
+let previousVerified = false;
+if (previousPath && lexists(previousPath)) {
+  const prev = JSON.parse(readNoFollow(previousPath).toString("utf8"));
   if (prev.sourceHash !== sourceHash) {
     console.error(`make-sentry-catalog: previous catalog is for ${prev.sourceHash}, not ${sourceHash}`);
     process.exit(1);
@@ -135,6 +181,7 @@ if (previousPath && existsSync(previousPath)) {
     const ok = verify(null, signingPayload(prev, prev.signature.signedAt), publicKeyFromRaw(pub),
                       Buffer.from(prev.signature.edSignature, "base64"));
     if (!ok) { console.error("make-sentry-catalog: the published catalog's signature does NOT verify — refusing to merge"); process.exit(1); }
+    previousVerified = true;
   }
   for (const m of prev.modules ?? []) byKernel.set(m.kernel, m);
   console.log(`make-sentry-catalog: kept ${byKernel.size} published module(s)`);
@@ -157,14 +204,30 @@ if (!unsigned) {
 }
 
 // Kept entries must carry a valid module signature too (a merged catalog
-// vouches for nothing it can't re-verify).
+// vouches for nothing it can't re-verify). The catalog signature doesn't
+// cover them, so a bucket write can strip them: a kept entry whose own
+// signature is gone is re-signed when the previous catalog's signature
+// vouches for its statement (ed25519 is deterministic: the same signature
+// as before, matching the published .ko.sig). A kernel rebuilt in this run
+// is replaced below, so its old entry isn't checked at all.
 const pubForModules = opt("public-key");
+const rebuilt = new Set(readdirSync(modulesDir)
+  .map((n) => /^bromure_sentry-(.+)\.ko$/.exec(n)?.[1]).filter(Boolean));
+let resigned = 0;
 if (!unsigned && pubForModules) {
   for (const m of byKernel.values()) {
+    if (rebuilt.has(m.kernel)) continue;
     const ok = m.signature && verify(null, moduleSigningPayload(sourceHash, m), publicKeyFromRaw(pubForModules),
                                      Buffer.from(m.signature, "base64"));
-    if (!ok) { console.error(`make-sentry-catalog: kept module ${m.kernel} has no valid signature — refusing to merge`); process.exit(1); }
+    if (ok) continue;
+    if (!previousVerified) {
+      console.error(`make-sentry-catalog: kept module ${m.kernel} has no valid signature and no signed catalog vouches for it — refusing to merge`);
+      process.exit(1);
+    }
+    m.signature = sign(null, moduleSigningPayload(sourceHash, m), key).toString("base64");
+    resigned++;
   }
+  if (resigned) console.log(`make-sentry-catalog: re-signed ${resigned} kept module statement(s) the bucket had lost`);
 }
 
 let added = 0;
@@ -174,8 +237,9 @@ for (const name of readdirSync(modulesDir).sort()) {
   const kernel = match[1];
   if (!KERNEL_RE.test(kernel)) { console.error(`make-sentry-catalog: refusing odd kernel name ${kernel}`); process.exit(1); }
   const file = join(modulesDir, name);
-  const bytes = statSync(file).size;
-  const sha256 = createHash("sha256").update(readFileSync(file)).digest("hex");
+  const body = readNoFollow(file);   // a regular file, not a link to one
+  const bytes = body.length;
+  const sha256 = createHash("sha256").update(body).digest("hex");
   const entry = {
     kernel,
     path: `${prefix}${kernel}/bromure_sentry-${kernel}-${sha256.slice(0, 12)}.ko`,
@@ -192,7 +256,7 @@ for (const name of readdirSync(modulesDir).sort()) {
     entry.signature = sig.toString("base64");
     // Detached copy, published beside the module (<path>.sig), so a module
     // can be checked on its own.
-    writeFileSync(`${file}.sig`, JSON.stringify({
+    writeNoFollow(`${file}.sig`, JSON.stringify({
       format: MODULE_MAGIC, sourceHash, kernel, sha256, bytes, edSignature: entry.signature,
     }, null, 2) + "\n");
   }
@@ -219,5 +283,5 @@ if (unsigned) {
   catalog.signature = { signedAt, edSignature: signature.toString("base64") };
 }
 
-writeFileSync(out, JSON.stringify(catalog, null, 2) + "\n");
+writeNoFollow(out, JSON.stringify(catalog, null, 2) + "\n");
 console.log(`make-sentry-catalog: wrote ${out} (${catalog.modules.length} kernel(s), ${added} new)`);

@@ -69,9 +69,29 @@ public final class SecurityTimeline {
         /// Repeats of a routine event (same credential swapped in for the same
         /// host) share this key and fold into one row with a `count` (B40).
         public var coalesceKey: String? = nil
+        /// How many refused attempts the row stands for, when the engine
+        /// folds them itself (a guest-sandbox denial: the guest's own count on
+        /// the first row; the extra denials on a "×N more" row). nil = one.
+        public var denials: Int? = nil
         /// A connection-level firewall verdict, structured — what the row's
         /// quick actions (allow / block / switch the rule off) work from.
         public var firewall: Firewall? = nil
+        /// A package a reputation check blocked that the user may let
+        /// through: what the row's "Always allow" action adds.
+        public var package: PackageRef? = nil
+    }
+
+    /// `ecosystem:name`, as the supply-chain allowlists write it.
+    public struct PackageRef: Sendable, Equatable {
+        public let ecosystem: String
+        public let name: String
+        public var allowlistEntry: String { "\(ecosystem):\(name)" }
+        init(ecosystem: String, name: String) { self.ecosystem = ecosystem; self.name = name }
+        init?(wire: String?) {
+            guard let wire, let i = wire.firstIndex(of: ":"), i != wire.startIndex,
+                  wire.index(after: i) != wire.endIndex else { return nil }
+            ecosystem = String(wire[..<i]); name = String(wire[wire.index(after: i)...])
+        }
     }
 
     /// Event types whose rows keep their raw data (`detail`).
@@ -155,6 +175,7 @@ public final class SecurityTimeline {
                                        count: (old.count ?? 1) + (e.count ?? 1))
                     merged.coalesceKey = key
                     merged.firewall = e.firewall ?? old.firewall
+                    merged.package = e.package ?? old.package
                     merged.eventType = e.eventType ?? old.eventType
                     merged.detail = e.detail ?? old.detail
                     events.remove(at: i)
@@ -294,7 +315,9 @@ public final class SecurityTimeline {
         if let n = e.count { d["n"] = n }
         if let t = e.eventType, let x = e.detail.flatMap(foundation) { d["y"] = t; d["x"] = x }
         if let ck = e.coalesceKey { d["ck"] = ck }
+        if let dn = e.denials { d["dn"] = dn }
         if let fw = e.firewall { d["fw"] = fw.wire }
+        if let pk = e.package { d["pk"] = pk.allowlistEntry }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -314,7 +337,9 @@ public final class SecurityTimeline {
                       workspace: d["w"] as? String, count: d["n"] as? Int,
                       eventType: d["y"] as? String, detail: anyJSON(d["x"]))
         e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
+        e.denials = d["dn"] as? Int
         e.firewall = Firewall(wire: d["fw"] as? [String: Any])
+        e.package = PackageRef(wire: d["pk"] as? String)
         return e
     }
 
@@ -417,7 +442,9 @@ public final class SecurityTimeline {
             if let n = e.count { r["count"] = n }
             if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
             if let ck = e.coalesceKey { r["ck"] = ck }
+            if let dn = e.denials { r["dn"] = dn }
             if let fw = e.firewall { r["fw"] = fw.wire }
+            if let pk = e.package { r["pk"] = pk.allowlistEntry }
             return r
         }
     }
@@ -439,7 +466,9 @@ public final class SecurityTimeline {
                           count: r["count"] as? Int, eventType: r["type"] as? String,
                           detail: Self.anyJSON(r["detail"]))
             e.coalesceKey = r["ck"] as? String
+            e.denials = r["dn"] as? Int
             e.firewall = Firewall(wire: r["fw"] as? [String: Any])
+            e.package = PackageRef(wire: r["pk"] as? String)
             return e
         }
     }
@@ -515,7 +544,16 @@ public final class SecurityTimeline {
         case "sandbox.status":
             let fs = str(d, "filesystem") ?? "off"
             let strictFailed: Bool = { if case .bool(false)? = d["strict_applied"] { return true }; return false }()
-            let bad = fs == "failed" || fs == "degraded" || strictFailed
+            // An `off` the guest says failed (a run_as identity it couldn't
+            // set up) is a failure, not "no filesystem policy"; one asked for
+            // and not in force yet (held for the sentry) is a wait.
+            let offReason = fs == "off" ? (str(d, "reason") ?? "") : ""
+            let offFailed = !offReason.isEmpty && !GuestSandboxStatusStore.Status.filesystemOffAsAsked.contains(offReason)
+            let offWaiting: Bool = {
+                if fs == "off", offReason.isEmpty, case .bool(true)? = d["requested_filesystem"] { return true }
+                return false
+            }()
+            let bad = fs == "failed" || fs == "degraded" || strictFailed || offFailed
             var parts = [String(format: NSLocalizedString("filesystem %@", comment: "guest sandbox condition"), fs)]
             if let u = str(d, "run_as") { parts.append(String(format: NSLocalizedString("runs as %@", comment: "guest sandbox condition"), u)) }
             if let sc = str(d, "seccomp") { parts.append("seccomp \(sc)") }
@@ -529,6 +567,7 @@ public final class SecurityTimeline {
                        parts.joined(separator: " · "),
                        strictFailed ? NSLocalizedString("strict sandbox not applied — no session will start", comment: "Security Timeline decision")
                        : bad ? (str(d, "reason") ?? NSLocalizedString("not enforced", comment: "Security Timeline decision"))
+                           : offWaiting ? NSLocalizedString("not applied yet", comment: "Security Timeline decision: guest sandbox still being set up")
                            : off ? NSLocalizedString("no filesystem policy", comment: "Security Timeline decision")
                                  : NSLocalizedString("enforced", comment: "Security Timeline decision"),
                        bad ? .blocked : off ? .info : .allowed)
@@ -564,7 +603,11 @@ public final class SecurityTimeline {
             let who = str(d, "exe") ?? (kind == "seccomp_denied" ? str(d, "path") : nil) ?? str(d, "comm") ?? "?"
             let pid = int(d, "pid").map { " (pid \($0))" } ?? ""
             let times: String
-            if case .bool(true)? = d["repeat"] {
+            let isRepeat: Bool = { if case .bool(true)? = d["repeat"] { return true }; return false }()
+            // What the row stands for: the guest's own count on a first row,
+            // the extra denials on a folded "×N more" row.
+            let denials = max(1, int(d, "count") ?? 1)
+            if isRepeat {
                 // Folded repeats of a denial already shown.
                 let procs = int(d, "processes") ?? 1
                 times = procs > 1
@@ -583,9 +626,11 @@ public final class SecurityTimeline {
                 let op = str(d, "op") ?? (kind == "file_open_denied" ? "open" : "access")
                 what = "\(op) \(str(d, "path") ?? "?")"
             }
-            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
-                       "\(who)\(pid) — \(what)\(times)",
-                       NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+            var e = row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                        "\(who)\(pid) — \(what)\(times)",
+                        NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+            e.denials = denials > 1 ? denials : nil
+            return e
 
         case "net.flow":
             // One network flow, explained: who ran it (the process chain from
@@ -773,11 +818,21 @@ public final class SecurityTimeline {
                 decision = NSLocalizedString("downloaded — install scripts could not be checked",
                                              comment: "Security Timeline decision: npm tarball passed through unread")
                 kind = .blocked
+            case "overridden":
+                // A reputation block the user let through (allowlist or prompt).
+                decision = String(format: NSLocalizedString("downloaded — allowed by you despite: %@",
+                                                            comment: "Security Timeline decision: supply-chain block overridden; %@ = the block's reason"),
+                                  reason ?? "a reputation warning")
+                kind = .info
             default:
                 decision = reason.map { "\(outcome) — \($0)" } ?? outcome
                 kind = .blocked
             }
-            return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
+            var e = row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
+            if outcome == "blocked", case .bool(true)? = d["overridable"], !eco.isEmpty, pkg != "?" {
+                e.package = PackageRef(ecosystem: eco, name: pkg)
+            }
+            return e
 
         case "egress.firewall":
             // The destination as the guest asked for it. The switch names a
@@ -866,7 +921,7 @@ public final class SecurityTimeline {
             if let original = str(d, "host"), original != primary, !aliases.contains(original) {
                 aliases.insert(original, at: 0)
             }
-            e.firewall = Firewall(host: primary, ip: str(d, "ip"), port: int(d, "port"),
+            e.firewall = Firewall(host: primary, ip: str(d, "ip") ?? str(d, "dst_ip"), port: int(d, "port"),
                                   proto: str(d, "proto"), rule: rule,
                                   denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases)
             // Allowed connections are routine: repeats to one destination

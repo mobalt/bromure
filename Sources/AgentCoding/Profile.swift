@@ -1807,8 +1807,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// the organization's minimum (bromure.io managed policy).
     public var effectiveKernelSentry: KernelSentryMode {
         #if os(macOS)
-        if let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)),
-           floor.rank > kernelSentry.rank { return floor }
+        let floor = OpenShellGovernance.shared.kernelSentryFloor
+        if floor.rank > kernelSentry.rank { return floor }
         #endif
         return kernelSentry
     }
@@ -4256,11 +4256,17 @@ public final class ProfileStore {
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
     /// And `display`: showing the user a picture or a chart touches nothing.
-    /// And the delegation inbox, where the files other agents hand over
-    /// land: reading and unpacking them never stops on a prompt (running
-    /// one still goes through the approval mode).
+    /// And reading the delegation inbox, where the files other agents hand
+    /// over land: a VM's home is its workspace's own, so that inbox holds
+    /// only what was sent to this workspace. Read only — rewriting or
+    /// unpacking a file there (another session's incoming files too) goes
+    /// through the approval mode like any other edit.
     static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"] + claudeInboxRules
-    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)"]
+    /// Rules earlier builds seeded and every merge re-added, so the user
+    /// couldn't drop them: taken back out (CWE-732, "Sidecar Claude can read
+    /// and edit every workspace's delegation inbox without a prompt").
+    static let claudeRetractedRules = ["Edit(~/.bromure/inbox/**)"]
     /// `permissions.additionalDirectories` merged in too: Claude's built-in
     /// read-only commands (ls, cat, grep…) then run there unprompted.
     static let claudeInboxDirectory = "~/.bromure/inbox"
@@ -4689,7 +4695,7 @@ public final class ProfileStore {
             // Agent-to-agent traffic (delegate, report, deliver…) is our own
             // MCP to the host; auto mode's guardrails kept blocking it.
             // Merged into the user's list, never replacing it.
-            var allow = perms["allow"] as? [String] ?? []
+            var allow = (perms["allow"] as? [String] ?? []).filter { !Self.claudeRetractedRules.contains($0) }
             for rule in Self.claudeAlwaysAllowed where !allow.contains(rule) {
                 allow.append(rule)
             }
@@ -4764,7 +4770,11 @@ public final class ProfileStore {
             hooks["UserPromptSubmit"] = hookCmd("working") + hookCmd("policy") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
-            hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
+            // Stop drains them too: a note written after the blocked tool's
+            // PostToolUse ran would otherwise wait for the next message. One
+            // `stop` command (the hooks of an event run in parallel): it
+            // reports `done` only when no note kept the turn going.
+            hooks["Stop"] = hookCmd("stop") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
             // not Stop: without it the tab sat "working" forever. A refused
@@ -4845,40 +4855,129 @@ public final class ProfileStore {
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
             # Either way the pane resolves this tab's window index — reported in
             # the filename so each tab's dot is independent.
-            # `policy` (Claude's PostToolUse / UserPromptSubmit): hand the model
+            # `policy` (Claude's PostToolUse / UserPromptSubmit / Stop): hand the model
             # the notes the host left for this tab when the workspace's policy
             # blocked something it did (PolicySteering), as the hook's
-            # additionalContext. Each note is claimed by rename, so two hooks
-            # firing at once never hand over the same one.
+            # additionalContext. The notes are in the host's read-only meta
+            # share, never a guest folder: a Stop note keeps the turn going, so
+            # one any guest process could write would be a prompt nobody typed.
+            # Each is claimed by an exclusive marker, so two hooks firing at
+            # once never hand over the same one.
+            # `stop` (Claude's one Stop hook): a turn that ends with notes
+            # owed is kept going with them (`decision: block`), and then it has
+            # NOT ended: reporting `done` too would let the host type a held
+            # notice and finish a task while the agent works on. Claude runs a
+            # Stop event's hooks in parallel, so the drain and the report are
+            # one command. A `done` run for a Stop event does the same, and a
+            # `policy` one leaves the notes to it: a settings file seeded before
+            # (Claude since turned off, Grok still loading it) lists both.
+            stop_json=""
+            stop_event='"hook_\{0,1\}[eE]vent_\{0,1\}[nN]ame"[[:space:]]*:[[:space:]]*"Stop"'
+            if [ "${1:-}" = stop ] || [ "${1:-}" = done ]; then
+              if [ ! -t 0 ]; then stop_json=$(cat 2>/dev/null); fi
+              stop_read=1
+              if [ "$1" = stop ] || printf '%s' "$stop_json" | grep -q "$stop_event"; then
+                kept=$(printf '%s' "$stop_json" | BROMURE_STOP_DRAIN=1 sh "$0" policy)
+                if [ -n "$kept" ]; then printf '%s\n' "$kept"; exit 0; fi
+              fi
+              set -- done "${2:-}"
+            fi
             if [ "${1:-}" = policy ]; then
+              pol_json=""
+              if [ ! -t 0 ]; then pol_json=$(cat 2>/dev/null); fi
+              if [ -z "${BROMURE_STOP_DRAIN:-}" ] && printf '%s' "$pol_json" | grep -q "$stop_event"; then exit 0; fi
               [ -n "${TMUX_PANE:-}" ] || exit 0
               idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
               [ -n "$idx" ] || exit 0
-              set -- "$HOME"/.bromure/policy-notes/w"$idx"-*.note
+              set -- /mnt/bromure-meta/policy-notes/w"$idx"-*.note
               [ -e "$1" ] || exit 0
-              exec python3 -c '
-            import json, os, sys
+              printf '%s' "$pol_json" | python3 -I -c '
+            import json, os, stat, sys
             event = "PostToolUse"
             try:
-                event = json.load(sys.stdin).get("hook_event_name") or event
+                e = json.load(sys.stdin)
+                event = e.get("hook_event_name") or e.get("hookEventName") or event
             except Exception:
                 pass
+            # The host share itself, not something mounted over it (outside the
+            # strict sandbox the guest has sudo, and a bind mount would stack a
+            # guest folder on the path): the mount covering the notes must be
+            # the read-only virtiofs export, and each note must be on it.
+            share = "/mnt/bromure-meta"
+            def procfs(fd):
+                # The table is procfs itself, not a file bound over it.
+                if not sys.platform.startswith("linux"):
+                    return True
+                import ctypes
+                buf = ctypes.create_string_buffer(256)
+                if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
+                    return False
+                return int.from_bytes(buf.raw[:ctypes.sizeof(ctypes.c_long)], sys.byteorder) == 0x9FA0
+            dev = None
+            try:
+                with open("/proc/self/mountinfo") as h:
+                    if not procfs(h.fileno()):
+                        raise OSError("not procfs")
+                    for line in h:
+                        a, _, b = line.partition(" - ")
+                        a, b = a.split(), b.split()
+                        mp = a[4].replace("\\040", " ")
+                        if mp == share or share.startswith(mp.rstrip("/") + "/"):
+                            ok = (mp == share and a[3] == "/" and "ro" in a[5].split(",")
+                                  and b[:2] == ["virtiofs", "bromure-meta"])
+                            major, minor = a[2].split(":")
+                            dev = os.makedev(int(major), int(minor)) if ok else None
+                        elif mp.startswith(share + "/"):
+                            dev = None
+            except (OSError, ValueError, IndexError):
+                dev = None
+            if dev is None:
+                sys.exit(0)
+            claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
+            try:
+                os.makedirs(claims, mode=0o700, exist_ok=True)
+            except OSError:
+                sys.exit(0)
             notes = []
             for f in sorted(sys.argv[1:]):
-                mine = "%s.%d" % (f, os.getpid())
+                # Checked and read through one descriptor, so nothing can swap
+                # the file in between.
                 try:
-                    os.rename(f, mine)
+                    nfd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
                 except OSError:
                     continue
-                try:
-                    with open(mine) as h:
+                with os.fdopen(nfd) as h:
+                    st = os.fstat(nfd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
+                        continue
+                    try:
+                        cfd = os.open(os.path.join(claims, os.path.basename(f)),
+                                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except OSError:
+                        continue
+                    os.close(cfd)
+                    try:
                         notes.append(h.read().strip())
-                finally:
-                    os.unlink(mine)
-            if notes:
+                    except (OSError, ValueError):
+                        pass
+            # Forget the claims on notes the host has since dropped.
+            try:
+                live = set(os.listdir(os.path.dirname(sys.argv[1])))
+                for n in os.listdir(claims):
+                    if n not in live:
+                        os.unlink(os.path.join(claims, n))
+            except OSError:
+                pass
+            if notes and event == "Stop":
+                # The turn ended on the blocked action, before the note was
+                # written: keep the turn going with the note, rather than
+                # holding it until the next message.
+                print(json.dumps({"decision": "block", "reason": "\n".join(notes)}))
+            elif notes:
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
                                                          "additionalContext": "\n".join(notes)}}))
             ' "$@"
+              exit 0
             fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
@@ -4894,7 +4993,8 @@ public final class ProfileStore {
             # the transcript file (kept per tab, below) and, for a
             # Notification, WHICH notification. Not a terminal → nothing to read.
             hook_json=""
-            if [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
+            if [ -n "${stop_read:-}" ]; then hook_json=$stop_json
+            elif [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
             # Claude's Notification hook fires for more than questions: an
             # idle_prompt comes after the agent has merely sat at its prompt
             # for a while. Reporting that as "needs input" made every idle
@@ -6672,6 +6772,15 @@ public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
         case .off: return 0
         case .bestEffort: return 1
         case .hard: return 2
+        }
+    }
+
+    /// As the editor names it.
+    var label: String {
+        switch self {
+        case .off: return NSLocalizedString("Off", comment: "kernel sentry mode")
+        case .bestEffort: return NSLocalizedString("Best effort", comment: "kernel sentry mode")
+        case .hard: return NSLocalizedString("Required", comment: "kernel sentry mode")
         }
     }
 }

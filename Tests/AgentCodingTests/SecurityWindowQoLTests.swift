@@ -36,6 +36,63 @@ struct SecurityWindowQoLTests {
         #expect(block("Firewall", "evil.example:443 tcp", ws: ws, at: 3).searchKey == "evil.example:443 tcp")
     }
 
+    /// Finding (CWE-670): "Clicking a Security Overview block searches by an
+    /// unanchored substring". The row opened the Timeline with its key in the
+    /// search box, which kept any blocked row *containing* it: clone matched
+    /// clone3, example.com matched notexample.com.
+    @Test("A block is opened as itself: same engine and whole key, never a substring of another")
+    func blockOpensExactly() {
+        let ws = UUID()
+        func key(_ engine: String, _ condition: String) -> String {
+            SecurityOverview.blockKey(block(engine, condition, ws: ws, at: 0))
+        }
+        // Distinct blocks whose keys contain one another.
+        #expect(key("Firewall", "example.com:443 tcp") != key("Firewall", "notexample.com:443 tcp"))
+        #expect(key("Firewall", "github.com:443 tcp") != key("Firewall", "api.github.com:443 tcp"))
+        #expect(key("Guest sandbox", "a (pid 1) — syscall clone") != key("Guest sandbox", "a (pid 1) — syscall clone3"))
+        #expect(key("Guest sandbox", "ls (pid 2) — exec /bin/ls") != key("Guest sandbox", "ls (pid 2) — exec /bin/lsblk"))
+        // The same block across pids and repeat counts, and pinned to its engine.
+        #expect(key("Guest sandbox", "a (pid 1) — syscall clone") == key("Guest sandbox", "b (pid 9) — syscall clone ×4"))
+        #expect(key("Firewall", "evil.example:443 tcp") != key("PII protection", "evil.example:443 tcp"))
+        // What the row opens with: the block's own key, its search text shown.
+        let e = block("Guest sandbox", "a (pid 1) — syscall clone", ws: ws, at: 0)
+        let f = SecurityTimelineFilter(outcome: .blocked, query: e.searchKey, block: SecurityOverview.blockKey(e))
+        #expect(f.block == SecurityOverview.blockKey(e) && f.query == "syscall clone")
+    }
+
+    /// Finding (CWE-670): "Sandbox block counts ignore the ×N denial
+    /// multiplier". The sentry folds identical denials (×3 on the first row,
+    /// "×47 more in the last minute" on the follow-up); the group and the
+    /// tile added one per row.
+    @Test("Folded guest-sandbox denials count what they stand for, in the group, the tiles and the mirror")
+    @MainActor func sandboxDenialCounts() throws {
+        let ws = UUID()
+        func denial(_ extra: [String: AnyJSON]) throws -> SecurityTimeline.Event {
+            var d: [String: AnyJSON] = ["category": .string("sandbox_denial"), "kind": .string("file_open_denied"),
+                                        "exe": .string("python3"), "pid": .int(4242),
+                                        "op": .string("create"), "path": .string("/etc/cron.d/x")]
+            d.merge(extra) { $1 }
+            return try #require(SecurityTimeline.map(profileID: ws, eventType: "sentry.event", eventData: d, now: Date()))
+        }
+        let first = try denial(["count": .int(3)])
+        let more = try denial(["count": .int(47), "repeat": .bool(true)])
+        let single = try denial([:])
+        #expect(first.occurrences == 3 && more.occurrences == 47 && single.occurrences == 1)
+        let groups = SecurityOverview.blockGroups([first, more, single])
+        #expect(groups.count == 1)
+        #expect(groups.first?.count == 51)
+        // The tile's sum.
+        #expect([first, more, single].reduce(0) { $0 + $1.occurrences } == 51)
+        // The fat client's mirror keeps it.
+        let tl = SecurityTimeline(directory: nil)
+        tl.applyMirror([["engine": first.engine, "condition": first.condition, "decision": first.decision,
+                         "kind": "blocked", "profileID": ws.uuidString, "dn": 3]], host: "ark")
+        #expect(tl.allEvents.first { $0.machine == "ark" }?.occurrences == 3)
+        // …and so does the on-disk log the overview is rebuilt from at launch.
+        let line = try #require(SecurityTimeline.line(more))
+        #expect(SecurityTimeline.event(fromLine: line.dropLast())?.occurrences == 47)
+    }
+
     @Test("History settings: unset means 90 days and 24 hours; 0 keeps everything")
     func settings() {
         let d = UserDefaults.standard

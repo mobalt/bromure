@@ -609,6 +609,19 @@ final class ScheduledAutomationStore {
         save()
     }
 
+    /// A launched run the guest refused to start (its base couldn't be
+    /// fetched, its checkout is gone, no tab opened): failed, with why —
+    /// not a green "launched" in Done. Only a run still launched and not done.
+    @discardableResult
+    func markFailed(_ runID: UUID, reason: String) -> Bool {
+        guard let i = runs.firstIndex(where: { $0.id == runID }),
+              runs[i].outcome == .launched, runs[i].completedAt == nil else { return false }
+        runs[i].outcome = .failed
+        runs[i].detail = reason
+        save()
+        return true
+    }
+
     /// A review run whose head commit wasn't known at fire time learns it
     /// from the agent (findings_done). Never overwrites a known head.
     func setReviewHead(_ runID: UUID, sha: String) {
@@ -1989,7 +2002,7 @@ final class ScheduledAutomationEngine {
             pendingBoots.insert(a.profileID)
             delegate.startProfileForAutomation(a.profileID)
         }
-        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+        let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
         handedOver = true
         Task { [weak self] in
             defer { self?.releaseLaunch(a.id, hold) }
@@ -2102,7 +2115,7 @@ final class ScheduledAutomationEngine {
                 self.delegate?.startProfileForAutomation(a.profileID)
             }
             defer { self.pendingBoots.remove(a.profileID) }
-            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+            let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
             while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args, booted: budget) {
@@ -2143,7 +2156,7 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
-            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
+            let budget = BootBudget.workspace(clone.id, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
             var why = NSLocalizedString("The cloned workspace did not boot in time",
                                         comment: "failed automation run")
             while budget.remains {
@@ -2219,6 +2232,19 @@ final class ScheduledAutomationEngine {
             (run.runProfileID ?? automation.profileID) == profileID
         else { return nil }
         return (run: run, automation: automation)
+    }
+
+    /// The guest refused to start run `slug` (`worktree-error.txt` named it):
+    /// that run failed. Never chains, never stamps completion — so a watch's
+    /// `lastReviewed` doesn't move and the next tick tries again.
+    func runRefused(profileID: UUID, slug: String, reason: String) {
+        guard let run = store.runs.first(where: { r in
+            r.outcome == .launched && r.completedAt == nil && r.branchSlug == slug
+                && (r.runProfileID ?? store.automation(r.automationID)?.profileID) == profileID
+        }) else { return }
+        guard store.markFailed(run.id, reason: reason) else { return }
+        BACDebug.log("automation", "run \(slug) refused by the guest: \(reason)")
+        repollSoon(run.automationID)
     }
 
     /// Stamp, chain, archive the transcript and (closeWhenDone) close the
@@ -2618,3 +2644,19 @@ enum AutomationDescriber {
         return NSLocalizedString("The session stays open for you to check", comment: "describer")
     }
 }
+
+#if os(macOS)
+extension ACAppDelegate {
+    /// `worktree-error.txt`: the run it belongs to (`run-slug: <slug>` on the
+    /// first line, from an automation run), and the message to show.
+    nonisolated static func splitWorktreeError(_ raw: String) -> (slug: String?, message: String) {
+        let prefix = "run-slug: "
+        guard raw.hasPrefix(prefix) else { return (nil, raw) }
+        let rest = raw.dropFirst(prefix.count)
+        let line = rest.prefix { $0 != "\n" }
+        let slug = line.trimmingCharacters(in: .whitespaces)
+        let message = rest.dropFirst(line.count).drop { $0 == "\n" }
+        return (slug.isEmpty ? nil : slug, String(message))
+    }
+}
+#endif

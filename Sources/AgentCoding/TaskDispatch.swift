@@ -580,6 +580,9 @@ final class TaskDispatcher {
             return false
         }
         defer { answering.remove(ask) }
+        // What the card said when this try started: only that is this
+        // try's to clear once it succeeds.
+        let seen = delegate.codingTaskStore.task(taskID).map(AnswerErrorSnapshot.init)
         do {
             try await delegate.delegationEngine.answer(
                 from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)
@@ -595,9 +598,16 @@ final class TaskDispatcher {
             Self.clearAnswered(&$0, ask: ask)
             // The answer went: a refusal of a resend meanwhile isn't news.
             if $0.lastError == Self.alreadyOnItsWay { $0.lastError = nil }
-            Self.clearAnswerError(&$0)
+            Self.clearAnswerError(&$0, seen: seen)
         }
         return true
+    }
+
+    /// A task's answer-error fields at one moment.
+    struct AnswerErrorSnapshot: Equatable {
+        var lastError: String?
+        var refusal: String?
+        init(_ t: CodingTask) { lastError = t.lastError; refusal = t.answerRefusal }
     }
 
     static let staleAnswerText = NSLocalizedString(
@@ -609,11 +619,19 @@ final class TaskDispatcher {
     /// saved with the task) is past, and the card would keep saying the
     /// answer didn't go. Any other error (the assignee's own trouble, or
     /// one that replaced the refusal since) stays.
-    static func clearAnswerError(_ task: inout CodingTask) {
-        if let e = task.lastError, e == staleAnswerText || e == task.answerRefusal {
+    ///
+    /// `seen`: the fields when this try started (nil: as they are now). A
+    /// refusal another try stored while this one was being delivered is
+    /// that try's news and stays on the card (Finding CWE-362, "A later
+    /// task-answer success clears a newer attempt's refusal": each Send runs
+    /// on its own, and an older answer finishing last erased the note that
+    /// a newer one was withheld).
+    static func clearAnswerError(_ task: inout CodingTask, seen: AnswerErrorSnapshot? = nil) {
+        let seen = seen ?? AnswerErrorSnapshot(task)
+        if let e = task.lastError, e == seen.lastError, e == staleAnswerText || e == seen.refusal {
             task.lastError = nil
         }
-        task.answerRefusal = nil
+        if task.answerRefusal == seen.refusal { task.answerRefusal = nil }
     }
 
     /// The ask an answer goes to: the one on the card, unless the answer was

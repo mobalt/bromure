@@ -225,3 +225,36 @@ enum OpenShellManagedPolicySync {
         return empty ? nil : m
     }
 }
+
+extension OpenShellGovernance {
+    /// The organization's minimum kernel sentry (bromure.io managed policy):
+    /// the lowest a workspace may run with — `.off` when none is set. A
+    /// workspace's own setting below it is raised to it
+    /// (`Profile.effectiveKernelSentry`), so "turning it off" goes to this.
+    var kernelSentryFloor: KernelSentryMode {
+        managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
+    }
+
+    /// A save refused because its OpenShell policy leaves the organization
+    /// boundary.
+    struct BoundaryRefusal: Error, LocalizedError, CustomStringConvertible {
+        let summary: String
+        var description: String { "outside the organization boundary — \(summary)" }
+        var errorDescription: String? { description }
+    }
+
+    /// The boundary verdict on saving `profile` over `editing`: nil = fine.
+    /// Every path that persists a workspace (editor, API, advisor, the
+    /// Sandbox drawer's Files Allow) goes through this, so none can skip the
+    /// boundary. Only a policy that changed is judged: an unrelated edit of a
+    /// workspace saved under an older boundary isn't blocked by it.
+    func refusal(saving profile: Profile, editing: Profile?) -> BoundaryRefusal? {
+        guard profile.usesOpenShellPolicy else { return nil }
+        if let editing, editing.networkPolicy == profile.networkPolicy,
+           editing.openShellProviderRules == profile.openShellProviderRules { return nil }
+        guard let result = check(policyYAML: profile.networkPolicy,
+                                 providerRules: profile.openShellProviderRules),
+              !result.passed else { return nil }
+        return BoundaryRefusal(summary: result.summary)
+    }
+}

@@ -2433,10 +2433,13 @@ final class RemoteHostController {
     /// taken, so the text stays; sending it again can't post it twice (the
     /// board refuses an answer while one is on its way, and once it went,
     /// the question is gone). A server from before the reply waited answers
-    /// `{ok: true}` at once — as it always did.
+    /// `{ok: true, …}` at once — as it always did. Only that boolean is a
+    /// yes: a 200 whose body never arrived or was cut off comes back as `[:]`
+    /// (ControlClient's "200 but empty JSON"), and the verdict it carried —
+    /// maybe a refusal — is unknown, so the draft stays (Finding CWE-754,
+    /// "Fat-client answer treats an empty 200 as accepted and drops the draft").
     nonisolated static func answerAccepted(_ reply: [String: Any]?) -> Bool {
-        guard let reply else { return false }
-        return (reply["ok"] as? Bool) ?? (reply["error"] == nil)
+        reply?["ok"] as? Bool == true
     }
 
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {

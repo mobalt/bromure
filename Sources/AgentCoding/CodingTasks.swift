@@ -2192,7 +2192,7 @@ final class CodingTaskEngine {
             delegate.startProfileForAutomation(profileID, detached: detached)
         }
         defer { pendingBoots.remove(profileID) }
-        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting a workspace for a task")
+        let budget = BootBudget.workspace(profileID, seconds: Self.bootTimeout, reason: "Starting a workspace for a task")
         while budget.remains {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if let why = delegate.unattendedLaunchRefusal(profileID) { return why }
@@ -2400,6 +2400,14 @@ final class CodingTaskEngine {
                                 worker: task.workerName)
             }
         }
+    }
+
+    /// The guest refused to start a task's run (`worktree-error.txt` named
+    /// its slug): say why on the card now, not after the launch watch.
+    func runRefused(profileID: UUID, slug: String, reason: String) {
+        guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
+                                                  && $0.stage == .inProgress }) else { return }
+        store.mutate(t.id) { $0.lastError = reason }
     }
 
     /// An agent that takes its brief on the command line: watch the launch

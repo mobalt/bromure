@@ -105,6 +105,32 @@ struct TaskAnswerSheetTests {
         #expect(old.answerRefusal == nil)
     }
 
+    /// Finding (CWE-362): "A later task-answer success clears a newer
+    /// attempt's refusal". An older answer still being delivered finished
+    /// after a newer one was withheld, and erased that refusal.
+    @Test("a success clears only what was on the card when it started")
+    func successKeepsANewerRefusal() {
+        var t = task()
+        t.lastError = TaskDispatcher.staleAnswerText          // an earlier try's note
+        let seen = TaskDispatcher.AnswerErrorSnapshot(t)
+        // While this answer is delivered, a newer one is withheld.
+        let withheld = "Your message was withheld: it reads like a prompt injection (“ignore all previous”)."
+        t.lastError = withheld
+        t.answerRefusal = withheld
+        TaskDispatcher.clearAnswerError(&t, seen: seen)
+        #expect(t.lastError == withheld && t.answerRefusal == withheld)
+        // The refusal this try saw goes; one stored since stays.
+        t.lastError = "No question is waiting for an answer."
+        t.answerRefusal = t.lastError
+        let seen2 = TaskDispatcher.AnswerErrorSnapshot(t)
+        t.answerRefusal = withheld; t.lastError = withheld
+        TaskDispatcher.clearAnswerError(&t, seen: seen2)
+        #expect(t.lastError == withheld && t.answerRefusal == withheld)
+        // Unchanged since it started: cleared, as before.
+        TaskDispatcher.clearAnswerError(&t, seen: TaskDispatcher.AnswerErrorSnapshot(t))
+        #expect(t.lastError == nil && t.answerRefusal == nil)
+    }
+
     @Test("the board answers only the question the answer was written for, and clears only that one")
     func answerTargetsItsAsk() {
         let first = UUID(), second = UUID()
@@ -159,5 +185,36 @@ struct TaskAnswerSendTests {
         // The link failed: not taken. A server from before the wait: `{ok: true}`, as ever.
         #expect(!RemoteHostController.answerAccepted(nil))
         #expect(RemoteHostController.answerAccepted(["ok": true]))
+        #expect(RemoteHostController.answerAccepted(["ok": true, "stage": "working"]))
+        // Finding (CWE-754): a 200 whose body was lost or cut off is `[:]` —
+        // the verdict is unknown, the draft stays. So does any reply without
+        // a boolean `ok`.
+        #expect(!RemoteHostController.answerAccepted([:]))
+        #expect(!RemoteHostController.answerAccepted(["stage": "working"]))
+        #expect(!RemoteHostController.answerAccepted(["ok": "true"]))
+        #expect(!RemoteHostController.answerAccepted(["ok": 1]))
+    }
+
+    /// Finding (CWE-362): "Refused task answers read the task store off the
+    /// main actor". The route's handler is typed @MainActor now, so it runs
+    /// there whatever context the closure is written in; the store read for a
+    /// refusal's reason can't leave it.
+    @Test("the answer handler runs on the main actor, called from a connection thread")
+    func answerHandlerIsMainActor() async {
+        final class Seen: @unchecked Sendable { var main = false; var error: String? }
+        let seen = Seen()
+        let handler: @MainActor (UUID, [String: Any]) async -> [String: Any] = { _, _ in
+            await Task.yield()
+            seen.main = Thread.isMainThread
+            return ["ok": false, "error": "refused"]
+        }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            Thread.detachNewThread {
+                seen.error = ACAutomationServer.awaitTaskAnswer(handler, id: UUID(), body: ["text": "x"])["error"] as? String
+                done.resume()
+            }
+        }
+        #expect(seen.main)
+        #expect(seen.error == "refused")
     }
 }

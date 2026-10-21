@@ -132,13 +132,14 @@ final class ACAutomationServer {
     /// `POST /tasks/{id}/answer`, answered once the board has actually
     /// handed the answer to the agent (`{ok}`), or refused it (`{ok: false,
     /// error}`) — not before, so the client keeps a refused answer's text.
-    var onTaskAnswer: ((_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
+    /// Main-actor: the handler reads and writes the (main-actor) task store.
+    var onTaskAnswer: (@MainActor (_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
 
     /// The answer route's reply, on the connection's thread: the handler's
     /// verdict, once it has one (on the main actor). No deadline: a reply
     /// cut short while the delivery goes on (its prompt-injection scan, the
     /// post) told the client "refused" for an answer that then went.
-    nonisolated static func awaitTaskAnswer(_ answer: @escaping (UUID, [String: Any]) async -> [String: Any],
+    nonisolated static func awaitTaskAnswer(_ answer: @escaping @MainActor (UUID, [String: Any]) async -> [String: Any],
                                             id: UUID, body: [String: Any]) -> [String: Any] {
         final class Box: @unchecked Sendable { var r: [String: Any] = [:] }
         let box = Box()

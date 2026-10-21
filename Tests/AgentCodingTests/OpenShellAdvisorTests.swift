@@ -176,6 +176,43 @@ struct OpenShellAdvisorTests {
         #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) != nil)
     }
 
+    /// Finding (CWE-670): "Sandbox drawer Allow saves a no-op rule when
+    /// Enforce binaries is on". The MiTM recorded the program under the
+    /// destination IP only and the row's host is the SNI, so Allow found no
+    /// program and saved a rule listing none — which allows nothing there.
+    @Test("Under Enforce binaries: Allow finds the program by host or IP, and refuses when there's none")
+    func allowUnderEnforce() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        a.enforceBinariesProvider = { _ in true }
+        // The MiTM's path: identity asked by IP, then the SNI learned.
+        BinaryIdentityService.shared.noteExe("/usr/bin/pip", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        let identity = OpenShellPolicy.BinaryIdentity(exe: "/usr/bin/pip", sha256: "", ancestors: [])
+        BinaryIdentityService.shared.noteHost(identity, profileID: pid, host: "pypi.org", port: 443)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) == nil)
+        let rule = try #require(try OpenShellPolicy.parse(box.policy).networkPolicies.first { $0.key.hasPrefix("allow_pypi_org_443") })
+        #expect(rule.binaries == ["/usr/bin/pip"])
+        // Known by IP only (as the row's dst_ip shows it): found too.
+        BinaryIdentityService.shared.noteExe("/usr/bin/curl", profileID: pid, destinations: ["140.82.112.3"], port: 8443)
+        #expect(await a.allow(profileID: pid, host: "github.com", port: 8443, ip: "140.82.112.3") == nil)
+        #expect(try OpenShellPolicy.parse(box.policy).networkPolicies.contains { $0.key == "allow_github_com_8443_curl" })
+        // No program known at all: refused, nothing saved, no draft queued.
+        let before = box.policy
+        let refused = await a.allow(profileID: pid, host: "files.example.com", port: 443)
+        #expect(refused?.contains("Enforce binaries") == true)
+        #expect(box.policy == before)
+        a.recordDenial(profileID: pid, layer: "sni", host: "files.example.com", port: 443, method: nil, path: nil, reason: "no rule")
+        #expect(a.pending(for: pid).isEmpty)
+    }
+
+    @Test("A MiTM firewall row carries its destination IP (dst_ip)")
+    func timelineReadsDstIP() {
+        let e = SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall",
+                                           eventData: ["action": .string("deny"), "host": .string("pypi.org"),
+                                                       "port": .int(443), "layer": .string("sni"),
+                                                       "dst_ip": .string("151.101.0.223")], now: Date())
+        #expect(e?.firewall?.ip == "151.101.0.223")
+    }
+
     @Test("policy.local routes: feature_disabled when off; denials, policy, proposal wait")
     func agentAPI() async throws {
         let (off, offPID, _) = advisor(mode: .off)
@@ -240,5 +277,83 @@ struct OpenShellAdvisorTests {
 
         #expect(route("POST", ["proposals", id1, "approve"], [:]).status == 409)   // already rejected
         #expect(route("POST", ["proposals", "nope", "reject"], [:]).status == 404)
+    }
+
+    /// Finding (CWE-284): "Drawer Allow names whichever program last used the
+    /// destination IP". The attested exe is filed under the destination IP
+    /// and then the hostname; a later connection to the same IP (a shared CDN
+    /// address, or a guest process dialing it after the deny) overwrote only
+    /// the IP key, and the newest-wins lookup put that program in the rule.
+    @Test("Allow names the program attested for the row's hostname, not a newer occupant of its IP")
+    func allowNamesTheHostsProgram() throws {
+        let pid = UUID(), ids = BinaryIdentityService.shared
+        // The blocked connection: curl to pypi.org (151.101.0.223:443).
+        ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["pypi.org"], port: 443)
+        // Afterwards, another program dials the same address.
+        Thread.sleep(forTimeInterval: 0.01)
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["151.101.0.223"], port: 443)
+        let rule = OpenShellAdvisor.allowRule(profileID: pid, host: "pypi.org", port: 443, ip: "151.101.0.223")
+        #expect(rule.binaries == ["/usr/bin/curl"])
+        #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org", "151.101.0.223"], port: 443) == "/usr/bin/curl")
+        // The L4 gate files a connection under every name cached for its IP
+        // (a guess): it fills a name with no program on record, never
+        // replaces the one attested for it.
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["pypi.org", "files.example"], port: 443, replace: false)
+        #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org"], port: 443) == "/usr/bin/curl")
+        #expect(ids.recentExe(profileID: pid, destinations: ["files.example"], port: 443) == "/tmp/evil")
+        // No hostname on record (a bare-IP row): the IP's program, as before.
+        #expect(ids.recentExe(profileID: pid, destinations: ["other.example", "151.101.0.223"], port: 443) == "/tmp/evil")
+    }
+
+    /// Same finding, for network proposals: the pending check and the
+    /// status write straddled the policy write, so two approvals applied the
+    /// rule twice and a reject during it was overwritten.
+    @Test("Two approvals of one proposal apply it once; a reject while it applies is ignored")
+    func oneApply() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        final class Count: @unchecked Sendable { var n = 0; let lock = NSLock() }
+        let applied = Count()
+        a.applyApproved = { _, p in
+            applied.lock.lock(); applied.n += 1; applied.lock.unlock()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            do { box.policy = try OpenShellPolicy.insertingRules(p.yaml, into: box.policy); return nil }
+            catch { return "\(error)" }
+        }
+        let (s, _, d) = await a.handle(profileID: pid, method: "POST", target: "/v1/proposals",
+                                       body: proposal("docs", host: "docs.example.org"), policyReloaded: { _ in false })
+        #expect(s == 202)
+        let id = try #require(((try JSONSerialization.jsonObject(with: d)) as? [String: Any])?["accepted_chunk_ids"] as? [String]).first!
+        await withTaskGroup(of: Void.self) { g in
+            g.addTask { await a.approve(id: id, profileID: pid) }
+            g.addTask { await a.approve(id: id, profileID: pid) }
+            g.addTask {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                a.reject(id: id, profileID: pid, reason: "changed my mind")
+            }
+        }
+        #expect(applied.n == 1)
+        #expect(a.proposal(id: id, profileID: pid)?.status == .approved)
+    }
+
+    @Test("A draft being approved isn't superseded mid-apply: its rule is saved, so it ends approved")
+    func notSupersededMidApply() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        a.applyApproved = { _, p in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            do { box.policy = try OpenShellPolicy.insertingRules(p.yaml, into: box.policy); return nil }
+            catch { return "\(error)" }
+        }
+        a.recordDenial(profileID: pid, layer: "sni", host: "pypi.org", port: 443, method: nil, path: nil, reason: "no rule")
+        let draft = try #require(a.pending(for: pid).first)
+        #expect(draft.source == "mechanistic")
+        async let approving: Void = a.approve(id: draft.id, profileID: pid)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        // While it applies: an agent's proposal for the same endpoint, and a reject.
+        _ = a.submit(profileID: pid, body: proposal("pypi_read", host: "pypi.org"))
+        a.reject(id: draft.id, profileID: pid, reason: "no")
+        await approving
+        #expect(a.proposal(id: draft.id, profileID: pid)?.status == .approved)
+        #expect(a.proposal(id: draft.id, profileID: pid)?.rejectionReason == nil)
     }
 }

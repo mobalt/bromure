@@ -64,3 +64,33 @@ struct SandboxPathAllowTests {
         #expect(PolicyDrawer.folder(for: "/home/ubuntu/.config/gh/hosts.yml") == "/home/ubuntu/.config/gh")
     }
 }
+
+/// Finding (CWE-670): "Sandbox badge stops counting after the drawer has been
+/// opened once". The drawer is only hidden when closed, and its 15 s clock
+/// (and a workspace switch) marked the workspace on stage as seen anyway,
+/// so the toolbar badge stayed at 0 for the window's life.
+@Suite("Sandbox drawer: only an open drawer marks blocks as seen")
+@MainActor
+struct PolicyDrawerSeenTests {
+    @Test("closed: the clock and a workspace switch don't mark it seen; open and closing do")
+    func seenOnlyWhileOpen() {
+        let list = SessionListModel()
+        let ws = UUID()
+        list.selectedID = ws
+        let t0 = Date(timeIntervalSince1970: 1000)
+        PolicyDrawer.markSeen(list, now: t0)                  // closed: a hidden drawer's tick
+        #expect(list.policyDrawerSeen[ws] == nil)
+        list.policyDrawerOpen = true
+        PolicyDrawer.markSeen(list, now: t0)
+        #expect(list.policyDrawerSeen[ws] == t0)
+        list.policyDrawerOpen = false
+        PolicyDrawer.markSeen(list, closing: true, now: t0.addingTimeInterval(5))
+        #expect(list.policyDrawerSeen[ws] == t0.addingTimeInterval(5))
+        PolicyDrawer.markSeen(list, now: t0.addingTimeInterval(60))   // later ticks, closed
+        #expect(list.policyDrawerSeen[ws] == t0.addingTimeInterval(5))
+        let other = UUID()
+        list.selectedID = other                                     // switched, still closed
+        PolicyDrawer.markSeen(list, now: t0.addingTimeInterval(70))
+        #expect(list.policyDrawerSeen[other] == nil)
+    }
+}

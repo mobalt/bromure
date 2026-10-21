@@ -528,6 +528,7 @@ public final class MitmEngine {
             if plainHTTP {
                 let peeked = Self.peekHTTPHost(fd: appFD)
                 let host = peeked ?? destIP
+                BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: peeked, port: destPort)
                 let strict80 = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
                 var shouldSplice = !strict80 && PassthroughList.current().matches(host)
                 // `policy.local` on its reserved address: the advisor, answered
@@ -593,6 +594,7 @@ public final class MitmEngine {
             // destination address) instead of letting them fail open: its rules
             // are default-deny, and the switch deferred these flows to us.
             let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: sniHost, port: destPort)
             if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy,
                sniHost != nil || policy.openShell != nil {
                 switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,
@@ -736,6 +738,40 @@ public final class MitmEngine {
         }
     }
 
+    /// Hand the proxy what a workspace's kubeconfigs need on the wire: the
+    /// real client identities (upstream mTLS), each cluster's own CA (the
+    /// only anchor its API server is checked against), and the exec-plugin
+    /// pollers. Replaces whatever the workspace had, so an entry added,
+    /// edited or removed while the VM runs takes effect at once.
+    ///
+    /// The launch path did all of this and the live credential refresh only
+    /// the token swaps: a kubeconfig imported into a running workspace got
+    /// its YAML and fakes but no CA ("signed by a CA the host running
+    /// Bromure AC does not trust") and no client certificate.
+    public func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID) {
+        Self.applyKubeMaterial(mat, profileID: profileID, identities: clientIdentities,
+                               clusterCAs: clusterCAs, poller: execPoller, swapper: swapper)
+    }
+
+    static func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID,
+                                  identities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry,
+                                  poller: ExecCredentialPoller, swapper: TokenSwapper) {
+        identities.clearAll(for: profileID)
+        for ident in mat.clientIdentities {
+            identities.setIdentity(ident.identity, host: ident.host, profileID: profileID,
+                                   consentCredentialID: ident.consentCredentialID,
+                                   consentDisplayName: ident.consentDisplayName)
+        }
+        clusterCAs.clearAll(for: profileID)
+        for entry in mat.clusterCAs {
+            clusterCAs.setCA(pem: entry.caPEM, host: entry.host, profileID: profileID)
+        }
+        poller.stopAll(profileID: profileID)
+        if !mat.execContexts.isEmpty {
+            poller.start(mat.execContexts, profileID: profileID, swapper: swapper)
+        }
+    }
+
     public func unregister(profileID: UUID) {
         listenerHolders.removeValue(forKey: profileID)
         // Kill this workspace's signing oracle along with its key maps.
@@ -751,7 +787,7 @@ public final class MitmEngine {
         awsCreds.clearCredentials(for: profileID)
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
-        execPoller.stopAll()
+        execPoller.stopAll(profileID: profileID)
         opRefresher.stop(profileID: profileID)
         // Drop any consent grants the user issued during this session
         // — "Allow for the rest of the session" must not survive a
