@@ -100,16 +100,20 @@ enum CommandLineRedactor {
 
     /// curl's `-b` / `--cookie name=value; …` (a value without `=` is a
     /// cookie file, and `-b` is `git checkout -b`'s branch: both kept;
-    /// `--cookie-jar` is a path).
-    private static let cookieFlag = re(#"((?:^|\s)(?:-b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// `--cookie-jar` is a path), and `-b` closing a cluster of short flags
+    /// (`-sb`, `-fsSLb`, `-4b`, `-sbname=value`) when the command is curl, as
+    /// `-u` does (Finding CWE-532, "Clustered curl -b leaves cookie values in
+    /// the timeline and the org upload").
+    private static let cookieFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`.
     /// Group 2 is the quote opening the whole header argument
     /// (`-H 'Cookie: a=1; b=2'`): the value runs to its match.
     private static let header = re(
         #"()(['"]?)((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?"#)
-    /// `--password value`, `--token value`, …
+    /// `--password value`, `--token value`, … and curl's own secret-taking
+    /// options (`--pass` / `--proxy-pass` key passphrases, `--oauth2-bearer`).
     private static let secretFlag = re(
-        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token)(?:\s+|=))(['"]?)"#)
+        #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token|pass|proxy-pass|oauth2-bearer)(?:\s+|=))(['"]?)"#)
     /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`. The key
     /// is taken whole, and the secret word ends it or a `_`/`-`/`.` follows
     /// (`API_TOKEN_V2`, not `tokens:list`); the shell's own `PWD` / `OLDPWD`
@@ -205,7 +209,11 @@ enum CommandLineRedactor {
         }) { v in
             v.firstIndex(of: ":").map { String(v[..<$0]) + ":" + mask }
         }
-        out = replacingValues(out, cookieFlag, cookiePairs: { _, _ in true }) { $0.contains("=") ? mask : nil }
+        // name=value cookies — a clustered short -b only for curl.
+        out = replacingValues(out, cookieFlag, when: { m, ns in
+            let flag = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
+            return flag.hasPrefix("--") || flag == "-b" || flag == "-b=" || userFlagIsCurl(ns, before: m.range.location)
+        }, cookiePairs: { _, _ in true }) { $0.contains("=") ? mask : nil }
         out = replacingValues(out, header, cookiePairs: { m, ns in
             ns.substring(with: m.range(at: 3)).lowercased() == "cookie"
         }) { _ in mask }

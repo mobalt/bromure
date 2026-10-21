@@ -119,6 +119,28 @@ struct CommandLineRedactorTests {
         #expect(r("curl -b cookies.txt -c jar.txt x") == "curl -b cookies.txt -c jar.txt x")
         #expect(r("curl --cookie-jar /tmp/jar x") == "curl --cookie-jar /tmp/jar x")
         #expect(r("git checkout -b fix-login && git push") == "git checkout -b fix-login && git push")
+        // Finding (CWE-532): "Clustered curl -b leaves cookie values in the
+        // timeline and the org upload" — -b closing a short-flag cluster.
+        for (cmd, out) in [
+            ("curl -sb 'session=SECRET' x", "curl -sb '***' x"),
+            ("curl -fsSLb 'session=SECRET' x", "curl -fsSLb '***' x"),
+            ("curl -4b 'session=SECRET' x", "curl -4b '***' x"),
+            ("curl -sbsession=SECRET x", "curl -sb*** x"),
+            ("curl -bsession=SECRET x", "curl -b*** x"),
+            ("curl -sb session=SECRET; csrf=OTHER https://x", "curl -sb *** https://x"),   // the sentry's argv
+            ("/usr/bin/curl -SB 'session=SECRET' x", "/usr/bin/curl -SB '***' x"),
+        ] {
+            #expect(r(cmd) == out, "\(cmd)")
+        }
+        for kept in ["curl -sb cookies.txt x",                               // a cookie file
+                     "git checkout -qb fix-login && git push",               // not curl
+                     "tar -czvfb x=1 dir", "ls -lb a=b"] {
+            #expect(r(kept) == kept, "\(kept)")
+        }
+        // curl's other secret-taking options.
+        #expect(r("curl --key k.pem --pass hunter2 x") == "curl --key k.pem --pass *** x")
+        #expect(r("curl --proxy-pass=hunter2 x") == "curl --proxy-pass=*** x")
+        #expect(r("curl --oauth2-bearer abc.def x") == "curl --oauth2-bearer *** x")
         // A non-BMP character inside an unquoted value doesn't end it.
         #expect(r("deploy --token=ab🔑cd now") == "deploy --token=*** now")
         #expect(r("curl -b s=🍪x; t=2 x") == "curl -b *** x")
