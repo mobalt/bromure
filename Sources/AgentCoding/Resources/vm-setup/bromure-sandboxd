@@ -2888,10 +2888,14 @@ def main():
         # server only once the sentry has settled; until then `start` and
         # `exec` answer that they're waiting.
         log(WAITING_FOR_SENTRY)
+        # Said in the status so agentd doesn't take the published socket
+        # paths for a running server: nothing serves the workload yet.
+        supervisor.status["sentry_hold"] = True
         supervisor.publish()
 
         def _start_when_settled():
             supervisor.sentry_hold.wait()
+            supervisor.status["sentry_hold"] = False
             ok, why = supervisor.start("initial, after the sentry")
             if not ok:
                 log("initial start failed: %s" % why)

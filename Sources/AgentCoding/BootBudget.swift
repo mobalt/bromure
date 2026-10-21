@@ -27,6 +27,9 @@ import IOKit.pwr_mgt
 final class BootBudget: @unchecked Sendable {
     private let deadline: TimeInterval
     private let clock: () -> TimeInterval
+    /// Past the deadline, time still remains while this holds, up to `cap`.
+    private let extendWhile: (() -> Bool)?
+    private let cap: TimeInterval
     private let lock = NSLock()
     private var activity: NSObjectProtocol?
     private var systemSleepAssertion: IOPMAssertionID?
@@ -34,10 +37,17 @@ final class BootBudget: @unchecked Sendable {
     /// `clock`: seconds of awake time (the default doesn't advance while the
     /// Mac sleeps). `holdAwake`: hold off idle sleep and App Nap until the
     /// budget runs out or is released.
+    /// `extendWhile`: past `seconds`, the boot is still going while it says
+    /// so (a guest waiting for its kernel sentry), up to `extendUpTo` in all.
     init(seconds: TimeInterval, reason: String, holdAwake: Bool = true,
-         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         extendWhile: (() -> Bool)? = nil, extendUpTo: TimeInterval = 0) {
         self.clock = clock
-        deadline = clock() + seconds
+        let start = clock()
+        deadline = start + seconds
+        self.extendWhile = extendWhile
+        cap = start + max(seconds, extendWhile == nil ? seconds : extendUpTo)
+        let awake = cap - start
         activity = holdAwake
             ? ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                     reason: reason)
@@ -50,7 +60,7 @@ final class BootBudget: @unchecked Sendable {
                 systemSleepAssertion = id
             }
             // DispatchTime stops while the Mac sleeps, like the budget.
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [weak self] in self?.release() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + awake) { [weak self] in self?.release() }
         }
     }
 
@@ -72,8 +82,29 @@ final class BootBudget: @unchecked Sendable {
 
     /// Time is left. Once it isn't, the keep-awake ends.
     var remains: Bool {
-        let left = clock() < deadline
+        let now = clock()
+        let left = now < deadline || (now < cap && (extendWhile?() ?? false))
         if !left { release() }
         return left
+    }
+}
+
+extension BootBudget {
+    /// A workspace boot's budget: `seconds`, and past them for as long as
+    /// the guest still reports its kernel sentry loading (`pending` /
+    /// `waiting`), up to the sentry's own worst case — under `requirement:
+    /// hard` nothing of the workload runs until it settles, which can take
+    /// far longer than a boot (Finding CWE-670, "Hard-sentry hold fails
+    /// unattended boots at 180s while the module is still loading").
+    static func workspace(_ profileID: UUID, seconds: TimeInterval, reason: String) -> BootBudget {
+        BootBudget(seconds: seconds, reason: reason,
+                   extendWhile: { sentryLoading(profileID) },
+                   extendUpTo: seconds + KernelSentryService.loadBudget)
+    }
+
+    /// The guest says its kernel sentry is still on its way.
+    static func sentryLoading(_ profileID: UUID) -> Bool {
+        guard let s = GuestSandboxStatusStore.shared.sentryState(for: profileID) else { return false }
+        return s == "pending" || s == "waiting"
     }
 }

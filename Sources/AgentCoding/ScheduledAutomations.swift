@@ -1989,7 +1989,7 @@ final class ScheduledAutomationEngine {
             pendingBoots.insert(a.profileID)
             delegate.startProfileForAutomation(a.profileID)
         }
-        let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+        let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
         handedOver = true
         Task { [weak self] in
             defer { self?.releaseLaunch(a.id, hold) }
@@ -2102,7 +2102,7 @@ final class ScheduledAutomationEngine {
                 self.delegate?.startProfileForAutomation(a.profileID)
             }
             defer { self.pendingBoots.remove(a.profileID) }
-            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+            let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
             while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args, booted: budget) {
@@ -2143,7 +2143,7 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
-            let budget = BootBudget(seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
+            let budget = BootBudget.workspace(clone.id, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
             var why = NSLocalizedString("The cloned workspace did not boot in time",
                                         comment: "failed automation run")
             while budget.remains {

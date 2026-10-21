@@ -1892,9 +1892,12 @@ final class AgentSessionEngine {
         }
         defer { pendingBoots.remove(profileID) }
         var deadline = Date().addingTimeInterval(Self.bootTimeout)
+        // A guest still loading a required kernel sentry is still booting:
+        // waited out up to the sentry's worst case (BootBudget.workspace).
+        let sentryCap = Date().addingTimeInterval(Self.bootTimeout + KernelSentryService.loadBudget)
         // Cancelled, the sleep throws at once: without this check the loop
         // execs into the machine back to back until the boot timeout.
-        while Date() < deadline, !Task.isCancelled {
+        while (Date() < deadline || (Date() < sentryCap && BootBudget.sentryLoading(profileID))), !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
                 deadline = Date().addingTimeInterval(Self.bootTimeout)

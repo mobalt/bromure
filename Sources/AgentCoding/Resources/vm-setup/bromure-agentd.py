@@ -735,7 +735,18 @@ def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
 _SANDBOX_READY = threading.Event()
 
 
-def sandbox_gate(timeout=90.0):
+# bromure-sandboxd's hard-sentry hold lasts at most this (SENTRY_SETTLE_S),
+# plus a margin for the supervisor to start the server after it.
+_SENTRY_HOLD_MAX_S = 45 + 900 + 900 + 60 + 60
+
+
+def _sentry_held():
+    """bromure-sandboxd is holding the workload for a required sentry. Read
+    fresh each time: a cached status would hold forever once it said so."""
+    return bool(_load_sandbox_status().get("sentry_hold"))
+
+
+def sandbox_gate(timeout=90.0, through_sentry_hold=False):
     """Block until the sandbox is in place, for anything that touches the
     workspace. Returns (ok, reason).
 
@@ -781,13 +792,25 @@ def sandbox_gate(timeout=90.0):
     if _SANDBOX_READY.is_set():
         return True, None
 
-    deadline = time.time() + timeout
+    # A hard-sentry hold (Finding CWE-670, "Hard-sentry hold fails unattended
+    # boots at 180s while the module is still loading"): the supervisor
+    # publishes its socket paths before the sentry settles but serves no
+    # workload until it does, so a published `tmux_socket` isn't a server
+    # yet — waited out here instead of refused with 126 by the supervisor.
+    # An interactive attach (a terminal pane) waits through the whole hold,
+    # which the supervisor bounds itself; anything else keeps `timeout`.
+    started = time.time()
+    deadline = started + timeout
     strict_ok = supervisor_ok = False
-    while time.time() < deadline:
+    held = False
+    while time.time() < deadline or (through_sentry_hold and held
+                                      and time.time() < started + _SENTRY_HOLD_MAX_S):
         strict_ok = (not strict_sandbox_requested()) or strict_sandbox_applied()
+        held = openshell_requested() and _sentry_held()
         supervisor_ok = (not openshell_requested()
-                         or bool(_SANDBOX.get("tmux_socket")
-                                 or _load_sandbox_status().get("tmux_socket")))
+                         or (not held
+                             and bool(_SANDBOX.get("tmux_socket")
+                                      or _load_sandbox_status().get("tmux_socket"))))
         if strict_ok and supervisor_ok:
             _SANDBOX_READY.set()
             return True, None
@@ -797,9 +820,11 @@ def sandbox_gate(timeout=90.0):
     # Name the half that is missing. "still starting" on its own sent a whole
     # round looking at the wrong daemon.
     waiting_for = []
+    if held:
+        waiting_for.append("the kernel sentry to load (requirement: hard)")
     if not strict_ok:
         waiting_for.append("the strict revocation (%s)" % STRICT_DONE)
-    if not supervisor_ok:
+    if not supervisor_ok and not held:
         waiting_for.append("the sandbox supervisor (%s)"
                            % (_SANDBOX.get("degraded_reason")
                               or _SANDBOX.get("server_error") or "no status yet"))
@@ -1458,7 +1483,7 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 # first, then block.
                 replenished = True
                 replenish_fn()
-            ready, why = sandbox_gate()
+            ready, why = sandbox_gate(through_sentry_hold=bool(req.get("interactive")))
             if not ready:
                 log("shell", "refusing a workspace request: %s" % why)
                 resp_data = json.dumps({
