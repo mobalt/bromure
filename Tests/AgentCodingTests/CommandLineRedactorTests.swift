@@ -30,6 +30,57 @@ struct CommandLineRedactorTests {
         #expect(r("git log --author=bob -n 5") == "git log --author=bob -n 5")
     }
 
+    /// Finding (CWE-670): "Command redaction erases rsync paths, PWD, and
+    /// token: URLs that are not secrets".
+    @Test("remote paths, the working directory and token-named URLs aren't secrets; real ones still go")
+    func notSecrets() {
+        let r = CommandLineRedactor.redact
+        for kept in ["rsync -u host:/var/data dest", "rsync -u backup:~/data .",
+                     "rsync -u host:src/file dest", "rsync -u user@host::module/file dest",
+                     "rsync -u 'host:src/file' dest", "curl -s https://x; rsync -u host:src dest",
+                     "PWD=/Users/someone/proj make -j", "OLDPWD=/tmp cd -",
+                     "curl https://api.example/v1/tokens:list", "grep -r passwordless docs/",
+                     "git push -u origin HEAD:main"] {
+            #expect(r(kept) == kept, "\(kept)")
+        }
+        #expect(r("DB_PWD=hunter2 ./run") == "DB_PWD=*** ./run")
+        #expect(r("API_TOKEN=abc API_TOKEN_V2=def ./run") == "API_TOKEN=*** API_TOKEN_V2=*** ./run")
+        #expect(r("accessToken=abc client_secret=def") == "accessToken=*** client_secret=***")
+        #expect(r(#"curl -d '{"token": "x"}' 'https://x/cb?access_token=zzz&id=1'"#)
+                == #"curl -d '{"token": "***"}' 'https://x/cb?access_token=***&id=1'"#)
+        #expect(r("curl -u alice:hunter2 https://x") == "curl -u alice:*** https://x")
+        // A curl password is masked whatever it starts with, wrapped or not.
+        #expect(r("curl -u alice:/s3cret https://x") == "curl -u alice:*** https://x")
+        #expect(r("/usr/bin/curl -U bob:~hunter -x p https://x") == "/usr/bin/curl -U bob:*** -x p https://x")
+        #expect(r("bash -c 'curl -sS -u alice:/BAiM0RVZnc= https://x'") == "bash -c 'curl -sS -u alice:*** https://x'")
+        #expect(r("wget --user=bob:pw https://x") == "wget --user=bob:*** https://x")
+        // The curl command reaches past quoted or escaped separators and
+        // redirects; only a real command boundary ends it.
+        for (cmd, out) in [
+            ("curl 'https://x?a=1&b=2' -u alice:/s3cret", "curl 'https://x?a=1&b=2' -u alice:***"),
+            (#"curl https://x?a=1\&b=2 -u alice:/s3cret"#, #"curl https://x?a=1\&b=2 -u alice:***"#),
+            ("curl https://x?a=1&b=2 -u alice:/s3cret", "curl https://x?a=1&b=2 -u alice:***"),   // space-joined argv
+            ("curl -d 'a;b' -u alice:/s3cret https://x", "curl -d 'a;b' -u alice:*** https://x"),
+            ("curl -s https://x 2>&1 -u alice:/s3cret", "curl -s https://x 2>&1 -u alice:***"),
+            ("curl &>/tmp/out -u alice:/s3cret https://x", "curl &>/tmp/out -u alice:*** https://x"),
+            ("curl -s \\\n  -u alice:/s3cret https://x", "curl -s \\\n  -u alice:*** https://x"),
+            ("curl -u alice:a 'https://x?a=1&b=2' -u bob:/second", "curl -u alice:*** 'https://x?a=1&b=2' -u bob:***"),
+            ("CURL -u alice:/s3cret", "CURL -u alice:***"),
+            // A substitution or a parenthesis in a URL nests; after it, the curl command resumes.
+            ("curl https://en.wikipedia.org/wiki/Foo_(bar) -u alice:/s3cret", "curl https://en.wikipedia.org/wiki/Foo_(bar) -u alice:***"),
+            ("curl -o $(mktemp) -u alice:/s3cret https://x", "curl -o $(mktemp) -u alice:*** https://x"),
+            ("curl `date` -u alice:/s3cret https://x", "curl `date` -u alice:*** https://x"),
+            ("curl <(echo x) -u alice:/s3cret", "curl <(echo x) -u alice:***"),
+            ("curl -o >(tee /tmp/x) -u alice:/s3cret https://x", "curl -o >(tee /tmp/x) -u alice:*** https://x"),
+            ("curl >| /tmp/out -u alice:/s3cret", "curl >| /tmp/out -u alice:***"),
+            ("echo $(rsync -u host:src/file x) done", "echo $(rsync -u host:src/file x) done"),
+            ("curl $(rsync -u host:src/file x)", "curl $(rsync -u host:src/file x)"),
+            ("curl -u alice:secret && rsync -u host:src/file", "curl -u alice:*** && rsync -u host:src/file"),
+        ] {
+            #expect(r(cmd) == out, "\(cmd)")
+        }
+    }
+
     @Test("a net.flow's argv per process and its tool command are scrubbed; other fields aren't touched")
     func scrubFlow() {
         let data: [String: AnyJSON] = [

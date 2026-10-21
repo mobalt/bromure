@@ -27,16 +27,75 @@ enum CommandLineRedactor {
     private static let urlUserinfo = re(#"([a-z][a-z0-9+.-]*://[^/\s:@'"]+):[^@\s/'"]+@"#)
     /// `curl -u user:password`, `-uuser:password`, `--user`, `--proxy-user`
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
-    private static let userFlag = re(#"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// Short `-u` / `-U` mean user:password only to curl (`rsync -u` is
+    /// "update", its `host:path` a remote path; Finding CWE-670, "Command
+    /// redaction erases rsync paths, PWD, and token: URLs that are not
+    /// secrets"): `userFlagIsCurl` checks the command. The long forms are
+    /// always userinfo.
+    private static let userFlag = re(#"((?:^|\s)(-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    /// The command a flag at `location` belongs to is curl: a word named
+    /// `curl` (any path, any case) since the start of its shell segment. The
+    /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
+    /// space (or the end) or a newline not escaped — never at `2>&1`, `&>`,
+    /// `>|`, a quoted `a;b` or a URL's `a=1&b=2`; inside `(`…`)` or
+    /// backticks a segment of its own, the outer one resuming after — so
+    /// `bash -c 'curl …'` and `/usr/bin/curl` count and `rsync -u` doesn't.
+    /// Erring toward curl only masks more.
+    private static func userFlagIsCurl(_ ns: NSString, before location: Int) -> Bool {
+        let chars = Array(ns.substring(to: location).unicodeScalars)
+        var start = 0
+        // `(`…`)` and backticks nest a segment; their closer resumes the
+        // outer one (`curl -o $(mktemp) -u …`, a URL's `Foo_(bar)`).
+        var outer: [Int] = []
+        var inBacktick = false
+        var quote: Unicode.Scalar? = nil
+        var i = 0
+        func spaceOrEnd(_ j: Int) -> Bool { j >= chars.count || chars[j] == " " || chars[j] == "\t" || chars[j] == "\n" }
+        while i < chars.count {
+            let c = chars[i]
+            if let q = quote {
+                if c == q { quote = nil }
+                else if c == "\\", q == "\"" { i += 1 }
+            } else if c == "\\" {
+                i += 1                                   // escaped: `\&`, a backslash-newline
+            } else if c == "'" || c == "\"" {
+                quote = c
+            } else if c == "(" || (c == "`" && !inBacktick) {
+                outer.append(start)
+                start = i + 1
+                if c == "`" { inBacktick = true }
+            } else if c == ")" || c == "`" {
+                if c == "`" { inBacktick = false }
+                if let o = outer.popLast() { start = o }
+            } else if c == "\n" {
+                start = i + 1
+            } else if c == ";" || c == "|" || c == "&" {
+                // Redirects, not separators: `2>&1`, `&>`, `>|` (clobber).
+                let redirect = (c == "&" && ((i > 0 && chars[i - 1] == ">") || (i + 1 < chars.count && chars[i + 1] == ">")))
+                    || (c == "|" && i > 0 && chars[i - 1] == ">")
+                if !redirect, spaceOrEnd(i + 1) || (i + 1 < chars.count && (chars[i + 1] == "&" || chars[i + 1] == "|")) {
+                    start = i + 1
+                }
+            }
+            i += 1
+        }
+        let segment = String(String.UnicodeScalarView(chars[min(start, chars.count)...]))
+        return segment.split(whereSeparator: { " \t\n'\"()`".contains($0) })
+            .contains { ($0.split(separator: "/").last ?? $0).lowercased() == "curl" }
+    }
+
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
     /// `--password value`, `--token value`, …
     private static let secretFlag = re(
         #"(--(?:password|passwd|token|secret|api-key|apikey|access-key|secret-key|private-key|auth-token)(?:\s+|=))(['"]?)[^\s'"]+"#)
-    /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`
+    /// `PASSWORD=x`, `api_key=x`, `?access_token=x`, `"token": "x"`. The key
+    /// is taken whole, and the secret word ends it or a `_`/`-`/`.` follows
+    /// (`API_TOKEN_V2`, not `tokens:list`); the shell's own `PWD` / `OLDPWD`
+    /// is a directory, not a password (`DB_PWD` still is).
     private static let keyValue = re(
-        #"([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*['"]?\s*[=:]\s*)(['"]?)[^\s'"&,}]+"#)
+        #"((?<![A-Za-z0-9_.-])(?!(?:old)?pwd['"]?\s*[=:])[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key)(?:[_.-][A-Za-z0-9_.-]*)?['"]?\s*[=:]\s*)(['"]?)[^\s'"&,}]+"#)
 
     static func redact(_ s: String) -> String {
         guard !s.isEmpty else { return s }
@@ -51,7 +110,18 @@ enum CommandLineRedactor {
             last = m.range.location + m.range.length
         }
         if last > 0 { out = labelled + ns.substring(from: last) }
-        for (rx, template) in [(urlUserinfo, "$1:\(mask)@"), (userFlag, "$1:\(mask)"),
+        // user:password after -u/--user — the short flag only for curl.
+        let uns = out as NSString
+        var userMasked = ""
+        var at = 0
+        for m in userFlag.matches(in: out, range: NSRange(location: 0, length: uns.length)) {
+            let flag = uns.substring(with: m.range(at: 2))
+            guard flag.hasPrefix("--") || userFlagIsCurl(uns, before: m.range.location) else { continue }
+            userMasked += uns.substring(with: NSRange(location: at, length: m.range(at: 1).upperBound - at)) + ":" + mask
+            at = m.range.upperBound
+        }
+        if at > 0 { out = userMasked + uns.substring(from: at) }
+        for (rx, template) in [(urlUserinfo, "$1:\(mask)@"),
                                (header, "$1$2$3\(mask)"), (secretFlag, "$1$2\(mask)"),
                                (keyValue, "$1$2\(mask)")] {
             out = rx.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length),
