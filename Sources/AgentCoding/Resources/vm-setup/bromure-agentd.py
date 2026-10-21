@@ -6561,9 +6561,11 @@ def _approve_claude_api_key(suffix):
 
 
 # Claude Code permissions.allow rules merged into settings.json (mirrors
-# Profile.swift's claudeAlwaysAllowed).
+# Profile.swift's claudeAlwaysAllowed). The inbox is read-only unprompted.
 _CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display",
-                          "Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+                          "Read(~/.bromure/inbox/**)"]
+# Seeded by earlier builds, taken back out (claudeRetractedRules).
+_CLAUDE_RETRACTED_RULES = ["Edit(~/.bromure/inbox/**)"]
 # Merged into permissions.additionalDirectories (claudeInboxDirectory):
 # the delegation inbox, where other agents' files land.
 _CLAUDE_INBOX_DIR = "~/.bromure/inbox"
@@ -6652,6 +6654,7 @@ def _seed_claude_settings():
     # guardrails kept blocking it. Merged, never replacing the user's list.
     allow = perms.get("allow")
     allow = allow if isinstance(allow, list) else []
+    allow = [r for r in allow if r not in _CLAUDE_RETRACTED_RULES]
     for rule in _CLAUDE_ALWAYS_ALLOWED:
         if rule not in allow:
             allow.append(rule)

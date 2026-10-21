@@ -4298,11 +4298,17 @@ public final class ProfileStore {
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
     /// And `display`: showing the user a picture or a chart touches nothing.
-    /// And the delegation inbox, where the files other agents hand over
-    /// land: reading and unpacking them never stops on a prompt (running
-    /// one still goes through the approval mode).
+    /// And reading the delegation inbox, where the files other agents hand
+    /// over land: a VM's home is its workspace's own, so that inbox holds
+    /// only what was sent to this workspace. Read only — rewriting or
+    /// unpacking a file there (another session's incoming files too) goes
+    /// through the approval mode like any other edit.
     static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"] + claudeInboxRules
-    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)"]
+    /// Rules earlier builds seeded and every merge re-added, so the user
+    /// couldn't drop them: taken back out (CWE-732, "Sidecar Claude can read
+    /// and edit every workspace's delegation inbox without a prompt").
+    static let claudeRetractedRules = ["Edit(~/.bromure/inbox/**)"]
     /// `permissions.additionalDirectories` merged in too: Claude's built-in
     /// read-only commands (ls, cat, grep…) then run there unprompted.
     static let claudeInboxDirectory = "~/.bromure/inbox"
@@ -4731,7 +4737,7 @@ public final class ProfileStore {
             // Agent-to-agent traffic (delegate, report, deliver…) is our own
             // MCP to the host; auto mode's guardrails kept blocking it.
             // Merged into the user's list, never replacing it.
-            var allow = perms["allow"] as? [String] ?? []
+            var allow = (perms["allow"] as? [String] ?? []).filter { !Self.claudeRetractedRules.contains($0) }
             for rule in Self.claudeAlwaysAllowed where !allow.contains(rule) {
                 allow.append(rule)
             }
