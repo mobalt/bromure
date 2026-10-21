@@ -77,6 +77,12 @@ struct ContainerTrafficTests {
         p.containerTrafficDirect = true
         #expect(!p.effectiveContainerTrafficDirect)                             // sentry off
         p.kernelSentry = .bestEffort
+        // Finding (CWE-693): "Firewall pane drops the container-traffic
+        // switch while the exemption still applies". A Bromure Firewall
+        // workspace has no switch for it: a flag left set doesn't apply.
+        #expect(!p.usesOpenShellPolicy)
+        #expect(!p.effectiveContainerTrafficDirect)
+        p.networkPolicy = "version: 1\nnetwork_policies: {}\n"                // OpenShell, where its switch is
         #expect(p.effectiveContainerTrafficDirect)
         p.networkPolicy = """
         version: 1
