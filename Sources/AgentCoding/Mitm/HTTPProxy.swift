@@ -2858,8 +2858,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSInflater(noContextTakeover: deflate!.serverNoContextTakeover) : nil
         let c2uCollector = captureBody
             ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
+        // Squelch and the realtime tap read whole server messages (as the
+        // content-guard relay does, up to its 32 MB), not the trace's 1 MB
+        // preview: a tool call with a long argument, or the response.completed
+        // that carries it, is one big event that a cut-off prefix can't parse.
+        let learnCap = (squelchLearnFor != nil || onUpstreamMessage != nil)
+            ? WSMessageAssembler.maxMessage : WSTraceCollector.perMessageCap
         let u2cCollector = captureBody
-            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
+            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater, deliverCap: learnCap) : nil
         // Squelch's server side on the pump: the model's calls, learned from
         // every server text message — through the trace collector when there
         // is one, else a parser that keeps nothing.
@@ -2873,7 +2879,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let u2cLearner = (u2cCollector == nil && learn != nil)
             ? WSTraceCollector(direction: .upstreamToClient,
                                inflater: deflate.map { WSInflater(noContextTakeover: $0.serverNoContextTakeover) },
-                               retainsMessages: false) : nil
+                               retainsMessages: false, deliverCap: learnCap) : nil
         u2cLearner?.onMessage = learn
         if let learn {
             let tap = onUpstreamMessage
