@@ -4258,3 +4258,5 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "無法傳送回答。";
 "Your answer is already on its way." = "你的回答已在傳送中。";
+"“%@” wasn't wiped" = "「%@」未被抹除";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "在問題顯示期間，它已用目前的磁碟啟動（由自動化啟動），因此未抹除任何內容，它仍被標記為已遭入侵。請將其關閉後重新啟動以進行抹除。";

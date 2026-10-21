@@ -4289,3 +4289,5 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "The answer couldn't be sent.";
 "Your answer is already on its way." = "Your answer is already on its way.";
+"“%@” wasn't wiped" = "“%@” wasn't wiped";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.";

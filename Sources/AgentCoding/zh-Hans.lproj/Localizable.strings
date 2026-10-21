@@ -4255,3 +4255,5 @@
 /* Coding tasks: an answer that didn't go */
 "The answer couldn't be sent." = "无法发送回答。";
 "Your answer is already on its way." = "你的回答已在发送中。";
+"“%@” wasn't wiped" = "“%@”未被擦除";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "在问题显示期间，它已用当前磁盘启动（由自动化启动），因此未擦除任何内容，它仍被标记为已遭入侵。请将其关闭后重新启动以进行擦除。";

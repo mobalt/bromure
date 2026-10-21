@@ -12131,9 +12131,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
             guard launchQuestions.begin(profile.id) else { return }
-            let wiped = confirmWipeAndProceed(profile: profile)
+            let wipe = confirmWipeAndProceed(profile: profile)
             launchQuestions.end(profile.id)
-            if !wiped {
+            switch wipe {
+            case .wiped: break
+            case .cancelled: return
+            case .diskInUse:
+                // Confirmed, but not carried out: say so, never wipe the open disk.
+                showWipeSkipped(profile)
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -14470,7 +14475,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var asking = true
         defer { if asking { launchQuestions.end(profile.id) } }
         if SessionDisk.isCompromised(profile: profile, store: store) {
-            guard await confirmWipeAndProceedAsync(profile: profile) else { return }
+            switch await confirmWipeAndProceedAsync(profile: profile) {
+            case .wiped: break
+            case .cancelled: return
+            case .diskInUse:
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                launchQuestions.end(profile.id); asking = false
+                let (title, message) = Self.wipeSkippedParts(profile.name)
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                return
+            }
         }
         let current = readCurrentBaseVersion()
         if baseImageUpgradeOfferDue(profile, current: current),
@@ -14551,7 +14568,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    private func confirmWipeAndProceed(profile: Profile) -> Bool {
+    /// How a compromise-wipe question ended.
+    enum CompromiseWipe: Equatable {
+        case cancelled
+        case wiped
+        /// "Wipe and Launch", but a boot began while the question was up and
+        /// has the disk open: nothing was wiped, and the user is told so.
+        case diskInUse
+    }
+
+    static func compromiseWipe(confirmed: Bool, wiped: () -> Bool) -> CompromiseWipe {
+        guard confirmed else { return .cancelled }
+        return wiped() ? .wiped : .diskInUse
+    }
+
+    static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.",
+            comment: "compromise wipe skipped"))
+    }
+
+    private func showWipeSkipped(_ profile: Profile) {
+        let (title, message) = Self.wipeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
+    private func confirmWipeAndProceed(profile: Profile) -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         do {
             let alert = NSAlert()
@@ -14572,24 +14620,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // first button so the user has to click it explicitly.
             alert.buttons.first?.keyEquivalent = ""
             NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            let confirmed = alert.runModal() == .alertFirstButtonReturn
+            return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
         }
-        return wipeCompromised(profile: profile)
     }
 
     /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
     /// suspends on the broker (the main queue keeps draining, so the fat
     /// client actually receives and can answer the prompt) instead of pumping
     /// the run loop from inside a control-socket callout.
-    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> Bool {
+    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         // Fallback (timeout / client gone) is Cancel — never auto-wipe.
-        guard await PendingPromptBroker.shared.askAsync(
+        let confirmed = await PendingPromptBroker.shared.askAsync(
             profileID: profile.id, title: title, message: info,
             buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
                       NSLocalizedString("Cancel", comment: "")],
-            fallback: 1) == 0 else { return false }
-        return wipeCompromised(profile: profile)
+            fallback: 1) == 0
+        return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
     }
 
     /// True while a compromise alert is up on screen. The swap-time
