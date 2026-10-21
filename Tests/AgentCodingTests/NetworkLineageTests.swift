@@ -176,6 +176,9 @@ struct NetworkLineageProxyTests {
         l.emit = { _, t, d in sink.add(t, d) }
         l.noteExec(profileID: pid, ["pid": 40, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl https://example.com/"])
         l.noteProxied(profileID: pid, sport: 53111, host: "example.com", port: 443)
+        // The proxy's own allow (egress.firewall, layer proxy).
+        l.noteDecision(profileID: pid, proto: "tcp", dst: "host:example.com", dport: 443, action: "allow", layer: "proxy",
+                       host: "example.com")
         l.noteFlow(profileID: pid, ["pid": 40, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53111])
         // A denied one: the L7 deny is keyed by hostname.
         l.noteExec(profileID: pid, ["pid": 41, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl https://evil.example/"])
@@ -191,6 +194,39 @@ struct NetworkLineageProxyTests {
         #expect(NetworkLineageTests.S(denied["decision"]) == "deny" && NetworkLineageTests.S(denied["layer"]) == "l7")
         let row = try #require(SecurityTimeline.map(profileID: pid, eventType: "net.flow", eventData: ok, now: Date()))
         #expect(row.condition == "curl → TCP example.com:443")
+    }
+
+    /// Finding (CWE-670): "Proxied flows are recorded as allowed before an
+    /// L7 deny can land". With no decision 1.5 s after the connect, a proxied
+    /// flow was written "allow / proxy" for good — while the MiTM's L7 deny,
+    /// logged once it had read the request, came later.
+    @Test("A proxied flow waits for the MiTM's verdict, and says unknown rather than guess allow")
+    func proxiedFlowWaitsForVerdict() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.proxyDecisionPolls = 6
+        l.emit = { _, t, d in sink.add(t, d) }
+        l.noteExec(profileID: pid, ["pid": 50, "ppid": 1, "comm": "curl", "path": "/usr/bin/curl", "argv": "curl -X POST https://api.example/x"])
+        l.noteProxied(profileID: pid, sport: 53200, host: "api.example", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 50, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53200])
+        // Past the first look, the L7 deny lands.
+        try await Task.sleep(nanoseconds: 120_000_000)
+        #expect(sink.flows.isEmpty, "emitted before the verdict")
+        l.noteDecision(profileID: pid, proto: "tcp", dst: "host:api.example", dport: 443, action: "deny", layer: "l7",
+                       reason: "POST not permitted by policy", host: "api.example")
+        for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let denied = try #require(sink.flows.first)
+        #expect(NetworkLineageTests.S(denied["dst"]) == "api.example")
+        #expect(NetworkLineageTests.S(denied["decision"]) == "deny" && NetworkLineageTests.S(denied["layer"]) == "l7")
+
+        // No verdict ever: unknown, not a guessed allow.
+        l.noteExec(profileID: pid, ["pid": 51, "ppid": 1, "comm": "wget", "path": "/usr/bin/wget", "argv": "wget https://quiet.example/"])
+        l.noteProxied(profileID: pid, sport: 53201, host: "quiet.example", port: 443)
+        l.noteFlow(profileID: pid, ["pid": 51, "proto": "tcp", "dst": "127.0.0.1", "dport": 65534, "sport": 53201])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let quiet = try #require(sink.flows.first { NetworkLineageTests.S($0["dst"]) == "quiet.example" })
+        #expect(NetworkLineageTests.S(quiet["decision"]) == "unknown")
+        if case .bool(true)? = quiet["via_proxy"] {} else { Issue.record("not marked via_proxy") }
     }
 
     /// Finding (CWE-345): "A direct vsock client can forge BROMURE-CLIENT and

@@ -68,6 +68,11 @@ public final class NetworkLineage: @unchecked Sendable {
     static let maxProcs = 4096
     /// How long a flow waits for the switch's decision before it's emitted.
     var decisionWait: TimeInterval = 1.5
+    /// A proxied flow with no decision yet is looked at again this many
+    /// times, `decisionWait` apart: the MiTM's verdict (its allow, or an L7
+    /// deny after the handshake and the request) can land well after the
+    /// first look. Still none after that: `unknown`, never a guessed allow.
+    var proxyDecisionPolls = 6
     /// Where events go (tests replace it).
     var emit: @Sendable (UUID, String, [String: AnyJSON]) -> Void = { pid, type, data in
         BACEventEmitter.shared.emitDetached(profileID: pid, eventType: type, eventData: data)
@@ -222,9 +227,16 @@ public final class NetworkLineage: @unchecked Sendable {
                                        pids: snapshot.processes.reversed().compactMap {
                                            if case .int(let p)? = $0["pid"] { return p }; return nil })
         let flowID = UUID().uuidString
+        scheduleResolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: dst,
+                        dport: dport, processes: snapshot.processes, link: snapshot.link, polls: 0)
+    }
+
+    private func scheduleResolve(profileID: UUID, flowID: String, frame f: [String: Any], proto: String, dst: String,
+                                 dport: Int, processes: [[String: AnyJSON]], link: (call: ToolCall, confidence: String)?,
+                                 polls: Int) {
         DispatchQueue.global().asyncAfter(deadline: .now() + decisionWait) { [weak self] in
             self?.resolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: dst,
-                          dport: dport, processes: snapshot.processes, link: snapshot.link)
+                          dport: dport, processes: processes, link: link, polls: polls)
         }
     }
 
@@ -296,7 +308,9 @@ public final class NetworkLineage: @unchecked Sendable {
     }
 
     private func resolve(profileID: UUID, flowID: String, frame f: [String: Any], proto: String, dst: String,
-                         dport: Int, processes: [[String: AnyJSON]], link: (call: ToolCall, confidence: String)?) {
+                         dport: Int, processes: [[String: AnyJSON]], link: (call: ToolCall, confidence: String)?,
+                         polls: Int = 0) {
+        let original = (dst, dport)
         let t = now()
         lock.lock()
         var vm = vms[profileID] ?? VM()
@@ -317,6 +331,15 @@ public final class NetworkLineage: @unchecked Sendable {
            l7.action != "allow", decision?.action != "deny" {
             decision = Decision(action: l7.action, layer: l7.layer, reason: l7.reason, host: host, at: l7.at)
         }
+        // Proxied, and the MiTM hasn't said yet: look again rather than guess
+        // (Finding CWE-670, "Proxied flows are recorded as allowed before an
+        // L7 deny can land").
+        if viaProxy, decision == nil, polls < proxyDecisionPolls {
+            lock.unlock()
+            scheduleResolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: original.0,
+                            dport: original.1, processes: processes, link: link, polls: polls + 1)
+            return
+        }
         let leafExe = processes.last.flatMap { if case .string(let s)? = $0["exe"] { return s } else { return nil } } ?? "?"
         let foldKey = "\(leafExe)|\(proto)|\(dst)|\(dport)"
         var data: [String: AnyJSON] = [
@@ -327,9 +350,9 @@ public final class NetworkLineage: @unchecked Sendable {
         if viaProxy {
             data["via_proxy"] = .bool(true)
             data["host"] = .string(dst)
-            // No explicit decision for a proxied target = the proxy let it
-            // through (a refusal is always logged).
-            if decision == nil { decision = Decision(action: "allow", layer: "proxy", reason: nil, host: dst, at: t) }
+            // Still no decision: `unknown` below. The proxy logs its allows
+            // only when allowed connections are logged, and an L7 refusal
+            // only once it has read the request — silence isn't a verdict.
         }
         if let host = decision?.host { data["host"] = .string(host) }
         if let d = decision {
