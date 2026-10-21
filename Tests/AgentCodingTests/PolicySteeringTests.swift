@@ -478,13 +478,10 @@ struct PolicyNoteDeliveryTests {
         let home = root.appendingPathComponent("home")
         // The meta share, as the guest mounts it: the script reads that path.
         let meta = root.appendingPathComponent("meta")
-        let notes = meta.appendingPathComponent(ACAppDelegate.policyNotesShareDir)
         let body = try String(contentsOf: script, encoding: .utf8)
         #expect(body.contains(ACAppDelegate.guestPolicyNotesDir + "/w"))
         #expect(!body.contains(".bromure/policy-notes"))
-        let hook = root.appendingPathComponent("agent-status.sh")
-        try body.replacingOccurrences(of: ACAppDelegate.guestPolicyNotesDir, with: notes.path)
-            .write(to: hook, atomically: true, encoding: .utf8)
+        let hook = try Self.installHook(body, root: root, meta: meta).hook
         func run(_ event: String) throws -> String {
             try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
             return try hookRun(hook, event: event, home: home, bin: bin)
@@ -496,6 +493,26 @@ struct PolicyNoteDeliveryTests {
         #expect(((post["hookSpecificOutput"] as? [String: Any])?["additionalContext"] as? String)?.contains("evil.example") == true)
         // Claimed: a later hook hands neither note over again.
         #expect(try hookRun(hook, event: "Stop", home: home, bin: bin).isEmpty)
+    }
+
+    /// The status script as the guest gets it, pointed at `meta` for the
+    /// share and at a `mountinfo` that says `meta` is the read-only
+    /// `bromure-meta` virtiofs export. Returns that mountinfo's share line.
+    static func installHook(_ body: String, root: URL, meta: URL) throws -> (hook: URL, mountinfo: URL, shareLine: String) {
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        var st = stat()
+        guard stat(meta.path, &st) == 0 else { throw CocoaError(.fileNoSuchFile) }
+        let dev = UInt32(bitPattern: st.st_dev)
+        let mountinfo = root.appendingPathComponent("mountinfo")
+        let shareLine = "1 0 1:1 / / rw,relatime - apfs /dev/disk1 rw\n"
+            + "22 1 \(dev >> 24):\(dev & 0xffffff) / \(meta.path) ro,relatime - virtiofs bromure-meta rw\n"
+        try shareLine.write(to: mountinfo, atomically: true, encoding: .utf8)
+        #expect(body.contains(#"share = "/mnt/bromure-meta""#) && body.contains("/proc/self/mountinfo"))
+        let hook = root.appendingPathComponent("agent-status.sh")
+        try body.replacingOccurrences(of: "/mnt/bromure-meta", with: meta.path)
+            .replacingOccurrences(of: "/proc/self/mountinfo", with: mountinfo.path)
+            .write(to: hook, atomically: true, encoding: .utf8)
+        return (hook, mountinfo, shareLine)
     }
 
     private func hookRun(_ script: URL, event: String, home: URL, bin: URL) throws -> String {
@@ -528,10 +545,9 @@ struct PolicyNoteDeliveryTests {
         try store.writeHomeSeedFiles(for: Profile(name: "ws", tool: .claude, authMode: .token),
                                      into: seed, terminalDefaults: .fallback)
         let body = try String(contentsOf: seed.appendingPathComponent("files/.bromure/agent-status.sh"), encoding: .utf8)
-        let notes = root.appendingPathComponent("meta").appendingPathComponent(ACAppDelegate.policyNotesShareDir)
-        let hook = root.appendingPathComponent("agent-status.sh")
-        try body.replacingOccurrences(of: ACAppDelegate.guestPolicyNotesDir, with: notes.path)
-            .write(to: hook, atomically: true, encoding: .utf8)
+        let meta = root.appendingPathComponent("meta")
+        let notes = meta.appendingPathComponent(ACAppDelegate.policyNotesShareDir)
+        let (hook, mountinfo, shareLine) = try Self.installHook(body, root: root, meta: meta)
         let bin = root.appendingPathComponent("bin")
         try fm.createDirectory(at: bin, withIntermediateDirectories: true)
         try "#!/bin/sh\necho 3\n".write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
@@ -550,8 +566,23 @@ struct PolicyNoteDeliveryTests {
                                   withDestinationURL: old.appendingPathComponent("w3-1.note"))
         #expect(try hookRun(hook, event: "Stop", home: home, bin: bin).isEmpty)
 
+        // sudo mount --bind of a guest folder over the share, or over its
+        // notes folder: the hook reads nothing, not even the host's own note.
+        try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "blocked: evil.example")
+        for over in [meta.path, notes.path] {
+            try (shareLine + "40 22 0:99 /home/ubuntu/x \(over) rw,relatime - ext4 /dev/vdb rw\n")
+                .write(to: mountinfo, atomically: true, encoding: .utf8)
+            #expect(try hookRun(hook, event: "Stop", home: home, bin: bin).isEmpty)
+        }
+        // Not read-only, or another virtiofs tag at the same place: refused too.
+        for line in [shareLine.replacingOccurrences(of: " ro,", with: " rw,"),
+                     shareLine.replacingOccurrences(of: "virtiofs bromure-meta", with: "virtiofs bromure-home")] {
+            try line.write(to: mountinfo, atomically: true, encoding: .utf8)
+            #expect(try hookRun(hook, event: "Stop", home: home, bin: bin).isEmpty)
+        }
+
         // The host's note still goes through, once.
-        try ACAppDelegate.dropPolicyNote(in: root.appendingPathComponent("meta"), window: 3, text: "blocked: evil.example")
+        try shareLine.write(to: mountinfo, atomically: true, encoding: .utf8)
         let out = try hookRun(hook, event: "Stop", home: home, bin: bin)
         let stop = try #require(try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])
         #expect(stop["reason"] as? String == "blocked: evil.example")

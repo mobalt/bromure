@@ -4891,6 +4891,29 @@ public final class ProfileStore {
                 event = json.load(sys.stdin).get("hook_event_name") or event
             except Exception:
                 pass
+            # The host share itself, not something mounted over it (outside the
+            # strict sandbox the guest has sudo, and a bind mount would stack a
+            # guest folder on the path): the mount covering the notes must be
+            # the read-only virtiofs export, and each note must be on it.
+            share = "/mnt/bromure-meta"
+            dev = None
+            try:
+                with open("/proc/self/mountinfo") as h:
+                    for line in h:
+                        a, _, b = line.partition(" - ")
+                        a, b = a.split(), b.split()
+                        mp = a[4].replace("\\040", " ")
+                        if mp == share or share.startswith(mp.rstrip("/") + "/"):
+                            ok = (mp == share and a[3] == "/" and "ro" in a[5].split(",")
+                                  and b[:2] == ["virtiofs", "bromure-meta"])
+                            major, minor = a[2].split(":")
+                            dev = os.makedev(int(major), int(minor)) if ok else None
+                        elif mp.startswith(share + "/"):
+                            dev = None
+            except (OSError, ValueError, IndexError):
+                dev = None
+            if dev is None:
+                sys.exit(0)
             claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
             try:
                 os.makedirs(claims, mode=0o700, exist_ok=True)
@@ -4899,7 +4922,8 @@ public final class ProfileStore {
             notes = []
             for f in sorted(sys.argv[1:]):
                 try:
-                    if not stat.S_ISREG(os.lstat(f).st_mode):
+                    st = os.lstat(f)
+                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
                         continue
                     fd = os.open(os.path.join(claims, os.path.basename(f)),
                                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
