@@ -291,6 +291,17 @@ _GIT_SAFE_ENV = {
 }
 
 
+# What a network git call (a review's fetch) may be told to use. Never `file`
+# or `ext`: see `_ws_run`.
+_GIT_NETWORK_PROTOCOLS = frozenset(("https", "ssh"))
+# All a network git call keeps of agentd's environment.
+_GIT_NETWORK_ENV_KEEP = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+))
+
+
 class SandboxRoutingError(RuntimeError):
     """`_ws_run` was asked for something it cannot route into the sandbox.
 
@@ -414,10 +425,21 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         # the caller's env win, because the caller's env losing to the hardening
         # is the behaviour that protects every other call site -- and because
         # `git_protocols=` is grep-able, which "it works if you set the right
-        # variable" is not. `file` stays in the set regardless; `ext` is never
-        # added, since `ext::` is arbitrary command execution.
+        # variable" is not.
+        #
+        # The list REPLACES `file`, never adds to it. GIT_ALLOW_PROTOCOL is a
+        # whitelist that overrides `protocol.file.allow=never`, so keeping
+        # `file` in a network fetch's set let the repository's own config run
+        # a program: `remote.origin.uploadpack=<script>` on a file origin, or
+        # an `url.file://….insteadOf=https://…` rewrite of an https one, both
+        # exec'd locally (measured on git 2.43). `ext` (arbitrary command
+        # execution) and `file` are refused outright.
         if git_protocols:
-            env["GIT_ALLOW_PROTOCOL"] = "file:" + git_protocols
+            allowed = git_protocols.split(":")
+            if not allowed or any(p not in _GIT_NETWORK_PROTOCOLS for p in allowed):
+                raise ValueError("git_protocols may only name %s, not %r"
+                                 % ("/".join(sorted(_GIT_NETWORK_PROTOCOLS)), git_protocols))
+            env["GIT_ALLOW_PROTOCOL"] = git_protocols
     # The caller's own values win: this supplies a default, it does not override.
     for key, value in _ca_trust_for_exec().items():
         env.setdefault(key, value)
@@ -462,7 +484,13 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
             "up -- and if the command genuinely must not be confined, say so "
             "through _run_unconfined(args, reason=...)." % (args[:2],))
     if not _SANDBOX.get("control_socket"):
-        run_env = dict(os.environ)
+        # A network git call gets the git-safety variables and the few it
+        # needs to reach the network, not agentd's whole environment (any
+        # GIT_* there — GIT_SSH_COMMAND, GIT_CONFIG_* — would undo the flags).
+        if git_protocols:
+            run_env = {k: v for k, v in os.environ.items() if k in _GIT_NETWORK_ENV_KEEP}
+        else:
+            run_env = dict(os.environ)
         run_env.update(env)
         return subprocess.run(args, capture_output=capture_output, text=text,
                               timeout=timeout, cwd=cwd, check=check,
@@ -4647,9 +4675,16 @@ def _automation_run(cwd, slug, display, tool, prompt_b64, mode="", base=""):
                      "git repository first" % cwd)
         return
     if root:
+        start = ""
+        if base:
+            start = _resolve_run_base(cwd, base)
+            if start is None:
+                # Never review some other commit as the one asked for.
+                worktree_err("%s: %s isn't in %s, even after fetching origin — "
+                             "the run didn't start" % (mode or "automation", base, cwd))
+                return
         _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True,
-                         task=(mode == "task"),
-                         base=_resolve_run_base(cwd, base) if base else "",
+                         task=(mode == "task"), base=start,
                          review=(mode == "review"))
     elif mode == "task":
         # A plain tab has no branch, so the card could never leave In
@@ -4665,30 +4700,39 @@ def _commit_exists(cwd, ref):
                           stderr=_DEVNULL).returncode == 0
 
 
+# The fetch a review run makes for a base its checkout lacks. The upload
+# pack is pinned to git's own on the command line (it beats any
+# remote.origin.uploadpack the repository sets), and receive-pack with it.
+def _review_fetch_argv(cwd):
+    return ["git", "-C", cwd,
+            "-c", "remote.origin.uploadpack=git-upload-pack",
+            "-c", "remote.origin.receivepack=git-receive-pack",
+            "fetch", "--quiet", "--upload-pack=git-upload-pack", "origin"]
+
+
 def _resolve_run_base(cwd, base):
     """The start point a review run is pinned to, if the checkout has it —
     fetching once when it doesn't (a checkout cloned weeks ago lags the
-    branch the host just asked GitHub about). "" = start from the
-    checkout's HEAD: the prompt then tells the agent how to catch up, so a
-    failed fetch degrades the run instead of failing it."""
+    branch the host just asked GitHub about). None = the base asked for
+    isn't there even after the fetch: the caller refuses the run rather
+    than review some other commit (HEAD) as if it were the one asked."""
     if not base or base.startswith("-"):
-        return ""
+        return None
     if _commit_exists(cwd, base):
         return base
     try:
         # The only network git call in this file, so the only one that needs a
-        # transport beyond `file`. ssh as well as https: a workspace's `origin`
-        # may be either, and which one is not ours to assume.
-        _ws_run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
-                       stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
-                       git_protocols="https:ssh",
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        # transport at all. ssh as well as https: a workspace's `origin` may be
+        # either, and which one is not ours to assume.
+        _ws_run(_review_fetch_argv(cwd),
+                stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
+                git_protocols="https:ssh")
     except Exception as e:
         log("automation", "fetch for %s failed: %s" % (base, e))
     if _commit_exists(cwd, base):
         return base
-    log("automation", "review base %s not found — starting from HEAD" % base)
-    return ""
+    log("automation", "review base %s not found, even after fetching origin" % base)
+    return None
 
 
 _AUTOMATIONS_MCP_SHIM = "/mnt/bromure-meta/bromure-automations-mcp.py"

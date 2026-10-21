@@ -388,17 +388,22 @@ struct ReviewRunAgentdTests {
         }
     }
 
-    @Test("A review base the checkout lacks falls back to HEAD instead of failing the run",
+    @Test("A review base the checkout lacks refuses the run instead of reviewing HEAD",
           .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
     func baseFallback() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = try run(Self.setup + """
+            errors = []
+            m.worktree_err = errors.append
             print('KNOWN', m._resolve_run_base(repo, first) == first)
             print('BRANCH', m._resolve_run_base(repo, 'main') == 'main')
-            print('UNKNOWN', m._resolve_run_base(repo, 'f' * 40) == '')
-            print('OPTION', m._resolve_run_base(repo, '--upload-pack=x') == '')
-            print('EMPTY', m._resolve_run_base(repo, '') == '')
+            print('UNKNOWN', m._resolve_run_base(repo, 'f' * 40) is None)
+            print('OPTION', m._resolve_run_base(repo, '--upload-pack=x') is None)
+            print('EMPTY', m._resolve_run_base(repo, '') is None)
+            # A review asked for a base that isn't there: refused, said so, nothing launched.
+            m._automation_run(repo, 'gone', 'x', 'grok', '-', 'review', 'f' * 40)
+            print('REFUSED', not launched and len(errors) == 1 and 'f' * 40 in errors[0])
             # Old-style run (no mode, no base): a plain worktree at HEAD, no findings declaration.
             m._automation_run(repo, 'plain', 'x', 'grok', '-')
             import time
@@ -410,7 +415,63 @@ struct ReviewRunAgentdTests {
             cfg = os.path.join(wt, '.grok', 'config.toml')
             print('PLAIN_NO_FINDINGS', not os.path.exists(cfg) or 'automations' not in open(cfg).read())
             """, dir: dir)
-        for key in ["KNOWN", "BRANCH", "UNKNOWN", "OPTION", "EMPTY", "PLAIN_HEAD", "PLAIN_NO_FINDINGS"] {
+        for key in ["KNOWN", "BRANCH", "UNKNOWN", "OPTION", "EMPTY", "REFUSED", "PLAIN_HEAD", "PLAIN_NO_FINDINGS"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// Finding (CWE-78): "Review fetch allows a repo uploadpack and cannot
+    /// fetch https remotes". The fetch's protocol whitelist kept `file`, which
+    /// overrides protocol.file.allow=never: a repository's own
+    /// remote.origin.uploadpack (or an insteadOf rewrite onto file://) ran a
+    /// program of its choosing.
+    @Test("The review fetch never runs a repository's upload pack, and keeps only network transports",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func fetchRunsNoRepoProgram() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            marker = d + '/ran'
+            evil = d + '/uploadpack'
+            open(evil, 'w').write('#!/bin/sh\\necho "$@" > %s\\nexec git-upload-pack "$@"\\n' % marker)
+            os.chmod(evil, 0o755)
+            # A file origin that has a commit the checkout lacks.
+            up = d + '/up'
+            subprocess.run(['git', 'clone', '-q', '--bare', repo, up], check=True)
+            other = d + '/other'
+            subprocess.run(['git', 'clone', '-q', up, other], check=True)
+            subprocess.run(['git', '-C', other, '-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                            'commit', '-q', '--allow-empty', '-m', 'three'], check=True)
+            subprocess.run(['git', '-C', other, 'push', '-q', 'origin', 'main'], check=True)
+            ahead = subprocess.run(['git', '-C', other, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+            g('remote', 'add', 'origin', 'file://' + up)
+            g('config', 'remote.origin.uploadpack', evil)
+            print('FILE_ORIGIN', m._resolve_run_base(repo, ahead) is None and not os.path.exists(marker))
+            # An https origin rewritten onto that file one by the repo's config.
+            g('remote', 'set-url', 'origin', 'https://example.invalid/up.git')
+            g('config', 'url.file://%s.insteadOf' % up, 'https://example.invalid/up.git')
+            print('REWRITE', m._resolve_run_base(repo, ahead) is None and not os.path.exists(marker))
+            # What the fetch is run with: network transports only, agentd's GIT_* left behind.
+            seen = []
+            real = subprocess.run
+            def spy(args, **kw):
+                if 'fetch' not in args: return real(args, **kw)
+                seen.append((list(args), kw.get('env') or {}))
+                return real(['true'])
+            m.subprocess.run = spy
+            os.environ['GIT_SSH_COMMAND'] = 'touch ' + marker
+            m._resolve_run_base(repo, 'e' * 40)
+            m.subprocess.run = real
+            argv, env = seen[0]
+            print('PROTOCOLS', env.get('GIT_ALLOW_PROTOCOL') == 'https:ssh')
+            print('NO_AGENTD_GIT_ENV', 'GIT_SSH_COMMAND' not in env)
+            print('PINNED_PACK', '--upload-pack=git-upload-pack' in argv)
+            try:
+                m._ws_run(['git', 'fetch'], git_protocols='file:https'); print('NO_FILE', False)
+            except ValueError:
+                print('NO_FILE', True)
+            """, dir: dir)
+        for key in ["FILE_ORIGIN", "REWRITE", "PROTOCOLS", "NO_AGENTD_GIT_ENV", "PINNED_PACK", "NO_FILE"] {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }
