@@ -62,6 +62,10 @@ public final class PolicySteering: @unchecked Sendable {
     private let lock = NSLock()
     /// Agent pid → its tmux window, per workspace (from the PreToolUse hooks).
     private var agents: [UUID: [Int: (window: Int, at: Date)]] = [:]
+    /// Pids a window's new pid displaced: their window, for the pin's ten
+    /// minutes still (a line naming another pid is no proof the old one
+    /// exited — the files are guest-writable).
+    private var displaced: [UUID: [Int: (window: Int, at: Date)]] = [:]
     /// Recent flows per workspace: "dst|dport" → the process chain's pids.
     private var flows: [UUID: [String: Flow]] = [:]
     private var pending: [UUID: Pending] = [:]
@@ -75,16 +79,26 @@ public final class PolicySteering: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         var m = agents[profileID] ?? [:]
         let t = now()
-        // A window's agent restarted: its old pid no longer speaks for it.
-        m = m.filter { $0.value.window != window || $0.key == pid }
+        var gone = (displaced[profileID] ?? [:]).filter { t.timeIntervalSince($0.value.at) < 600 }
         // A live agent's pid isn't re-pointed at another tab: the lines that
         // register it are files any guest process can append to, and a note
         // must not be steered into a different agent's composer. (A pid
-        // whose agent has been silent ten minutes may be reused.)
+        // whose agent has been silent ten minutes may be reused.) That holds
+        // for a pid another line displaced from its window too (Finding
+        // CWE-345, "A guest line can clear a live agent's pid pin and keep
+        // its policy notes": writing a pid for the window first freed the
+        // agent's pid to be claimed elsewhere, and kept it there).
         if let held = m[pid], held.window != window, t.timeIntervalSince(held.at) < 600 { return }
+        if let was = gone[pid], was.window != window { return }
+        // A window's agent restarted (or a line claims so): its old pid no
+        // longer speaks for it, but stays bound to that window for the pin.
+        for (p, v) in m where v.window == window && p != pid { gone[p] = v }
+        m = m.filter { $0.value.window != window || $0.key == pid }
+        gone[pid] = nil                 // back in its own window: live again
         m[pid] = (window, t)
         if m.count > 64 { m = m.filter { t.timeIntervalSince($0.value.at) < 3600 } }
         agents[profileID] = m
+        displaced[profileID] = gone
     }
 
     /// The sentry's `net_flow`: which processes opened a flow to `dst:dport`
@@ -247,7 +261,7 @@ public final class PolicySteering: @unchecked Sendable {
 
     func reset(profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
-        agents[profileID] = nil; flows[profileID] = nil
+        agents[profileID] = nil; displaced[profileID] = nil; flows[profileID] = nil
         sent = sent.filter { !$0.key.hasPrefix(profileID.uuidString) }
     }
 
