@@ -42,7 +42,7 @@ struct PolicySteeringTests {
         s.openShellProvider = { _ in Self.policy }
         s.advisorOnProvider = { _ in advisor }
         s.attributionWait = 0.05
-        s.deliver = { _, window, text, sole in sink.add(.init(window: window, text: text, soleOnly: sole)) }
+        s.deliver = { _, window, text, sole, done in sink.add(.init(window: window, text: text, soleOnly: sole)); done(true) }
         return s
     }
 
@@ -288,5 +288,114 @@ struct PolicySteeringTests {
         // agent is told.
         #expect(sink.notes.count == 1)
         #expect(sink.notes.first?.window == nil)
+    }
+}
+
+/// Finding (CWE-362): "Claude reads the policy note before the host has
+/// written it". The note is written on another task after the deny, so the
+/// blocked tool's PostToolUse hook often found nothing; the Stop hook didn't
+/// read notes, so a turn that ended on the block held the note until the
+/// next message; and a failed write was still counted as told.
+@Suite("Policy notes: none lost to the race with Claude's hooks", .serialized)
+struct PolicyNoteDeliveryTests {
+    @Test("A note that reached no tab isn't counted as told: the repeat tells it")
+    func failedDeliveryIsForgotten() {
+        let sink = SteeringSink()
+        let s = PolicySteering()
+        s.enabledProvider = { _ in true }
+        s.openShellProvider = { _ in nil }
+        s.advisorOnProvider = { _ in false }
+        final class Count: @unchecked Sendable { var n = 0 }
+        let tries = Count()
+        s.deliver = { _, w, text, sole, done in
+            tries.n += 1
+            sink.add(.init(window: w, text: text, soleOnly: sole))
+            done(tries.n > 1)                   // the first write fails
+        }
+        let ws = UUID()
+        let deny: [String: AnyJSON] = ["action": .string("deny"), "layer": .string("l7"), "host": .string("x.example"),
+                                       "port": .int(443), "method": .string("GET"), "path": .string("/")]
+        s.observe(profileID: ws, eventType: "egress.firewall", eventData: deny)
+        s.observe(profileID: ws, eventType: "egress.firewall", eventData: deny)   // told: it went this time
+        s.observe(profileID: ws, eventType: "egress.firewall", eventData: deny)   // deduped now
+        #expect(sink.notes.count == 2)
+    }
+
+    @Test("Claude's Stop hook drains the tab's notes and keeps the turn going; PostToolUse still adds them as context",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func stopHookDrains() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .claude, authMode: .token)
+        let seed = root.appendingPathComponent("seed")
+        try store.writeHomeSeedFiles(for: p, into: seed, terminalDefaults: .fallback)
+        let files = seed.appendingPathComponent("files")
+        let script = files.appendingPathComponent(".bromure/agent-status.sh")
+        #expect(FileManager.default.fileExists(atPath: script.path))
+
+        // The Stop hooks run `policy` too: the host-written settings…
+        func stopCommands(_ settings: URL) -> [String] {
+            guard let d = try? Data(contentsOf: settings),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let stop = (o["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]] else { return [] }
+            return stop.flatMap { ($0["hooks"] as? [[String: Any]] ?? []).compactMap { $0["command"] as? String } }
+        }
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        let hostSettings = store.homeDirectory(for: p).appendingPathComponent(".claude/settings.json")
+        #expect(stopCommands(hostSettings).contains { $0.hasSuffix("agent-status.sh policy") })
+        // …and agentd's twin for an ext4 home (seeded in the guest).
+        let guestHome = root.appendingPathComponent("guest-home"), seedIn = root.appendingPathComponent("guest-seed")
+        try FileManager.default.createDirectory(at: guestHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: seedIn, withIntermediateDirectories: true)
+        try #"{"usesClaude": true}"#.write(to: seedIn.appendingPathComponent("claude-settings.spec.json"), atomically: true, encoding: .utf8)
+        let agentd = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py")
+        let py = Process()
+        py.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        py.arguments = ["-I", "-c", """
+            import importlib.util, sys, os
+            s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            m.SEED_DIR = sys.argv[2]; m.HOME_MOUNT = sys.argv[3]; m.HOME = sys.argv[3]
+            m._approve_claude_api_key = lambda *a: None; m._preonboard_claude = lambda *a: None
+            m.log = lambda *a: None
+            os.chown = lambda *a, **k: None
+            m._seed_claude_settings()
+            """, agentd.path, seedIn.path, guestHome.path]
+        py.standardError = FileHandle.nullDevice
+        try py.run(); py.waitUntilExit()
+        #expect(stopCommands(guestHome.appendingPathComponent(".claude/settings.json")).contains { $0.hasSuffix("agent-status.sh policy") })
+
+        // Run the script as the hook would, with a tmux that says window 3.
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try "#!/bin/sh\necho 3\n".write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
+        chmod(bin.appendingPathComponent("tmux").path, 0o755)
+        let home = root.appendingPathComponent("home")
+        let notes = home.appendingPathComponent(".bromure/policy-notes")
+        func run(_ event: String) throws -> String {
+            try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+            try "curl to evil.example was blocked".write(to: notes.appendingPathComponent("w3-1.note"),
+                                                         atomically: true, encoding: .utf8)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = [script.path, "policy"]
+            proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
+            let input = Pipe(), output = Pipe()
+            proc.standardInput = input; proc.standardOutput = output
+            try proc.run()
+            input.fileHandleForWriting.write(Data(#"{"hook_event_name":"\#(event)"}"#.utf8))
+            try input.fileHandleForWriting.close()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        let stop = try #require(try JSONSerialization.jsonObject(with: Data(try run("Stop").utf8)) as? [String: Any])
+        #expect(stop["decision"] as? String == "block")
+        #expect((stop["reason"] as? String)?.contains("evil.example") == true)
+        let post = try #require(try JSONSerialization.jsonObject(with: Data(try run("PostToolUse").utf8)) as? [String: Any])
+        #expect(((post["hookSpecificOutput"] as? [String: Any])?["additionalContext"] as? String)?.contains("evil.example") == true)
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: notes.path))?.isEmpty == true)   // claimed
     }
 }

@@ -4784,7 +4784,9 @@ public final class ProfileStore {
             hooks["UserPromptSubmit"] = hookCmd("working") + hookCmd("policy") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
-            hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
+            // Stop drains them too: a note written after the blocked tool's
+            // PostToolUse ran would otherwise wait for the next message.
+            hooks["Stop"] = hookCmd("policy") + hookCmd("done") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
             // not Stop: without it the tab sat "working" forever. A refused
@@ -4865,7 +4867,7 @@ public final class ProfileStore {
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
             # Either way the pane resolves this tab's window index — reported in
             # the filename so each tab's dot is independent.
-            # `policy` (Claude's PostToolUse / UserPromptSubmit): hand the model
+            # `policy` (Claude's PostToolUse / UserPromptSubmit / Stop): hand the model
             # the notes the host left for this tab when the workspace's policy
             # blocked something it did (PolicySteering), as the hook's
             # additionalContext. Each note is claimed by rename, so two hooks
@@ -4895,7 +4897,12 @@ public final class ProfileStore {
                         notes.append(h.read().strip())
                 finally:
                     os.unlink(mine)
-            if notes:
+            if notes and event == "Stop":
+                # The turn ended on the blocked action, before the note was
+                # written: keep the turn going with the note, rather than
+                # holding it until the next message.
+                print(json.dumps({"decision": "block", "reason": "\n".join(notes)}))
+            elif notes:
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
                                                          "additionalContext": "\n".join(notes)}}))
             ' "$@"

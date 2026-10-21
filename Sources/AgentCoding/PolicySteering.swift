@@ -27,7 +27,10 @@ public final class PolicySteering: @unchecked Sendable {
     /// Hand one note to the agent in `window`; nil = every agent in the
     /// workspace, or only a sole agent when `soleOnly` (a denial that can't be
     /// pinned on anyone and is too common to tell everyone about).
-    var deliver: @Sendable (_ profileID: UUID, _ window: Int?, _ text: String, _ soleOnly: Bool) -> Void = { _, _, _, _ in }
+    /// `done(false)` = nothing reached any tab (no agent, a failed write):
+    /// the note isn't counted as told, so a repeat of the block tells it.
+    var deliver: @Sendable (_ profileID: UUID, _ window: Int?, _ text: String, _ soleOnly: Bool,
+                            _ done: @escaping @Sendable (Bool) -> Void) -> Void = { _, _, _, _, done in done(true) }
     var now: @Sendable () -> Date = { Date() }
 
     /// How long a connection-level denial waits for the process that opened
@@ -348,6 +351,13 @@ public final class PolicySteering: @unchecked Sendable {
         recent[burstKey] = lastMinute + [t]
         sent[key] = t
         lock.unlock()
-        deliver(profileID, window, text, soleOnly)
+        deliver(profileID, window, text, soleOnly) { [weak self] delivered in
+            guard !delivered, let self else { return }
+            // Not told after all: forget it, so the next try tells it.
+            self.lock.lock()
+            if self.sent[key] == t { self.sent[key] = nil }
+            if var r = self.recent[burstKey], let i = r.lastIndex(of: t) { r.remove(at: i); self.recent[burstKey] = r }
+            self.lock.unlock()
+        }
     }
 }

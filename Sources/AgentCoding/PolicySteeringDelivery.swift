@@ -15,17 +15,20 @@ extension ACAppDelegate {
         steering.enabledProvider = { modes.tellsAgentOnDeny($0) }
         steering.openShellProvider = { [weak engine] in engine?.guardrailsConfig(for: $0)?.egressPolicy?.openShell }
         steering.advisorOnProvider = { modes.mode(for: $0) != .off }
-        steering.deliver = { [weak self] pid, window, text, soleOnly in
+        steering.deliver = { [weak self] pid, window, text, soleOnly, done in
             Task { @MainActor in
-                self?.deliverPolicyNote(profileID: pid, window: window, text: text, soleOnly: soleOnly)
+                guard let self else { done(false); return }
+                done(await self.deliverPolicyNote(profileID: pid, window: window, text: text, soleOnly: soleOnly))
             }
         }
     }
 
-    @MainActor
-    func deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) {
+    /// True once the note reached a tab: a Claude note file is in place (its
+    /// hook reads it), or a typed note is queued.
+    @MainActor @discardableResult
+    func deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) async -> Bool {
         // This Mac's VMs only (an attached Sidecar runs its own policy).
-        guard runningSessions[profileID] != nil else { return }
+        guard runningSessions[profileID] != nil else { return false }
         let live = agentSessionStore.sessions.filter {
             $0.profileID == profileID && $0.windowIndex != nil && !$0.isDeleted && !$0.isArchived
                 && !$0.hasEnded && $0.agentAlive != false
@@ -43,29 +46,43 @@ extension ACAppDelegate {
             where !targets.contains(where: { $0.window == w }) {
                 targets.append((w, .claude))
             }
-            if soleOnly && targets.count != 1 { return }
+            if soleOnly && targets.count != 1 { return false }
         }
         PolicySteering.log("deliver to \(targets.isEmpty ? "no agent tab" : targets.map { "w\($0.window) (\($0.tool.rawValue))" }.joined(separator: ", "))")
-        for t in targets {
-            if t.tool == .claude {
-                writePolicyNote(profileID: profileID, window: t.window, text: text)
-            } else {
-                queueTypedPolicyNote(profileID: profileID, window: t.window, text: text)
+        var delivered = false
+        // Claude's notes first, written in parallel and awaited: the sooner
+        // the file is in place, the likelier the blocked tool's own
+        // PostToolUse hook reads it (else its Stop hook does).
+        await withTaskGroup(of: Bool.self) { group in
+            for t in targets where t.tool == .claude {
+                group.addTask { @MainActor in await self.writePolicyNote(profileID: profileID, window: t.window, text: text) }
             }
+            for await ok in group where ok { delivered = true }
         }
+        for t in targets where t.tool != .claude {
+            queueTypedPolicyNote(profileID: profileID, window: t.window, text: text)
+            delivered = true
+        }
+        return delivered
     }
 
     /// One file per note, moved into place whole, so the hook never reads
     /// half of one; owned by the agent's user so it can claim them.
     @MainActor
-    private func writePolicyNote(profileID: UUID, window: Int, text: String) {
+    private func writePolicyNote(profileID: UUID, window: Int, text: String) async -> Bool {
         let d = Self.policyNotesDir
         let cmd = """
         d=\(d); mkdir -p "$d" && chown ubuntu:ubuntu "$d" 2>/dev/null; chmod 700 "$d"; \
         t="$d/.w\(window).$$"; printf '%s\\n' \(CodingTaskEngine.shellQuote(text)) > "$t" \
         && chown ubuntu:ubuntu "$t" 2>/dev/null; mv -f "$t" "$d/w\(window)-$(date +%s%N).note"
         """
-        Task { _ = try? await guestExec(profileID: profileID, command: cmd, timeout: 10) }
+        do {
+            _ = try await guestExec(profileID: profileID, command: cmd, timeout: 10)   // throws on failure
+            return true
+        } catch {
+            PolicySteering.log("note for w\(window) not written: \(error)")
+            return false
+        }
     }
 
     /// Notes owed to non-Claude tabs, typed once the tab's agent is idle.

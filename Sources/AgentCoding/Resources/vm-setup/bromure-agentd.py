@@ -6485,7 +6485,9 @@ def _seed_claude_settings():
                                  + _keep_others("UserPromptSubmit"))
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
     hooks["PostToolUse"] = _hook_cmd("policy") + _keep_others("PostToolUse")
-    hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
+    # Stop drains the notes too: one written after the blocked tool's
+    # PostToolUse ran would otherwise wait for the next message.
+    hooks["Stop"] = _hook_cmd("policy") + _hook_cmd("done") + _keep_others("Stop")
     hooks["Notification"] = _hook_cmd("needsInput") + _keep_others("Notification")
     # A refused turn fires StopFailure, not Stop (host Profile.swift twin).
     hooks["StopFailure"] = _hook_cmd("needsInput") + _keep_others("StopFailure")
