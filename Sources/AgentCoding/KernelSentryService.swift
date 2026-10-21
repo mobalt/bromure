@@ -726,10 +726,12 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             // kernel without a matching build, say) is a failure to report,
             // not an attack: only an unexplained absence is tampering, and
             // only when the sentry is required.
-            let guest = GuestSandboxStatusStore.shared.status(for: profileID)
-            if guest?.sentry == "unavailable" {
+            // From the latest report, even one sent before the sandbox
+            // published (a required sentry's inline load ends first).
+            let store = GuestSandboxStatusStore.shared
+            if store.sentryState(for: profileID) == "unavailable" {
                 alarm("sentry_unavailable",
-                      "the kernel sentry couldn't start" + (guest?.sentryReason.map { ": \($0)" } ?? ""),
+                      "the kernel sentry couldn't start" + (store.sentryReason(for: profileID).map { ": \($0)" } ?? ""),
                       weight: 0)
             } else {
                 alarm(requirement == .hard ? "tampering" : "sentry_unavailable",

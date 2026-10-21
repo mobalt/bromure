@@ -380,10 +380,15 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     /// the sandbox was still `pending` (and so not recorded as a Status): a
     /// required sentry is loaded before the supervisor publishes, and its
     /// `waiting` must still be seen.
-    private var sentryStates: [UUID: String] = [:]
+    private var sentryStates: [UUID: (state: String, reason: String?)] = [:]
     public func sentryState(for profileID: UUID) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return statuses[profileID]?.sentry ?? sentryStates[profileID]
+        return statuses[profileID]?.sentry ?? sentryStates[profileID]?.state
+    }
+    /// Why the sentry is unavailable, from the same latest report.
+    public func sentryReason(for profileID: UUID) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return statuses[profileID]?.sentryReason ?? sentryStates[profileID]?.reason
     }
 
     public func reset(profileID: UUID) {
@@ -397,7 +402,9 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         // host to fetch its module.
         let kernels = [r["sentry_kernel"] as? String].compactMap { $0 } + (r["installed_kernels"] as? [String] ?? [])
         if !kernels.isEmpty { onKernels?(profileID, kernels, r["sentry"] as? String == "waiting") }
-        if let sentry = r["sentry"] as? String { lock.lock(); sentryStates[profileID] = sentry; lock.unlock() }
+        if let sentry = r["sentry"] as? String {
+            lock.lock(); sentryStates[profileID] = (sentry, r["sentry_reason"] as? String); lock.unlock()
+        }
         // The guest hasn't assembled its sandbox yet: nothing to record, and
         // nothing to cross-check (an early "off" would read as an impostor).
         if r["filesystem"] as? String == "pending" { return }

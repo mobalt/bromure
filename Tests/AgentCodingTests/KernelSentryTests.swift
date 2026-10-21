@@ -307,6 +307,17 @@ struct KernelSentryTests {
         let tap2 = Tap(); b2.tap = { tap2.add($0, $1) }
         b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 1), running: true)
         #expect(tap2.alarms("tampering").isEmpty)
+        // The load then fails, still before the supervisor publishes: a
+        // failure to report with its reason, not tampering.
+        GuestSandboxStatusStore.shared.update(profileID: id2, report: [
+            "event": "sandbox_status", "filesystem": "pending", "sentry": "unavailable",
+            "sentry_reason": "no module for 6.8.0-150-generic",
+        ])
+        b2.checkLiveness(now: Date().addingTimeInterval(KernelSentryService.bootBudget + 900), running: true)
+        #expect(tap2.alarms("tampering").isEmpty)
+        let u = tap2.alarms("sentry_unavailable").first
+        #expect(u.flatMap { KernelSentryTests.I($0["weight"]) } == 0)
+        #expect(u.flatMap { KernelSentryTests.S($0["reason"]) }?.contains("6.8.0-150-generic") == true)
         #expect(!KernelSentryService.isLoading("running") && !KernelSentryService.isLoading("unavailable"))
     }
 
