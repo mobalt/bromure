@@ -86,6 +86,40 @@ struct NetworkLineageTests {
         #expect(NetworkLineage.matchToolCall(argv: #"bash -c -l eval 'echo '"'"'hi there'"'"' | nc 1.2.3.4 80'"#, calls: q, at: t0 + 1)?.toolUseID == "q")
     }
 
+    /// Finding (CWE-670): "Process lineage walks parents by pid and drops
+    /// start_ns". The walk followed `byPid[ppid]` — the newest process with
+    /// that pid — so once the agent exited and its pid was reused, the flow
+    /// was chained to the newcomer, and the kernel's own chain was skipped.
+    @Test("A reused parent pid isn't the parent: the walk follows the exact (pid, start_ns) the exec recorded")
+    func reusedParentPid() async throws {
+        let sink = LineageSink(), l = store(sink), pid = UUID()
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 100, "comm": "claude", "path": "/usr/bin/node",
+                                    "chain": [["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        l.noteExec(profileID: pid, ["pid": 980, "ppid": 412, "start_ns": 200, "comm": "bash", "path": "/usr/bin/bash",
+                                    "chain": [["pid": 412, "start_ns": 100, "comm": "claude"], ["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        // claude exits; its pid goes to an unrelated program.
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 500, "comm": "cron", "path": "/usr/sbin/cron",
+                                    "chain": [["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        l.noteExec(profileID: pid, ["pid": 981, "ppid": 980, "start_ns": 600, "comm": "curl", "path": "/usr/bin/curl",
+                                    "chain": [["pid": 980, "start_ns": 200, "comm": "bash"], ["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        l.noteFlow(profileID: pid, ["pid": 981, "start_ns": 600, "proto": "tcp", "dst": "1.2.3.4", "dport": 443, "comm": "curl",
+                                    "chain": [["pid": 980, "start_ns": 200, "comm": "bash"], ["pid": 1, "start_ns": 1, "comm": "systemd"]]])
+        await waitFor(sink, 1)
+        let f = try #require(sink.flows.first)
+        #expect(comms(f) == ["systemd", "claude", "bash", "curl"])
+        #expect(!comms(f).contains("cron"))
+
+        // An older sentry (no chain on exec): a pid reused after the child
+        // started isn't taken for its parent either.
+        let sink2 = LineageSink(), l2 = store(sink2)
+        l2.noteExec(profileID: pid, ["pid": 50, "ppid": 1, "start_ns": 10, "comm": "zsh"])
+        l2.noteExec(profileID: pid, ["pid": 60, "ppid": 50, "start_ns": 20, "comm": "wget"])
+        l2.noteExec(profileID: pid, ["pid": 50, "ppid": 1, "start_ns": 30, "comm": "sshd"])
+        l2.noteFlow(profileID: pid, ["pid": 60, "start_ns": 20, "proto": "tcp", "dst": "1.2.3.4", "dport": 80, "comm": "wget"])
+        await waitFor(sink2, 1)
+        #expect(comms(try #require(sink2.flows.first)) == ["wget"])
+    }
+
     @Test("Repeats of one flow from one program fold; the chain comes from the frame when exec was never seen")
     func foldAndFrameChain() async throws {
         let sink = LineageSink(), l = store(sink), pid = UUID()
