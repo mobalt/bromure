@@ -54,6 +54,22 @@ struct CommandLineRedactorTests {
         #expect(r("/usr/bin/curl -U bob:~hunter -x p https://x") == "/usr/bin/curl -U bob:*** -x p https://x")
         #expect(r("bash -c 'curl -sS -u alice:/BAiM0RVZnc= https://x'") == "bash -c 'curl -sS -u alice:*** https://x'")
         #expect(r("wget --user=bob:pw https://x") == "wget --user=bob:*** https://x")
+        // The curl command reaches past quoted or escaped separators and
+        // redirects; only a real command boundary ends it.
+        for (cmd, out) in [
+            ("curl 'https://x?a=1&b=2' -u alice:/s3cret", "curl 'https://x?a=1&b=2' -u alice:***"),
+            (#"curl https://x?a=1\&b=2 -u alice:/s3cret"#, #"curl https://x?a=1\&b=2 -u alice:***"#),
+            ("curl https://x?a=1&b=2 -u alice:/s3cret", "curl https://x?a=1&b=2 -u alice:***"),   // space-joined argv
+            ("curl -d 'a;b' -u alice:/s3cret https://x", "curl -d 'a;b' -u alice:*** https://x"),
+            ("curl -s https://x 2>&1 -u alice:/s3cret", "curl -s https://x 2>&1 -u alice:***"),
+            ("curl &>/tmp/out -u alice:/s3cret https://x", "curl &>/tmp/out -u alice:*** https://x"),
+            ("curl -s \\\n  -u alice:/s3cret https://x", "curl -s \\\n  -u alice:*** https://x"),
+            ("curl -u alice:a 'https://x?a=1&b=2' -u bob:/second", "curl -u alice:*** 'https://x?a=1&b=2' -u bob:***"),
+            ("CURL -u alice:/s3cret", "CURL -u alice:***"),
+            ("curl -u alice:secret && rsync -u host:src/file", "curl -u alice:*** && rsync -u host:src/file"),
+        ] {
+            #expect(r(cmd) == out, "\(cmd)")
+        }
     }
 
     @Test("a net.flow's argv per process and its tool command are scrubbed; other fields aren't touched")

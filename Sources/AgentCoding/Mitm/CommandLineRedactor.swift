@@ -33,16 +33,43 @@ enum CommandLineRedactor {
     /// secrets"): `userFlagIsCurl` checks the command. The long forms are
     /// always userinfo.
     private static let userFlag = re(#"((?:^|\s)(-u|--user|--proxy-user|-U)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
-    /// The command a flag at `location` belongs to is curl: a `curl` word
-    /// since the start of its shell segment (`;`, `&`, `|`, newline, `(`,
-    /// a backtick), so `bash -c 'curl -u a:b'` counts and `rsync -u` doesn't.
+    /// The command a flag at `location` belongs to is curl: a word named
+    /// `curl` (any path, any case) since the start of its shell segment. The
+    /// segment starts after an unquoted, unescaped `;` `&` `|` followed by a
+    /// space (or the end), a newline not escaped, `(` or a backtick — never
+    /// at `2>&1` / `&>`, a quoted `a;b` or a URL's `a=1&b=2` — so
+    /// `bash -c 'curl …'` and `/usr/bin/curl` count and `rsync -u` doesn't.
+    /// Erring toward curl only masks more.
     private static func userFlagIsCurl(_ ns: NSString, before location: Int) -> Bool {
-        let head = ns.substring(to: location)
-        let segment = head.split(omittingEmptySubsequences: false,
-                                 whereSeparator: { ";&|\n(`".contains($0) }).last ?? Substring(head)
-        return segment.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "'" || $0 == "\"" })
-            .contains { ($0.split(separator: "/").last ?? $0) == "curl" }
+        let chars = Array(ns.substring(to: location).unicodeScalars)
+        var start = 0
+        var quote: Unicode.Scalar? = nil
+        var i = 0
+        func spaceOrEnd(_ j: Int) -> Bool { j >= chars.count || chars[j] == " " || chars[j] == "\t" || chars[j] == "\n" }
+        while i < chars.count {
+            let c = chars[i]
+            if let q = quote {
+                if c == q { quote = nil }
+                else if c == "\\", q == "\"" { i += 1 }
+            } else if c == "\\" {
+                i += 1                                   // escaped: `\&`, a backslash-newline
+            } else if c == "'" || c == "\"" {
+                quote = c
+            } else if c == "\n" || c == "(" || c == "`" {
+                start = i + 1
+            } else if c == ";" || c == "|" || c == "&" {
+                let redirect = c == "&" && ((i > 0 && chars[i - 1] == ">") || (i + 1 < chars.count && chars[i + 1] == ">"))
+                if !redirect, spaceOrEnd(i + 1) || (i + 1 < chars.count && (chars[i + 1] == "&" || chars[i + 1] == "|")) {
+                    start = i + 1
+                }
+            }
+            i += 1
+        }
+        let segment = String(String.UnicodeScalarView(chars[min(start, chars.count)...]))
+        return segment.split(whereSeparator: { " \t\n'\"()`".contains($0) })
+            .contains { ($0.split(separator: "/").last ?? $0).lowercased() == "curl" }
     }
+
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
