@@ -36,6 +36,30 @@ struct SecurityWindowQoLTests {
         #expect(block("Firewall", "evil.example:443 tcp", ws: ws, at: 3).searchKey == "evil.example:443 tcp")
     }
 
+    /// Finding (CWE-670): "Clicking a Security Overview block searches by an
+    /// unanchored substring". The row opened the Timeline with its key in the
+    /// search box, which kept any blocked row *containing* it: clone matched
+    /// clone3, example.com matched notexample.com.
+    @Test("A block is opened as itself: same engine and whole key, never a substring of another")
+    func blockOpensExactly() {
+        let ws = UUID()
+        func key(_ engine: String, _ condition: String) -> String {
+            SecurityOverview.blockKey(block(engine, condition, ws: ws, at: 0))
+        }
+        // Distinct blocks whose keys contain one another.
+        #expect(key("Firewall", "example.com:443 tcp") != key("Firewall", "notexample.com:443 tcp"))
+        #expect(key("Firewall", "github.com:443 tcp") != key("Firewall", "api.github.com:443 tcp"))
+        #expect(key("Guest sandbox", "a (pid 1) — syscall clone") != key("Guest sandbox", "a (pid 1) — syscall clone3"))
+        #expect(key("Guest sandbox", "ls (pid 2) — exec /bin/ls") != key("Guest sandbox", "ls (pid 2) — exec /bin/lsblk"))
+        // The same block across pids and repeat counts, and pinned to its engine.
+        #expect(key("Guest sandbox", "a (pid 1) — syscall clone") == key("Guest sandbox", "b (pid 9) — syscall clone ×4"))
+        #expect(key("Firewall", "evil.example:443 tcp") != key("PII protection", "evil.example:443 tcp"))
+        // What the row opens with: the block's own key, its search text shown.
+        let e = block("Guest sandbox", "a (pid 1) — syscall clone", ws: ws, at: 0)
+        let f = SecurityTimelineFilter(outcome: .blocked, query: e.searchKey, block: SecurityOverview.blockKey(e))
+        #expect(f.block == SecurityOverview.blockKey(e) && f.query == "syscall clone")
+    }
+
     @Test("History settings: unset means 90 days and 24 hours; 0 keeps everything")
     func settings() {
         let d = UserDefaults.standard

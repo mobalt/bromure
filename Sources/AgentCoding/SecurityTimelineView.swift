@@ -59,6 +59,10 @@ struct SecurityTimelineFilter {
     var outcome: SecurityTimeline.Decision? = nil
     var workspace: UUID? = nil
     var query = ""
+    /// One block, exactly (`SecurityOverview.blockKey`): what a Latest
+    /// blocks row opens. The search box shows its key; editing the search
+    /// drops back to an ordinary search.
+    var block: String? = nil
 }
 
 extension SecurityTimeline.Event {
@@ -111,6 +115,9 @@ struct SecurityTimelineView: View {
     @State private var rangeHours = SecurityTimeline.defaultRangeHours
     /// The Overview's Blocked / Allowed tiles narrow by outcome.
     @State private var outcomeFilter: SecurityTimeline.Decision?
+    /// Latest blocks' row: this block only, matched whole (not a substring
+    /// of every column), while the search box still shows its key.
+    @State private var blockFilter: (key: String, query: String)?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
     /// Selected rows (the context menu acts on the clicked one).
@@ -143,6 +150,7 @@ struct SecurityTimelineView: View {
         workspaceFilter = f.workspace
         machineFilter = nil
         query = f.query
+        blockFilter = f.block.map { ($0, f.query) }
         tab = .timeline
     }
 
@@ -156,7 +164,9 @@ struct SecurityTimelineView: View {
         if let machineFilter { e = e.filter { ($0.machine ?? "") == machineFilter } }
         if let engineFilter { e = e.filter { $0.engine == engineFilter } }
         if let outcomeFilter { e = e.filter { $0.kind == outcomeFilter } }
-        if !query.isEmpty {
+        if let blockFilter, blockFilter.query == query {
+            e = e.filter { SecurityOverview.blockKey($0) == blockFilter.key }
+        } else if !query.isEmpty {
             let q = query.lowercased()
             e = e.filter {
                 $0.engine.lowercased().contains(q)
@@ -748,11 +758,16 @@ struct SecurityOverview: View {
         var workspaces: Set<UUID>
     }
 
+    /// What makes two blocked rows the same block: their engine and the
+    /// condition without what changes each time. Grouped by it, and matched
+    /// by it — whole — when a row is opened in the Timeline.
+    static func blockKey(_ e: SecurityTimeline.Event) -> String { e.engine + "|" + e.searchKey }
+
     static func blockGroups(_ events: [SecurityTimeline.Event], limit: Int = 8) -> [BlockGroup] {
         var groups: [String: BlockGroup] = [:]
         var order: [String] = []
         for e in events where e.kind == .blocked {
-            let key = e.engine + "|" + e.searchKey
+            let key = blockKey(e)
             let n = max(1, e.repeats ?? 1)
             if var g = groups[key] {
                 g.count += n
@@ -840,7 +855,7 @@ struct SecurityOverview: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         VStack(spacing: 6) {
-                            ForEach(groups) { g in BlockRow(group: g) { showTimeline(.init(outcome: .blocked, query: g.latest.searchKey)) } }
+                            ForEach(groups) { g in BlockRow(group: g) { showTimeline(.init(outcome: .blocked, query: g.latest.searchKey, block: Self.blockKey(g.latest))) } }
                         }
                     }
                 }
