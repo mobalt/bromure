@@ -117,7 +117,7 @@ public final class PolicySteering: @unchecked Sendable {
         if case .int(let p)? = d["port"] { port = p }
         if eventType == "guardrails.block" {
             let what = "\(Self.methodWord(s("method")) ?? "a request to") \(Self.quoted((s("host") ?? "?") + (s("path").map(Self.shortPath) ?? "")))"
-            let text = Self.message(what: what, why: s("reason") ?? "a workspace guardrail", kind: "guardrails",
+            let text = Self.message(what: what, why: s("reason").map { Self.quoted($0, max: 200) } ?? "a workspace guardrail", kind: "guardrails",
                                     advisor: false)
             send(profileID, nil, "guard|\(s("host") ?? "")|\(s("reason") ?? "")", text, soleOnly: false)
             return
@@ -252,7 +252,10 @@ public final class PolicySteering: @unchecked Sendable {
         if let rule, let r = os?.networkPolicies.first(where: { $0.key == rule }) {
             named = r.name == r.key ? "rule `\(r.key)`" : "rule `\(r.key)` (\(r.name))"
         }
-        if let reason { return named.map { "\($0): \(reason)" } ?? reason }
+        // An engine's reason restates the request (method, path, host, a
+        // JSON-RPC or GraphQL name): data, like the what — only the policy's
+        // own rule name stays plain.
+        if let reason { return named.map { "\($0): \(Self.quoted(reason, max: 200))" } ?? Self.quoted(reason, max: 200) }
         if let os, port > 0, port <= 65_535 {
             let addr = ip.flatMap { EgressPolicy.parseIPv4Address($0) }
             if case .deny(let r) = os.evaluateConnect(hostnames: host.map { [$0] } ?? [], ip: addr,
@@ -262,7 +265,7 @@ public final class PolicySteering: @unchecked Sendable {
                 if let host, r.hasPrefix("no network policy allows ") {
                     return "no network policy allows \(Self.quoted("\(host):\(port)"))"
                 }
-                return r
+                return Self.quoted(r, max: 200)
             }
         }
         if let rule { return "firewall rule `\(rule)`" }
