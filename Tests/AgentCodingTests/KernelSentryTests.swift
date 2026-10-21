@@ -525,4 +525,19 @@ struct GuestSandboxAttentionTests {
                               "requested": ["filesystem": true]])).filesystemNotYetApplied)
         #expect(!(try status(["filesystem": "enforced", "requested": ["filesystem": true]])).filesystemNotYetApplied)
     }
+
+    @Test("the timeline names an off sandbox for what it is: failed, not applied yet, or no policy")
+    func timelineOff() throws {
+        func row(_ d: [String: AnyJSON]) throws -> SecurityTimeline.Event {
+            try #require(SecurityTimeline.map(profileID: UUID(), eventType: "sandbox.status", eventData: d, now: Date()))
+        }
+        let runAs = try row(["filesystem": .string("off"), "reason": .string("cannot resolve run_as identity: no such user")])
+        #expect(runAs.kind == .blocked && runAs.decision.contains("run_as"))
+        let held = try row(["filesystem": .string("off"), "requested_filesystem": .bool(true)])
+        #expect(held.kind == .info && held.decision == "not applied yet")
+        for reason in ["filesystem_policy not configured", "no paths configured"] {
+            let none = try row(["filesystem": .string("off"), "reason": .string(reason)])
+            #expect(none.kind == .info && none.decision == "no filesystem policy", "\(reason)")
+        }
+    }
 }

@@ -513,6 +513,7 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
                               : st.filesystem == "off" ? "off" : "enforced"),
         ]
         if let v = st.degradedReason { data["reason"] = .string(v) }
+        if let v = st.filesystemRequested { data["requested_filesystem"] = .bool(v) }
         if let v = st.landlockABI { data["landlock_abi"] = .int(v) }
         if let v = st.seccomp { data["seccomp"] = .string(v) }
         if let v = st.runAsUser { data["run_as"] = .string(v) }
