@@ -308,4 +308,25 @@ struct OpenShellAdvisorTests {
         #expect(applied.n == 1)
         #expect(a.proposal(id: id, profileID: pid)?.status == .approved)
     }
+
+    @Test("A draft being approved isn't superseded mid-apply: its rule is saved, so it ends approved")
+    func notSupersededMidApply() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        a.applyApproved = { _, p in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            do { box.policy = try OpenShellPolicy.insertingRules(p.yaml, into: box.policy); return nil }
+            catch { return "\(error)" }
+        }
+        a.recordDenial(profileID: pid, layer: "sni", host: "pypi.org", port: 443, method: nil, path: nil, reason: "no rule")
+        let draft = try #require(a.pending(for: pid).first)
+        #expect(draft.source == "mechanistic")
+        async let approving: Void = a.approve(id: draft.id, profileID: pid)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        // While it applies: an agent's proposal for the same endpoint, and a reject.
+        _ = a.submit(profileID: pid, body: proposal("pypi_read", host: "pypi.org"))
+        a.reject(id: draft.id, profileID: pid, reason: "no")
+        await approving
+        #expect(a.proposal(id: draft.id, profileID: pid)?.status == .approved)
+        #expect(a.proposal(id: draft.id, profileID: pid)?.rejectionReason == nil)
+    }
 }

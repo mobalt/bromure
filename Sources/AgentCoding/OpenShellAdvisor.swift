@@ -208,7 +208,10 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         lock.lock()
         for i in (proposals[profileID] ?? []).indices {
             let p = proposals[profileID]![i]
-            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port {
+            // Not one an approval is applying: it ends approved, not
+            // rejected while its rule is being saved.
+            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port,
+               !applyingProposals.contains("\(profileID)|\(p.id)") {
                 proposals[profileID]![i].status = .rejected
                 proposals[profileID]![i].rejectionReason = "allowed by hand"
             }
@@ -257,6 +260,7 @@ public final class OpenShellAdvisor: @unchecked Sendable {
             for i in (proposals[profileID] ?? []).indices {
                 let p = proposals[profileID]![i]
                 if p.source == "mechanistic", p.status == .pending,
+                   !applyingProposals.contains("\(profileID)|\(p.id)"),     // being approved: it stands
                    rule.endpoints.contains(where: { $0.host == p.host && $0.ports.contains(p.port) }) {
                     proposals[profileID]![i].status = .rejected
                     proposals[profileID]![i].rejectionReason = "superseded by an agent-authored proposal"
@@ -353,14 +357,18 @@ public final class OpenShellAdvisor: @unchecked Sendable {
 
     public func reject(id: String, profileID: UUID, reason: String) {
         lock.lock()
+        var updated: Proposal?
         if !applyingProposals.contains("\(profileID)|\(id)"),
            let i = proposals[profileID]?.firstIndex(where: { $0.id == id && $0.status == .pending }) {
             proposals[profileID]![i].status = .rejected
             proposals[profileID]![i].rejectionReason = reason.isEmpty ? nil : reason
+            updated = proposals[profileID]![i]
         }
-        let updated = proposals[profileID]?.first { $0.id == id }
         lock.unlock()
-        if let updated { emit(updated, status: "rejected") }
+        // Only a reject that took: one ignored (being applied, or already
+        // settled) says nothing.
+        guard let updated else { return }
+        emit(updated, status: "rejected")
         notify()
     }
 
