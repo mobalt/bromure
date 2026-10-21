@@ -29,9 +29,10 @@ enum CommandLineRedactor {
     /// and `-u` / `-U` closing a cluster of short flags (`-su user:pw`,
     /// `-fsSLu user:pw`, `-sLuuser:pw`: Finding CWE-532, "A curl -u password
     /// clustered with other short flags is stored and uploaded"). Case-
-    /// insensitive, so `[a-z]*u` is -u and -U alike.
+    /// insensitive, so `[a-z0-9#]*u` is -u and -U alike; curl's -0 -4 -6 -#
+    /// cluster too (`-4u user:pw`).
     /// (`mysql -pSECRET` is left alone: `-p` is a port or `mkdir -p` elsewhere).
-    private static let userFlag = re(#"((?:^|\s)(?:-[a-z]*u|--user|--proxy-user)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
+    private static let userFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*u|--user|--proxy-user)(?:\s+|=)?['"]?[^\s:'"]*):[^\s'"]+"#)
     /// `Authorization: Bearer x`, `X-Api-Key: x`, `Cookie: …`, `*-Token: x`
     private static let header = re(
         #"((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|cookie|x-[a-z0-9-]*-token)(\s*:\s*)((?:bearer|basic|token|digest)\s+)?[^\s'"]+"#)
