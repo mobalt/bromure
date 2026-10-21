@@ -41,7 +41,7 @@ Supply-chain layers are individual on/off toggles, each with a fixed action — 
 | **Allowed** | The response passes through untouched. | Green **checked** / **downloaded** row in the Security Timeline. |
 | **Rewritten** | The proxy modified the response: too-fresh versions removed from metadata, or install scripts stripped from a tarball. The package manager proceeds normally. | `X-Bromure-Rewritten: supply-chain` response header; blue row in the Timeline. |
 | **Blocked** | The download is refused with an HTTP [451](18-glossary.mdx) ("Unavailable For Legal Reasons") response. | `X-Bromure-Block: supply-chain` header; red row in the Timeline. |
-| **Held for consent** | The download pauses while Bromure asks you — for lockfile-pinned pass-throughs and for packages no enabled reputation source could vet. Denying converts the hold into a 451 block. | A system consent alert; the decision is logged. |
+| **Held for consent** | The download pauses while Bromure asks you — for lockfile-pinned pass-throughs, for packages no enabled reputation source could vet, and for packages OSV or socket.dev flagged (see [Trusting a blocked package](#trusting-a-blocked-package)). Denying converts the hold into a 451 block. | A system consent alert; the decision is logged. |
 
 A 451 block carries a plaintext body that begins with `Bromure Supply-Chain Security blocked this request:` followed by the exact reason, for example:
 
@@ -167,6 +167,21 @@ If you want a say, enable **Prompt before passing lockfile-pinned tarballs throu
 
 > **Note:** Despite the UI label mentioning `pip --require-hashes`, detection is currently implemented only for npm's `npm-command: ci` header — pip hash-pinned installs do not trigger the prompt. (They are also never rewritten, since PyPI artifacts are never modified.)
 
+## Trusting a blocked package
+
+A reputation verdict is not always right for you: socket.dev flags `workerd` for its install script, yet it is Cloudflare's runtime, which your project may need. Rather than a silent 451, an OSV or socket.dev block on a package download holds it and asks: **Install … from workspace "…" despite its supply-chain warning?**, quoting the reason. The choices are:
+
+| Choice | Effect |
+|---|---|
+| **Allow … for this session** | Installs it, and any other version of that package, until the app quits. |
+| **Always allow … in this workspace** | Installs it, and adds it to the workspace's **Trusted packages** list, so later downloads skip the OSV and socket.dev checks for it — for as long as it stays on the list. |
+| **Don't allow …, and don't ask again this session** | Keeps the 451; the same install stays blocked without asking again until the app quits. |
+| **Not now** | Keeps the 451 for now; asked again after a minute. No answer means this. |
+
+A socket.dev **malware** verdict (malware, known malware, GPT-detected malware, troll package, compromised SSH key) is never offered for override and is never covered by the list: those downloads are always blocked. The age gate keeps its own **Exempt packages** list, and install-script stripping its **Allow install scripts for** list — trusting a package here does not exempt it from either.
+
+You can also add a package after the fact: a blocked row in the [Security Timeline](11a-security-timeline.mdx) offers **Allow…** → **Always Allow … in This Workspace**, and the list itself is in the **Supply Chain** pane under **Trusted packages** (format `npm:workerd`). Changes apply to a running machine at once.
+
 ## Consent prompts and grants
 
 All supply-chain ask-the-user paths — the lockfile pass-through and the unverified-package hold described below — go through a shared consent broker with burst coalescing: concurrent requests for the same scope wait on a single dialog instead of stacking alerts. The lockfile pass-through offers these four decisions (the unverified-package hold has its own, per package — see [Offline and degraded behavior](#offline-and-degraded-behavior)):
@@ -219,7 +234,8 @@ Each row names the package in its **Condition** column (`npm · axios@1.7.9`) an
 | **downloaded** | Green | A package artifact was fetched and passed. |
 | **checked — versions newer than the cooldown hidden** | Blue | The age gate rewrote a version listing. This is the gate doing its normal job, not a block. |
 | **install scripts stripped** | Blue | Install hooks were removed from an npm tarball. |
-| **blocked — …** | Red | The fetch was refused with a 451; the reason follows the dash (for example **blocked — known malware**). |
+| **blocked — …** | Red | The fetch was refused with a 451; the reason follows the dash (for example **blocked — known malware**). A block you may override has an **Allow…** button at the end of the row. |
+| **downloaded — allowed by you despite: …** | Blue | A package OSV or socket.dev flagged, installed because you allowed it (the prompt, or **Trusted packages**). |
 
 Package fetches are **always** recorded, whether or not any supply-chain layer is on — enforcement follows the policy, recording does not. `apt` installs are recorded too: every `.deb` fetched from an Ubuntu or Debian archive pool appears as an `apt` row. They are observed only; none of the checks in this chapter apply to them.
 

@@ -220,6 +220,9 @@ struct SecurityTimelineView: View {
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallRulesChanged)) { _ in
             rulesGeneration &+= 1
         }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureSupplyChainAllowlistChanged)) { _ in
+            rulesGeneration &+= 1
+        }
         .onDisappear(perform: onClose)
     }
 
@@ -455,7 +458,11 @@ struct SecurityTimelineView: View {
             // Firewall rows: allow a block / block an allow / switch the
             // deciding rule off — applied live to the running workspace.
             TableColumn("") { e in
-                FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
+                if e.package != nil {
+                    SupplyChainRowActionButton(event: e, generation: rulesGeneration)
+                } else {
+                    FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
+                }
             }
             .width(min: 64, ideal: 80, max: 110)
         }
@@ -465,6 +472,9 @@ struct SecurityTimelineView: View {
             }
             if let e = event(ids), e.firewall != nil {
                 FirewallRowMenuItems(event: e, rulesGeneration: rulesGeneration)
+            }
+            if let e = event(ids), let ctx = SupplyChainRowContext(e), !ctx.isRemote, ctx.profile != nil, !ctx.allowedNow {
+                Button(ctx.allowTitle) { ctx.allow(); rulesGeneration &+= 1 }
             }
         } primaryAction: { ids in
             // Double-click (or Return): open a flow's lineage.
@@ -731,6 +741,73 @@ private struct FirewallRowActionButton: View {
                                           comment: "security timeline: firewall quick action help")
                       : NSLocalizedString("Switch off the rule that allowed this, or block the destination — applies at once",
                                           comment: "security timeline: firewall quick action help"))
+            }
+        }
+    }
+}
+
+/// A blocked package's row, and what its quick action can do: add it to
+/// the workspace's reputation allowlist (GitHub issue #54).
+@MainActor
+struct SupplyChainRowContext {
+    let event: SecurityTimeline.Event
+    let package: SecurityTimeline.PackageRef
+    /// nil: a mirrored (remote) host's row, or a workspace that's gone.
+    let profile: Profile?
+
+    init?(_ e: SecurityTimeline.Event, profiles: [Profile]? = nil) {
+        guard let pk = e.package else { return nil }
+        event = e
+        package = pk
+        let all = profiles ?? (NSApp.delegate as? ACAppDelegate)?.profiles ?? []
+        profile = e.machine == nil ? all.first(where: { $0.id == e.profileID }) : nil
+    }
+
+    var isRemote: Bool { event.machine != nil }
+
+    /// On the workspace's list already (allowed since this row).
+    var allowedNow: Bool {
+        profile?.supplyChain.reputationAllows(ecosystem: package.ecosystem, name: package.name) ?? false
+    }
+
+    var allowTitle: String {
+        String(format: NSLocalizedString("Always Allow %@ in This Workspace",
+                                         comment: "security timeline: supply-chain row action; %@ = package"), package.name)
+    }
+
+    func allow() {
+        guard let profile else { return }
+        (NSApp.delegate as? ACAppDelegate)?.allowSupplyChainPackage(package.allowlistEntry, profileID: profile.id)
+    }
+}
+
+/// The inline quick action on a blocked package's row.
+@MainActor
+private struct SupplyChainRowActionButton: View {
+    let event: SecurityTimeline.Event
+    /// Bumped when an allowlist changes: re-evaluates "Allowed now".
+    var generation = 0
+
+    var body: some View {
+        if let ctx = SupplyChainRowContext(event) {
+            if ctx.allowedNow {
+                Text(NSLocalizedString("Allowed now", comment: "security timeline: package row whose package is allowlisted since"))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if ctx.isRemote {
+                Text(NSLocalizedString("Allow…", comment: "security timeline: supply-chain quick action button"))
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .help(NSLocalizedString("Change this workspace's trusted packages in its settings on the Mac that runs it.",
+                                            comment: "security timeline: supply-chain quick action, remote row"))
+            } else if ctx.profile != nil {
+                Menu {
+                    Button(ctx.allowTitle) { ctx.allow() }
+                } label: {
+                    Text(NSLocalizedString("Allow…", comment: "security timeline: supply-chain quick action button")).font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(NSLocalizedString("Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it",
+                                        comment: "security timeline: supply-chain quick action help"))
             }
         }
     }

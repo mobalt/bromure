@@ -76,6 +76,22 @@ public final class SecurityTimeline {
         /// A connection-level firewall verdict, structured — what the row's
         /// quick actions (allow / block / switch the rule off) work from.
         public var firewall: Firewall? = nil
+        /// A package a reputation check blocked that the user may let
+        /// through: what the row's "Always allow" action adds.
+        public var package: PackageRef? = nil
+    }
+
+    /// `ecosystem:name`, as the supply-chain allowlists write it.
+    public struct PackageRef: Sendable, Equatable {
+        public let ecosystem: String
+        public let name: String
+        public var allowlistEntry: String { "\(ecosystem):\(name)" }
+        init(ecosystem: String, name: String) { self.ecosystem = ecosystem; self.name = name }
+        init?(wire: String?) {
+            guard let wire, let i = wire.firstIndex(of: ":"), i != wire.startIndex,
+                  wire.index(after: i) != wire.endIndex else { return nil }
+            ecosystem = String(wire[..<i]); name = String(wire[wire.index(after: i)...])
+        }
     }
 
     /// Event types whose rows keep their raw data (`detail`).
@@ -159,6 +175,7 @@ public final class SecurityTimeline {
                                        count: (old.count ?? 1) + (e.count ?? 1))
                     merged.coalesceKey = key
                     merged.firewall = e.firewall ?? old.firewall
+                    merged.package = e.package ?? old.package
                     merged.eventType = e.eventType ?? old.eventType
                     merged.detail = e.detail ?? old.detail
                     events.remove(at: i)
@@ -300,6 +317,7 @@ public final class SecurityTimeline {
         if let ck = e.coalesceKey { d["ck"] = ck }
         if let dn = e.denials { d["dn"] = dn }
         if let fw = e.firewall { d["fw"] = fw.wire }
+        if let pk = e.package { d["pk"] = pk.allowlistEntry }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -321,6 +339,7 @@ public final class SecurityTimeline {
         e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
         e.denials = d["dn"] as? Int
         e.firewall = Firewall(wire: d["fw"] as? [String: Any])
+        e.package = PackageRef(wire: d["pk"] as? String)
         return e
     }
 
@@ -425,6 +444,7 @@ public final class SecurityTimeline {
             if let ck = e.coalesceKey { r["ck"] = ck }
             if let dn = e.denials { r["dn"] = dn }
             if let fw = e.firewall { r["fw"] = fw.wire }
+            if let pk = e.package { r["pk"] = pk.allowlistEntry }
             return r
         }
     }
@@ -448,6 +468,7 @@ public final class SecurityTimeline {
             e.coalesceKey = r["ck"] as? String
             e.denials = r["dn"] as? Int
             e.firewall = Firewall(wire: r["fw"] as? [String: Any])
+            e.package = PackageRef(wire: r["pk"] as? String)
             return e
         }
     }
@@ -782,11 +803,21 @@ public final class SecurityTimeline {
                 decision = NSLocalizedString("downloaded — install scripts could not be checked",
                                              comment: "Security Timeline decision: npm tarball passed through unread")
                 kind = .blocked
+            case "overridden":
+                // A reputation block the user let through (allowlist or prompt).
+                decision = String(format: NSLocalizedString("downloaded — allowed by you despite: %@",
+                                                            comment: "Security Timeline decision: supply-chain block overridden; %@ = the block's reason"),
+                                  reason ?? "a reputation warning")
+                kind = .info
             default:
                 decision = reason.map { "\(outcome) — \($0)" } ?? outcome
                 kind = .blocked
             }
-            return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
+            var e = row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
+            if outcome == "blocked", case .bool(true)? = d["overridable"], !eco.isEmpty, pkg != "?" {
+                e.package = PackageRef(ecosystem: eco, name: pkg)
+            }
+            return e
 
         case "egress.firewall":
             // The destination as the guest asked for it. The switch names a
