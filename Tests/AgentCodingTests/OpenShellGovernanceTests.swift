@@ -3,7 +3,7 @@ import Testing
 import SandboxEngine
 @testable import bromure_ac
 
-@Suite("OpenShell governance")
+@Suite("OpenShell governance", .serialized)
 struct OpenShellGovernanceTests {
     @Test("openshell-prover JSON maps to boundary results")
     func proverJSON() {
@@ -45,5 +45,45 @@ struct OpenShellGovernanceTests {
         g.setManaged(m)
         #expect(g.effectiveAdvisorMode(.auto) == .review)
         #expect(g.effectiveAdvisorMode(.off) == .off)
+    }
+
+    /// Finding (CWE-693): "Sandbox drawer filesystem Allow bypasses the
+    /// organization boundary". The drawer saved through persistEditedProfile,
+    /// which ran no boundary check; the check now lives in that save path.
+    @Test("A save that adds a filesystem path outside the boundary is refused; unrelated saves aren't")
+    func drawerAllowRespectsBoundary() throws {
+        let saved = UserDefaults.standard.string(forKey: OpenShellGovernance.localBoundaryKey)
+        let savedManaged = UserDefaults.standard.data(forKey: OpenShellGovernance.managedKey)
+        defer {
+            UserDefaults.standard.set(saved, forKey: OpenShellGovernance.localBoundaryKey)
+            UserDefaults.standard.set(savedManaged, forKey: OpenShellGovernance.managedKey)
+        }
+        let g = OpenShellGovernance()
+        g.setManaged(nil)
+        g.setLocalBoundary("""
+            version: 1
+            filesystem_policy:
+              read_only: [/usr]
+              read_write: [/tmp]
+            """)
+        var existing = Profile(name: "b", tool: .claude, authMode: .token)
+        existing.networkPolicy = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n"
+        #expect(g.refusal(saving: existing, editing: nil) == nil)
+
+        // What the drawer's Allow does: splice a path in, then save.
+        var outside = existing
+        outside.networkPolicy = try OpenShellPolicy.addingFilesystemPath("/etc", readWrite: true, to: existing.networkPolicy)
+        let refusal = try #require(g.refusal(saving: outside, editing: existing))
+        #expect(refusal.description.contains("outside the organization boundary"))
+        #expect(refusal.description.contains("/etc"))
+
+        var inside = existing
+        inside.networkPolicy = try OpenShellPolicy.addingFilesystemPath("/tmp", readWrite: true, to: existing.networkPolicy)
+        #expect(g.refusal(saving: inside, editing: existing) == nil)
+
+        // A workspace already outside a newer boundary can still save other edits.
+        var renamed = outside
+        renamed.name = "renamed"
+        #expect(g.refusal(saving: renamed, editing: outside) == nil)
     }
 }

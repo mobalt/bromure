@@ -10826,6 +10826,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     func persistEditedProfile(_ profile: inout Profile, editing: Profile?,
                               generateSSH: Bool, policySource: String = "user") throws {
+        // The organization boundary is a hard gate on every save, whichever
+        // path it came from (the Sandbox drawer's Allow used to skip it).
+        if let refusal = OpenShellGovernance.shared.refusal(saving: profile, editing: editing) {
+            throw refusal
+        }
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
