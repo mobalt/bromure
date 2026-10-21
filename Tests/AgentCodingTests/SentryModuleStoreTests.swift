@@ -317,7 +317,7 @@ struct SentryModuleStoreTests {
         let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         let r = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any], "driver said: \(text)")
         #expect(r["first"] as? Int == 0)
-        #expect(r["verifyStripped"] as? Int == 1)
+        #expect(r["verifyStripped"] as? Int == 3)   // a module signature that doesn't verify: the wrong-key exit
         #expect(r["merge"] as? Int == 0)
         #expect(r["resignedSame"] as? Bool == true)
         #expect(r["verifyMerged"] as? Int == 0)
