@@ -289,11 +289,18 @@ final class WSTraceCollector: @unchecked Sendable {
     /// false: a parser that only fires `onMessage` and keeps nothing (a
     /// socket nobody traces, whose messages are still read — Squelch).
     let retainsMessages: Bool
+    /// How much of a data message `onMessage` gets. The transcript keeps
+    /// `perMessageCap` of each; a reader that must see the whole message
+    /// (Squelch learning a tool call whose arguments run past 1 MB) asks for
+    /// more, up to the inflater's own 32 MB ceiling.
+    let deliverCap: Int
 
-    init(direction: WSMessage.Direction, inflater: WSInflater? = nil, retainsMessages: Bool = true) {
+    init(direction: WSMessage.Direction, inflater: WSInflater? = nil, retainsMessages: Bool = true,
+         deliverCap: Int = WSTraceCollector.perMessageCap) {
         self.direction = direction
         self.inflater = inflater
         self.retainsMessages = retainsMessages
+        self.deliverCap = max(deliverCap, Self.perMessageCap)
     }
 
     /// Feed a chunk of bytes. Internally parses frames, defragments
@@ -342,7 +349,7 @@ final class WSTraceCollector: @unchecked Sendable {
         if pendingKind != nil { flushPending() }
         pendingKind = kind
         pendingCompressed = rsv1 && (inflater != nil)
-        pendingPayload = pendingCompressed ? first : takePreview(first)
+        pendingPayload = pendingCompressed ? first : first.prefix(deliverCap)
         pendingTotal = first.count
     }
 
@@ -358,7 +365,7 @@ final class WSTraceCollector: @unchecked Sendable {
             // Keep the full compressed payload — inflate after FIN.
             pendingPayload.append(payload)
         } else {
-            let remaining = Self.perMessageCap - pendingPayload.count
+            let remaining = deliverCap - pendingPayload.count
             if remaining > 0 {
                 pendingPayload.append(payload.prefix(remaining))
             }
@@ -372,11 +379,16 @@ final class WSTraceCollector: @unchecked Sendable {
         // before truncation/preview — running the preview cap on
         // compressed input mid-block would corrupt it.
         var payload = pendingPayload
+        // The message's real length: the INFLATED one when it was
+        // compressed. (It was the compressed length, so a 1.5 MB event that
+        // deflated to 2 KB came out cut at 1 MB yet "not truncated", and its
+        // tool call was lost to Squelch — finding CWE-670, "Squelch misses a
+        // tool call whose server event the trace preview cut at 1MB".)
+        var total = pendingTotal
         if pendingCompressed, let inflater {
             if let inflated = inflater.inflate(payload) {
-                payload = inflated.count > Self.perMessageCap
-                    ? inflated.prefix(Self.perMessageCap)
-                    : inflated
+                total = inflated.count
+                payload = inflated.count > deliverCap ? inflated.prefix(deliverCap) : inflated
             }
             // On inflate failure: fall through with the still-
             // compressed bytes so the user sees something rather
@@ -384,15 +396,20 @@ final class WSTraceCollector: @unchecked Sendable {
             // in the renderer will fall back to hex.
         }
 
-        let truncated = pendingTotal > payload.count
+        let now = Date()
         let msg = WSMessage(
             direction: direction,
-            timestamp: Date(),
+            timestamp: now,
             kind: kind,
             payload: payload,
-            truncated: truncated,
-            totalBytes: pendingTotal)
-        if retainsMessages { messages.append(msg) }
+            truncated: total > payload.count,
+            totalBytes: total)
+        if retainsMessages {
+            let kept = takePreview(payload)
+            messages.append(kept.count == payload.count ? msg
+                : WSMessage(direction: direction, timestamp: now, kind: kind, payload: kept,
+                            truncated: true, totalBytes: total))
+        }
         onMessage?(msg)
         pendingKind = nil
         pendingPayload = Data()

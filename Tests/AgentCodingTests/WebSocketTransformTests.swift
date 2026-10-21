@@ -318,6 +318,54 @@ struct WebSocketTransformTests {
         guard case .failed = failing("{}") else { Issue.record("failure lost"); return }
     }
 
+    /// Finding (CWE-670): "Squelch misses a tool call whose server event the
+    /// trace preview cut at 1MB". A deflated event's `truncated` compared the
+    /// COMPRESSED length with the 1 MB preview, and Squelch learned from that
+    /// preview: a call whose arguments ran past 1 MB was never registered.
+    @Test("A deflated server event past 1 MB reaches Squelch whole; the trace keeps 1 MB, marked truncated")
+    func bigDeflatedCallLearned() throws {
+        let pid = UUID()
+        let body = String(repeating: "print('hello')\n", count: 100_000)          // ~1.5 MB of arguments
+        let item: [String: Any] = ["type": "function_call", "call_id": "call_big", "name": "exec_command",
+                                   "arguments": try String(decoding: JSONSerialization.data(withJSONObject: ["cmd": body]), as: UTF8.self)]
+        let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "output_index": 0, "item": item])
+        #expect(event.count > WSTraceCollector.perMessageCap)
+        // permessage-deflate: raw DEFLATE, one frame with RSV1 set.
+        let deflated = try (event as NSData).compressed(using: .zlib) as Data
+        #expect(deflated.count < WSTraceCollector.perMessageCap)
+        var wire = Data([0xC1])                                                       // FIN | RSV1 | text
+        if deflated.count < 126 { wire.append(UInt8(deflated.count)) }
+        else if deflated.count < 65536 { wire.append(126); wire.append(UInt8(deflated.count >> 8)); wire.append(UInt8(deflated.count & 0xFF)) }
+        else { wire.append(127); for i in (0..<8).reversed() { wire.append(UInt8((UInt64(deflated.count) >> (8 * UInt64(i))) & 0xFF)) } }
+        wire.append(deflated)
+
+        final class Got: @unchecked Sendable { var msgs: [WSMessage] = [] }
+        // Squelch's reader: the whole message, not cut, and the call learned.
+        let got = Got()
+        let whole = WSTraceCollector(direction: .upstreamToClient, inflater: WSInflater(noContextTakeover: true),
+                                     deliverCap: WSMessageAssembler.maxMessage)
+        whole.onMessage = { msg in
+            got.msgs.append(msg)
+            if msg.kind == .text, !msg.truncated { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        whole.feed(wire)
+        let m = try #require(got.msgs.first)
+        #expect(!m.truncated && m.payload == event && m.totalBytes == event.count)
+        #expect(SquelchCallRegistry.shared.call(pid, "call_big")?.name == "exec_command")
+        // …while the transcript keeps its 1 MB preview, and says it's cut.
+        let kept = try #require(whole.messages.first)
+        #expect(kept.payload.count == WSTraceCollector.perMessageCap && kept.truncated && kept.totalBytes == event.count)
+
+        // A reader at the default cap is told the message was cut (it was
+        // "not truncated" by the compressed length).
+        let preview = Got()
+        let trace = WSTraceCollector(direction: .upstreamToClient, inflater: WSInflater(noContextTakeover: true))
+        trace.onMessage = { preview.msgs.append($0) }
+        trace.feed(wire)
+        let p = try #require(preview.msgs.first)
+        #expect(p.truncated && p.payload.count == WSTraceCollector.perMessageCap && p.totalBytes == event.count)
+    }
+
     @Test("Stand-ins split across delta messages come back whole; full texts restored")
     func restoreIn() {
         let vault = PIIVault(secret: secret)
