@@ -54,6 +54,7 @@ import errno
 import fcntl
 import glob
 import hashlib
+import itertools
 import ipaddress
 import json
 import os
@@ -2864,8 +2865,12 @@ def _sp(s):
 
 # ── atomic outbox publishing ────────────────────────────────────────────────
 def _atomic_publish(tmp_name, final_name, content):
-    """Write content to OUTBOX/tmp_name then mv -f to OUTBOX/final_name."""
-    tmp = os.path.join(OUTBOX, tmp_name)
+    """Write content to a temp file then mv -f to OUTBOX/final_name.
+
+    The temp name is this writer's own: threads publishing at once (two
+    automation runs refused together) shared one, so one could rename the
+    other's half-written file into place."""
+    tmp = os.path.join(OUTBOX, "%s.%d.%d" % (tmp_name, os.getpid(), threading.get_ident()))
     dst = os.path.join(OUTBOX, final_name)
     try:
         with open(tmp, "w") as f:
@@ -2876,8 +2881,19 @@ def _atomic_publish(tmp_name, final_name, content):
         return False
 
 
+# One-shot reports the host reads and deletes get a file each: a shared name
+# kept only the last of two published together, and the host's delete could
+# remove one it never read (Finding CWE-362, "Concurrent guest refusals share
+# one worktree-error file, so one run stays a finished review").
+_ONE_SHOT_SEQ = itertools.count()
+
+
+def _one_shot_name(stem):
+    return "%s-%d-%d-%d.txt" % (stem, time.time_ns(), os.getpid(), next(_ONE_SHOT_SEQ))
+
+
 def docker_err(msg):
-    _atomic_publish(".docker-error.tmp", "docker-error.txt", msg)
+    _atomic_publish(".docker-error.tmp", _one_shot_name("docker-error"), msg)
 
 
 # The automation run a refusal belongs to (set by _automation_run): its slug
@@ -2889,7 +2905,7 @@ _RUN_CTX = threading.local()
 
 def worktree_err(msg):
     slug = getattr(_RUN_CTX, "slug", None)
-    _atomic_publish(".worktree-error.tmp", "worktree-error.txt",
+    _atomic_publish(".worktree-error.tmp", _one_shot_name("worktree-error"),
                     ("run-slug: %s\n" % slug if slug else "") + msg)
 
 

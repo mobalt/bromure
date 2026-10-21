@@ -807,6 +807,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     nonisolated static let maxOutboxTextFile = 1 << 20
 
     /// The file's text, or nil when it's missing or over `max`.
+    /// A one-shot outbox report the host reads and deletes: `<stem>.txt`
+    /// (a guest from before per-report files) or `<stem>-<unique>.txt`. Each
+    /// file is written once, so reading then deleting it can't drop another.
+    nonisolated static func isOneShot(_ name: String, stem: String) -> Bool {
+        name == stem + ".txt" || (name.hasPrefix(stem + "-") && name.hasSuffix(".txt"))
+    }
+    /// One-shot reports surfaced per poll; the rest wait for the next tick.
+    nonisolated static let maxOneShotsPerTick = 32
+
     nonisolated static func boundedText(_ url: URL, max: Int = maxOutboxTextFile) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
@@ -1089,6 +1098,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // memory + URL parser with a huge body.
                 let maxURLFileSize = 8 * 1024
                 var urlsProcessedThisTick = 0
+                var oneShotsThisTick = 0
                 if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
                     // agent-tool-<win>.jsonl — append-only, one line per tool
                     // call, written by the agents' PreToolUse hooks before the
@@ -1306,16 +1316,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // docker-error.txt — one-shot: a failed docker action's
                         // stderr. Read, delete, surface. (Deleting makes it fire
                         // once rather than every 40ms poll.)
-                        if name == "docker-error.txt" {
+                        if Self.isOneShot(name, stem: "docker-error") {
+                            if oneShotsThisTick >= Self.maxOneShotsPerTick { continue }
+                            oneShotsThisTick += 1
                             let raw = Self.boundedText(entry)?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if !raw.isEmpty { self?.onDockerError?(raw) }
                             continue
                         }
-                        // worktree-error.txt — one-shot, same pattern: a failed
-                        // git worktree create/merge/remove surfaced to the host.
-                        if name == "worktree-error.txt" {
+                        // worktree-error-*.txt — one-shot, same pattern: a failed
+                        // git worktree create/merge/remove, or a refused
+                        // automation run, surfaced to the host. One file per
+                        // report: refusals of runs started together each land.
+                        if Self.isOneShot(name, stem: "worktree-error") {
+                            if oneShotsThisTick >= Self.maxOneShotsPerTick { continue }
+                            oneShotsThisTick += 1
                             let raw = Self.boundedText(entry)?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
