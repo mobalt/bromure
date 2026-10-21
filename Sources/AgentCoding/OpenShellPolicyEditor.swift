@@ -339,11 +339,16 @@ struct OpenShellPolicyEditor: View {
                              tone: .warn)
             }
             if let st = GuestSandboxStatusStore.shared.status(for: draft.id) {
-                PolicyStatus(text: "Filesystem \(st.filesystem)"
+                // Orange only for what didn't go as asked: a failed or
+                // degraded ruleset, an `off` the guest says failed, or one
+                // asked for and not in force yet — never the policy's own
+                // "not configured" / "no paths configured".
+                PolicyStatus(text: (st.filesystemNotYetApplied ? "Filesystem not applied yet" : "Filesystem \(st.filesystem)")
                                  + (st.degradedReason.map { " (\($0))" } ?? "")
                                  + (st.runAsUser.map { " · runs as \($0)" } ?? "")
                                  + (st.landlockABI.map { " · Landlock ABI \($0)" } ?? ""),
-                             tone: st.filesystem == "failed" ? .bad : (st.filesystemFailed || st.degradedReason != nil) ? .warn : .ok)
+                             tone: st.filesystem == "failed" ? .bad
+                                 : (st.filesystemFailed || st.filesystemOffUnasked || st.filesystemNotYetApplied) ? .warn : .ok)
                 if st.strictApplied == false {
                     PolicyStatus(text: NSLocalizedString("The strict sandbox didn't fully apply in the VM, so no session will start and binary rules fail closed. Restarting the VM retries it.", comment: "sandbox status"),
                                  tone: .bad)

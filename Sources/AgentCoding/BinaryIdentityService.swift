@@ -368,6 +368,8 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         /// times (kill-server, last window closed, …).
         public var serverRestarts: Int
         public var receivedAt: Date
+        /// The booted spec asked for a filesystem ruleset (`requested.filesystem`).
+        public var filesystemRequested: Bool? = nil
 
         /// The filesystem sandbox isn't doing what was asked: Landlock failed
         /// (an unreadable spec, an unsafe socket layout, a crashed supervisor)
@@ -385,6 +387,13 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         public var filesystemOffUnasked: Bool {
             guard filesystem == "off", let reason = degradedReason, !reason.isEmpty else { return false }
             return !Self.filesystemOffAsAsked.contains(reason)
+        }
+
+        /// The booted policy asked for a ruleset and none is in force yet,
+        /// with no failure said: the sandbox is still being assembled (held
+        /// for a required sentry). Not a fault, but not "off" either.
+        public var filesystemNotYetApplied: Bool {
+            filesystem == "off" && (degradedReason ?? "").isEmpty && filesystemRequested == true
         }
 
         /// Anything the sandbox reported as not working as asked. The
@@ -463,7 +472,8 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
             additionsReadOnly: additions?["read_only"] as? [String] ?? [],
             warnings: r["warnings"] as? [String] ?? [],
             serverRestarts: r["server_restarts"] as? Int ?? 0,
-            receivedAt: now)
+            receivedAt: now,
+            filesystemRequested: (r["requested"] as? [String: Any])?["filesystem"] as? Bool)
         lock.lock()
         let previous = statuses[profileID]
         statuses[profileID] = st

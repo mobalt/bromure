@@ -516,5 +516,13 @@ struct GuestSandboxAttentionTests {
             #expect(!off.needsAttention(sentryExpected: false), "\(asked)")
         }
         #expect(!(try status(["filesystem": "off"])).needsAttention(sentryExpected: false))
+        // Held for a required sentry: the spec asked for a ruleset, the
+        // early publish says off with no reason — not applied yet, not "off".
+        let held = try status(["filesystem": "off", "requested": ["filesystem": true, "process": false]])
+        #expect(held.filesystemNotYetApplied && !held.filesystemOffUnasked)
+        #expect(!(try status(["filesystem": "off", "requested": ["filesystem": false]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "off", "degraded_reason": "no paths configured",
+                              "requested": ["filesystem": true]])).filesystemNotYetApplied)
+        #expect(!(try status(["filesystem": "enforced", "requested": ["filesystem": true]])).filesystemNotYetApplied)
     }
 }
