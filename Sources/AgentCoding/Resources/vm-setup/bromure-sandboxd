@@ -1769,8 +1769,9 @@ _APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.\-]{0,99}([=/][A-Za-z0-9.+~:\-]{1,64}
 # One deadline for the whole call -- the list refresh and the install, with
 # its retry -- and the caller (agentd, then the host) waits longer than it,
 # so nothing up the chain reports "failed" while apt is still running. A step
-# that overruns it, or whose caller hung up, is stopped as a whole process
-# group with SIGTERM first: SIGKILL mid-unpack leaves dpkg interrupted.
+# that overruns it, or whose caller hung up, is stopped -- apt and every
+# process it started -- with SIGTERM first: SIGKILL mid-unpack leaves dpkg
+# interrupted.
 APT_DEADLINE_S = 1800
 APT_STOP_GRACE_S = 120
 # One install at a time: a second approval (the same names asked again while
@@ -1778,19 +1779,104 @@ APT_STOP_GRACE_S = 120
 _APT_LOCK = threading.Lock()
 
 
+def _proc_table():
+    """{pid: (ppid, start, state)} for every process; `start` tells a reused
+    pid apart. /proc on the guest; `ps` elsewhere (the tests run on macOS)."""
+    table = {}
+    if os.path.isdir("/proc/self"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % name) as handle:
+                    rest = handle.read().rsplit(")", 1)[-1].split()
+                table[int(name)] = (int(rest[1]), rest[19], rest[0])
+            except (OSError, IndexError, ValueError):
+                pass
+        return table
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return table
+    for line in out.splitlines():
+        f = line.split(None, 3)
+        if len(f) == 4 and f[0].isdigit() and f[1].isdigit():
+            table[int(f[0])] = (int(f[1]), f[3].strip(), f[2][:1])
+    return table
+
+
+def _apt_tree(root, known):
+    """Update `known` ({pid: start}): drop the members that have exited, add
+    every live descendant of `root` (None once apt itself is reaped: its pid
+    may be reused) or of a member. A member stays one after its parent dies
+    and it is reparented -- which is what dpkg is once apt is gone."""
+    table = _proc_table()
+    for pid, start in list(known.items()):
+        row = table.get(pid)
+        if row is None or row[1] != start or row[2] == "Z":
+            del known[pid]
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, start, state) in table.items():
+            if pid not in known and state != "Z" and (ppid == root or ppid in known):
+                known[pid] = start
+                grew = True
+    return known
+
+
 def _apt_stop(proc):
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=APT_STOP_GRACE_S)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        proc.wait()
+    """Stop apt and everything it started, and return only once all of it
+    has exited.
+
+    apt runs dpkg (`--unpack`, `--configure --pending`) in a session of its
+    own, so a signal to apt's process group never reaches dpkg or the
+    maintainer scripts under it: apt died at once, dpkg went on configuring
+    as root after this returned, and the install lock let a second apt in
+    beside it. (Finding CWE-670, "apt stop signals only apt-get's process
+    group, so dpkg and maintainer scripts keep running".) So the whole tree
+    is tracked by pid, through the reparenting, and SIGTERMed; whatever is
+    left after APT_STOP_GRACE_S is SIGKILLed."""
+    tree = _apt_tree(proc.pid, {})
+    signalled = set()
+
+    def send(sig):
+        if proc.returncode is None:       # once reaped, its pgid may be reused
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass
+        for pid in list(tree):
+            if sig == signal.SIGTERM and pid in signalled:
+                continue
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+            signalled.add(pid)
+
+    send(signal.SIGTERM)
+    grace = time.time() + APT_STOP_GRACE_S
+    killed_at = None
+    while True:
+        done = proc.poll() is not None
+        _apt_tree(None if done else proc.pid, tree)
+        if done and not tree:
+            return
+        if killed_at is None and time.time() > grace:
+            send(signal.SIGKILL)
+            killed_at = time.time()
+        elif killed_at is None:
+            send(signal.SIGTERM)          # anything started since the last look
+        elif time.time() - killed_at > 30:
+            # Unkillable (D state): leave it rather than hang the caller.
+            log("apt: still running after SIGKILL: %s" % sorted(tree))
+            proc.wait()
+            return
+        else:
+            send(signal.SIGKILL)
+        time.sleep(0.2)
 
 
 def _apt_step(argv, env, deadline, cancelled):
