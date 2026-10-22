@@ -106,8 +106,12 @@ enum CommandLineRedactor {
     /// the timeline and the org upload").
     /// The cluster is lazy: curl starts a glued argument at the FIRST `b`
     /// (`-sbAWSALB=x` is the cookie `AWSALB=x`), and the `=` must stay in the
-    /// value for it to read as a cookie.
-    private static let cookieFlag = re(#"((?:^|\s)(?:-[a-z0-9#]*?b(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// value for it to read as a cookie. The short flag is case-sensitive, as
+    /// curl's are: `-B` is `--use-ascii` and takes nothing, so `-fsSLB -b
+    /// s=x` is a cluster then the real cookie, and `-fsSLB URL` keeps its URL
+    /// (Finding CWE-532, "A curl -B cluster is read as -b, so the real cookie
+    /// is uploaded").
+    private static let cookieFlag = re(#"((?:^|\s)(?:(?-i:-[a-zA-Z0-9#]*?b)(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
     /// curl's `-E` / `--cert` / `--proxy-cert certificate:passphrase`: the
     /// passphrase after the first `:` (a value without one is a path). `-E`
     /// is case-sensitive (`-e` is the referer) and may close a cluster.
