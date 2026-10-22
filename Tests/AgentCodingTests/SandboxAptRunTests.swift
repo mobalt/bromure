@@ -48,6 +48,12 @@ struct SandboxAptRunTests {
                     note("dpkg-ignores-TERM"); return
                 note("dpkg-TERM"); time.sleep(1); note("dpkg-END"); sys.exit(0)
             signal.signal(signal.SIGTERM, term)
+            if os.environ.get("DPKG") == "script":
+                # A maintainer script whose SIGTERM trap backgrounds a
+                # subshell and exits: the subshell is init's at once.
+                import subprocess
+                subprocess.Popen(["sh", "-c", "trap '( sleep 30 ) & echo $! > $FAKE_DIR/bg.pid; exit 0' TERM; "
+                                  "touch $FAKE_DIR/postinst.up; while :; do sleep 0.1; done"])
             note("dpkg-start")
             for _ in range(600): time.sleep(0.1)
             note("dpkg-ran-out")
@@ -141,6 +147,32 @@ struct SandboxAptRunTests {
             """)
         #expect(out.contains("GRACEFUL True"), Comment(rawValue: out))
         #expect(out.contains("KILLED True"), Comment(rawValue: out))
+    }
+
+    /// Finding (CWE-670): "apt stop misses root children reparented to init
+    /// between process-tree scans". Membership was by parent alone, so a
+    /// process forked after a scan by one that then exited (ppid 1 before
+    /// any scan saw it) was never tracked or signalled, and the stop
+    /// returned (dropping the install lock) with it still running as root.
+    @Test("A stop doesn't return while a maintainer script's backgrounded subshell, reparented to init, still runs",
+          .enabled(if: SandboxAptRunTests.runnable))
+    func stopsReparentedChildren() throws {
+        let out = try run("""
+            import subprocess
+            def alive(p):
+                r = subprocess.run(['ps', '-o', 'stat=', '-p', str(p)], capture_output=True, text=True).stdout.strip()
+                return bool(r) and not r.startswith('Z')
+            open(D + '/lists', 'w').close()
+            os.environ['DPKG'] = 'script'; m.APT_STOP_GRACE_S = 3
+            gone = time.time() + 2.5
+            t = time.time(); code, text = m.apt_install(['curl'], cancelled=lambda: time.time() > gone)
+            up = os.path.exists(D + '/postinst.up')
+            bg = int(open(D + '/bg.pid').read()) if os.path.exists(D + '/bg.pid') else None
+            print('REPARENTED', code != 0 and up and bg is not None and not alive(bg) and time.time() - t < 20,
+                  up, bg, bg and alive(bg))
+            if bg and alive(bg): os.kill(bg, 9)
+            """)
+        #expect(out.contains("REPARENTED True"), Comment(rawValue: out))
     }
 
     @Test("A second install waits for the one in flight instead of running beside it",
