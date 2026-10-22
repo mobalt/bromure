@@ -2406,11 +2406,20 @@ final class ScheduledAutomationEngine {
         }
     }
 
-    /// A filesystem/branch-safe slug from the automation name, timestamped so
-    /// repeated fires don't collide on the branch name. ASCII only (accents
-    /// folded): the worktree folder is named after it, and agents' stores
-    /// mangle other scripts (`AgentSession.worktreeSlug`).
-    nonisolated static func branchSlug(for name: String, at date: Date) -> String {
+    /// A filesystem/branch-safe slug from the automation name, timestamped and
+    /// tagged so repeated fires don't collide. ASCII only (accents folded):
+    /// the worktree folder is named after it, and agents' stores mangle other
+    /// scripts (`AgentSession.worktreeSlug`).
+    ///
+    /// The slug is the run's identity everywhere (the guest's refusal echoes
+    /// it, the binding and completion match it), so the minute alone wasn't
+    /// enough: two fires in one minute (Run now while a review still
+    /// fetches) shared it, and a refusal failed the newest while the one that
+    /// failed looked finished (Finding CWE-706, "Same-minute runs share a
+    /// slug, so a refusal fails the newest run and leaves the other looking
+    /// finished"). `tag` starts with a letter, so it never reads as the
+    /// guest's own `-N` worktree suffix.
+    nonisolated static func branchSlug(for name: String, at date: Date, tag: String = runTag()) -> String {
         var out = ""
         var lastDash = false
         for ch in AgentSession.asciiFolded(name).lowercased() {
@@ -2425,7 +2434,13 @@ final class ScheduledAutomationEngine {
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyMMdd-HHmm"
         let stamp = fmt.string(from: date)
-        return (base.isEmpty ? "automation" : String(base)) + "-" + stamp
+        return (base.isEmpty ? "automation" : String(base)) + "-" + stamp + "-" + tag
+    }
+
+    /// Four random characters: a letter, then letters or digits.
+    nonisolated static func runTag() -> String {
+        let letters = Array("abcdefghijklmnopqrstuvwxyz"), alnum = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        return String(letters.randomElement()!) + String((0..<3).map { _ in alnum.randomElement()! })
     }
 
     /// Expand the user's repo path to an absolute guest path. The guest home
