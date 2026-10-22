@@ -15476,6 +15476,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         OpenShellAdvisor.shared.reset(profileID: profile.id)
         AgentWatchdog.shared.reset(profileID: profile.id)
         UnmanagedCredentialGuard.shared.reset(profileID: profile.id)
+        PolicySteering.shared.reset(profileID: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()

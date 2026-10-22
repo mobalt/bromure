@@ -74,12 +74,25 @@ public final class PolicySteering: @unchecked Sendable {
 
     // MARK: Inputs
 
+    /// How long a live agent's pid stays bound to its window.
+    static let pinSpan: TimeInterval = 600
+    /// Most windows, and most displaced pids, kept per workspace. The lines
+    /// are guest-writable, so each new pid was one more entry, rescanned and
+    /// copied on every line on the main actor (Finding CWE-400, "Displaced-pid
+    /// pin retains every guest-forged pid and rescans it on the main actor").
+    /// Once full (after dropping expired entries) a line that needs another is
+    /// ignored: evicting a pin still inside its span would free a live
+    /// agent's pid to be claimed from another window.
+    static let pinCap = 64
+
     /// An agent's PreToolUse hook: the agent process in tmux window `window`.
+    /// Updates in place; nothing here walks more than `pinCap` entries.
     public func noteAgent(profileID: UUID, pid: Int, window: Int) {
         lock.lock(); defer { lock.unlock() }
-        var m = agents[profileID] ?? [:]
         let t = now()
-        var gone = (displaced[profileID] ?? [:]).filter { t.timeIntervalSince($0.value.at) < 600 }
+        func pinned(_ v: (window: Int, at: Date)?) -> Bool {
+            v.map { $0.window != window && t.timeIntervalSince($0.at) < Self.pinSpan } ?? false
+        }
         // A live agent's pid isn't re-pointed at another tab: the lines that
         // register it are files any guest process can append to, and a note
         // must not be steered into a different agent's composer. (A pid
@@ -88,17 +101,37 @@ public final class PolicySteering: @unchecked Sendable {
         // CWE-345, "A guest line can clear a live agent's pid pin and keep
         // its policy notes": writing a pid for the window first freed the
         // agent's pid to be claimed elsewhere, and kept it there).
-        if let held = m[pid], held.window != window, t.timeIntervalSince(held.at) < 600 { return }
-        if let was = gone[pid], was.window != window { return }
+        if pinned(agents[profileID]?[pid]) || pinned(displaced[profileID]?[pid]) { return }
+        // The agent's own next hook: the common case.
+        if agents[profileID]?[pid]?.window == window { agents[profileID]?[pid]?.at = t; return }
         // A window's agent restarted (or a line claims so): its old pid no
         // longer speaks for it, but stays bound to that window for the pin.
-        for (p, v) in m where v.window == window && p != pid { gone[p] = v }
-        m = m.filter { $0.value.window != window || $0.key == pid }
-        gone[pid] = nil                 // back in its own window: live again
-        m[pid] = (window, t)
-        if m.count > 64 { m = m.filter { t.timeIntervalSince($0.value.at) < 3600 } }
-        agents[profileID] = m
-        displaced[profileID] = gone
+        let old = agents[profileID]?.first { $0.value.window == window }
+        let oldLive = old.map { t.timeIntervalSince($0.value.at) < Self.pinSpan } ?? false
+        // A pid coming back from `displaced` frees the slot its old one takes.
+        if oldLive, displaced[profileID]?[pid] == nil, !Self.room(&displaced[profileID], t) { return }
+        if old == nil, !Self.room(&agents[profileID], t) { return }
+        if let old {
+            agents[profileID]?[old.key] = nil
+            if oldLive { displaced[profileID, default: [:]][old.key] = old.value }
+        }
+        displaced[profileID]?[pid] = nil        // back in its own window: live again
+        agents[profileID, default: [:]][pid] = (window, t)
+    }
+
+    /// Whether `m` has room for one more entry, dropping expired ones (in
+    /// place) only when it's full.
+    private static func room(_ m: inout [Int: (window: Int, at: Date)]?, _ t: Date) -> Bool {
+        guard let count = m?.count, count >= pinCap else { return true }
+        let expired = m?.compactMap { t.timeIntervalSince($0.value.at) >= pinSpan ? $0.key : nil } ?? []
+        for k in expired { m?[k] = nil }
+        return (m?.count ?? 0) < pinCap
+    }
+
+    /// Entries kept for a workspace (tests).
+    func retainedPids(profileID: UUID) -> (agents: Int, displaced: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (agents[profileID]?.count ?? 0, displaced[profileID]?.count ?? 0)
     }
 
     /// The sentry's `net_flow`: which processes opened a flow to `dst:dport`
@@ -262,7 +295,9 @@ public final class PolicySteering: @unchecked Sendable {
     func reset(profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         agents[profileID] = nil; displaced[profileID] = nil; flows[profileID] = nil
+        pending = pending.filter { $0.value.profileID != profileID }
         sent = sent.filter { !$0.key.hasPrefix(profileID.uuidString) }
+        recent = recent.filter { !$0.key.hasPrefix(profileID.uuidString) }
     }
 
     // MARK: Composing
