@@ -516,12 +516,54 @@ struct ReviewRunAgentdTests {
             m._resolve_run_base = lambda cwd, base: None
             m._automation_run(repo, 'review-dead', 'Review', 'claude', '', mode='review', base='d' * 40)
             name, text = published[-1]
-            print('NAMED', name == 'worktree-error.txt' and text.startswith('run-slug: review-dead\\n'))
+            print('NAMED', name.startswith('worktree-error-') and name.endswith('.txt')
+                  and text.startswith('run-slug: review-dead\\n'))
             # Outside a run, an error carries no slug (merge, pr, …).
             m.worktree_err('merge: conflicts')
             print('PLAIN', published[-1][1] == 'merge: conflicts')
             """, dir: dir)
         for key in ["NAMED", "PLAIN"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    /// Finding (CWE-362): "Concurrent guest refusals share one worktree-error
+    /// file, so one run stays a finished review". Every refusal replaced one
+    /// worktree-error.txt (through one shared temp name), so of two reviews
+    /// refused together only one reached the host; the other stayed launched.
+    @Test("Refusals published together each get their own file, whole",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func concurrentRefusalsEachLand() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            import threading
+            outbox = d + '/outbox'; os.makedirs(outbox); m.OUTBOX = outbox
+            go = threading.Barrier(8)
+            def refuse(slug):
+                m._RUN_CTX.slug = slug
+                go.wait()
+                for i in range(25):
+                    m.worktree_err('base %s %d: cannot fetch origin' % (slug, i) + ' x' * 2000)
+            ts = [threading.Thread(target=refuse, args=('review-%d' % n,)) for n in range(8)]
+            for t in ts: t.start()
+            for t in ts: t.join()
+            names = [n for n in os.listdir(outbox) if not n.startswith('.')]
+            bodies = [open(os.path.join(outbox, n)).read() for n in names]
+            print('ALL', len(names) == 200 and all(n.startswith('worktree-error-') and n.endswith('.txt') for n in names))
+            slugs = sorted(set(b.split('\\n', 1)[0] for b in bodies))
+            print('SLUGS', slugs == sorted('run-slug: review-%d' % n for n in range(8)))
+            print('WHOLE', all(b.split('\\n', 1)[1].startswith('base ' + b.split('\\n', 1)[0][10:] + ' ') for b in bodies))
+            print('NO_TMP', not [n for n in os.listdir(outbox) if n.startswith('.')])
+            m.docker_err('pull failed'); m.docker_err('pull failed again')
+            print('DOCKER', len([n for n in os.listdir(outbox) if n.startswith('docker-error-')]) == 2)
+            """, dir: dir)
+        for key in ["ALL", "SLUGS", "WHOLE", "NO_TMP", "DOCKER"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+        // The host takes each of them (and a legacy single file), nothing else.
+        #expect(UbuntuSandboxVM.isOneShot("worktree-error-1729-12-0.txt", stem: "worktree-error"))
+        #expect(UbuntuSandboxVM.isOneShot("worktree-error.txt", stem: "worktree-error"))
+        #expect(!UbuntuSandboxVM.isOneShot(".worktree-error.tmp.12.34", stem: "worktree-error"))
+        #expect(!UbuntuSandboxVM.isOneShot("docker-errors.txt", stem: "docker-error"))
     }
 
     /// Finding (CWE-670): "SSH origin fetch has no agent socket, so
