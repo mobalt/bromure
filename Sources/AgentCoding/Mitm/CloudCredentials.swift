@@ -579,9 +579,14 @@ public final class KubeconfigMaterializer {
 /// Lifetime is bound to the session — start on launch, stop on close.
 @MainActor
 public final class ExecCredentialPoller {
-    private var tasks: [UUID: Task<Void, Never>] = [:]
-    /// Which workspace each entry's task refreshes for.
-    private var owner: [UUID: UUID] = [:]
+    /// One task per workspace and kubeconfig entry. Keyed by the entry
+    /// alone, a workspace's live refresh cancelled and took over another
+    /// workspace's poller for an entry with the same id (a duplicated
+    /// workspace's), whose token then froze until it expired (Finding
+    /// CWE-362, "A live kubeconfig refresh cancels another workspace's
+    /// exec poller when entry ids match").
+    private struct Key: Hashable { let profileID: UUID; let entryID: UUID }
+    private var tasks: [Key: Task<Void, Never>] = [:]
 
     public init() {}
 
@@ -589,12 +594,15 @@ public final class ExecCredentialPoller {
                       profileID: UUID,
                       swapper: TokenSwapper) {
         for ctx in contexts {
-            stop(entryID: ctx.entryID)
+            let key = Key(profileID: profileID, entryID: ctx.entryID)
+            tasks[key]?.cancel()
             let task = Task { [weak self, weak swapper] in
                 guard self != nil else { return }
                 while !Task.isCancelled {
                     let token = await Self.runExec(command: ctx.command, args: ctx.args)
-                    if let token, let swapper {
+                    // A run that outlived its poller (stopped or replaced
+                    // while the plugin ran) doesn't write its token.
+                    if let token, let swapper, !Task.isCancelled {
                         Self.updateSwap(swapper: swapper,
                                         profileID: profileID,
                                         host: ctx.host,
@@ -606,32 +614,26 @@ public final class ExecCredentialPoller {
                     try? await Task.sleep(for: .seconds(Double(ctx.refreshSeconds)))
                 }
             }
-            tasks[ctx.entryID] = task
-            owner[ctx.entryID] = profileID
+            tasks[key] = task
         }
-    }
-
-    public func stop(entryID: UUID) {
-        tasks[entryID]?.cancel()
-        tasks.removeValue(forKey: entryID)
-        owner.removeValue(forKey: entryID)
     }
 
     /// Stop one workspace's pollers, and only its: a workspace closing
     /// used to stop every running workspace's exec-credential refresh.
     public func stopAll(profileID: UUID) {
-        for (entry, pid) in owner where pid == profileID { stop(entryID: entry) }
+        for key in tasks.keys where key.profileID == profileID {
+            tasks.removeValue(forKey: key)?.cancel()
+        }
     }
 
     /// The kubeconfig entries being refreshed for `profileID`.
     public func entries(for profileID: UUID) -> Set<UUID> {
-        Set(owner.filter { $0.value == profileID }.keys)
+        Set(tasks.keys.filter { $0.profileID == profileID }.map(\.entryID))
     }
 
     public func stopAll() {
         for (_, t) in tasks { t.cancel() }
         tasks.removeAll()
-        owner.removeAll()
     }
 
     /// Spawn the exec plugin, decode its `ExecCredential` JSON, return
