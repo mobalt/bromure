@@ -723,3 +723,61 @@ struct PolicyNoteDeliveryTests {
         #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
     }
 }
+
+/// Finding (CWE-400): "Displaced-pid pin retains every guest-forged pid and
+/// rescans it on the main actor". Each line naming a new pid for a window
+/// kept the one it displaced for ten minutes, and every line copied the whole
+/// map: a guest appending unique pids grew it without bound, with the work
+/// per line growing with it, on the main actor.
+@Suite("Policy steering: forged hook lines can't grow the pid pin")
+struct PolicySteeringPinBoundTests {
+    func steering(_ clock: SteeringClock) -> PolicySteering {
+        let s = PolicySteering()
+        s.enabledProvider = { _ in true }
+        s.openShellProvider = { _ in nil }
+        s.advisorOnProvider = { _ in false }
+        s.attributionWait = 0.05
+        s.now = { clock.now }
+        s.deliver = { _, _, _, _, done in done(true) }
+        return s
+    }
+
+    @Test("a flood of new pids and windows stays capped; the live agent keeps its pin and takes its window back")
+    func floodIsBounded() {
+        let clock = SteeringClock(Date()), s = steering(clock), ws = UUID()
+        s.noteAgent(profileID: ws, pid: 500, window: 1)                    // the live agent
+        for i in 0..<20_000 { s.noteAgent(profileID: ws, pid: 10_000 + i, window: 1) }
+        for i in 0..<20_000 { s.noteAgent(profileID: ws, pid: 40_000 + i, window: 100 + i) }
+        let kept = s.retainedPids(profileID: ws)
+        #expect(kept.agents <= PolicySteering.pinCap && kept.displaced <= PolicySteering.pinCap)
+        // Full, yet nothing inside its span was evicted: 500 can't be claimed elsewhere.
+        s.noteAgent(profileID: ws, pid: 500, window: 2)
+        #expect(!s.agentWindows(profileID: ws).contains(2))
+        // The agent's own next hook takes its window back, even with the map full.
+        s.noteAgent(profileID: ws, pid: 500, window: 1)
+        s.noteFlow(profileID: ws, dst: "203.0.113.9", dport: 443, pids: [900, 500])
+        let sink = SteeringSink()
+        s.deliver = { _, window, text, sole, done in sink.add(.init(window: window, text: text, soleOnly: sole)); done(true) }
+        s.observe(profileID: ws, eventType: "egress.firewall", eventData: [
+            "action": .string("deny"), "layer": .string("l4"), "proto": .string("tcp"),
+            "host": .string("evil.example"), "ip": .string("203.0.113.9"), "port": .int(443)])
+        #expect(sink.notes.first?.window == 1)
+        // Past the pin's span the expired entries make room again.
+        clock.now += PolicySteering.pinSpan + 1
+        s.noteAgent(profileID: ws, pid: 700, window: 9)
+        #expect(s.agentWindows(profileID: ws).contains(9))
+        #expect(s.retainedPids(profileID: ws).agents <= PolicySteering.pinCap)
+        // The session's end forgets the workspace.
+        s.reset(profileID: ws)
+        #expect(s.retainedPids(profileID: ws) == (0, 0))
+    }
+
+    @Test("the session's teardown resets the workspace's steering state")
+    func teardownResets() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let start = try #require(src.range(of: "func cleanupSessionRegistrations(for profile: Profile)"))
+        let body = src[start.upperBound...].prefix(4000)
+        #expect(body.contains("PolicySteering.shared.reset(profileID: profile.id)"))
+    }
+}
