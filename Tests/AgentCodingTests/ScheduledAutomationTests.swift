@@ -113,7 +113,7 @@ struct ScheduledAutomationTests {
         let newer = AutomationRunRecord(automationID: auto.id, firedAt: at, outcome: .launched, detail: a2, branchSlug: a2)
         store.record(older); store.record(newer)                     // newest first
         let engine = ScheduledAutomationEngine(store: store, delegate: nil)
-        engine.runRefused(profileID: pid, slug: a1, reason: "base not found")
+        engine.runRefused(profileID: pid, slug: a1, reason: "base not found", liveBranches: [])
         #expect(store.runs.first { $0.id == older.id }?.outcome == .failed)
         #expect(store.runs.first { $0.id == newer.id }?.outcome == .launched)
     }
