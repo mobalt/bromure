@@ -284,6 +284,38 @@ struct OpenShellAdvisorTests {
     /// and then the hostname; a later connection to the same IP (a shared CDN
     /// address, or a guest process dialing it after the deny) overwrote only
     /// the IP key, and the newest-wins lookup put that program in the rule.
+    /// Finding (CWE-284): "Drawer Allow keeps the first L4 program on a
+    /// shared DNS name and ignores the program just blocked". On a port the
+    /// MiTM doesn't see, the gate files the program under every DNS name
+    /// cached for the IP as a guess; the first one held those names for an
+    /// hour, so Allow named it, not the program the row was for.
+    @Test("On an L4 port, Allow names the program just blocked; a guess never displaces an attested name")
+    func l4AllowNamesLatest() throws {
+        let pid = UUID(), ids = BinaryIdentityService.shared
+        let ip = "104.16.0.7"
+        // gate(): identity() files the IP, then the cached names as guesses.
+        func l4(_ exe: String) {
+            ids.noteExe(exe, profileID: pid, destinations: [ip], port: 8443)
+            ids.noteExe(exe, profileID: pid, destinations: ["cdn.example", "api.example"], port: 8443, replace: false)
+        }
+        l4("/tmp/first")
+        Thread.sleep(forTimeInterval: 0.01)
+        l4("/usr/bin/tool")                                        // the connection just blocked
+        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 8443, ip: ip).binaries == ["/usr/bin/tool"])
+        #expect(ids.recentExe(profileID: pid, destinations: ["cdn.example"], port: 8443) == "/usr/bin/tool")
+        // The row's IP is attested for the flow just decided; a guessed name
+        // gives way to it.
+        ids.noteExe("/tmp/third", profileID: pid, destinations: [ip], port: 8443)
+        #expect(ids.recentExe(profileID: pid, destinations: ["api.example", ip], port: 8443) == "/tmp/third")
+        // A name the flow itself named (SNI / Host) stays attested: a guess
+        // doesn't replace it, nor turn it into a guess.
+        ids.noteHost(.init(exe: "/usr/bin/curl", sha256: "a", ancestors: []), profileID: pid, host: "named.example", port: 8443)
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["named.example"], port: 8443, replace: false)
+        ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["named.example"], port: 8443, replace: false)
+        ids.noteExe("/tmp/evil", profileID: pid, destinations: ["named.example"], port: 8443, replace: false)
+        #expect(ids.recentExe(profileID: pid, destinations: ["named.example", ip], port: 8443) == "/usr/bin/curl")
+    }
+
     @Test("Allow names the program attested for the row's hostname, not a newer occupant of its IP")
     func allowNamesTheHostsProgram() throws {
         let pid = UUID(), ids = BinaryIdentityService.shared
