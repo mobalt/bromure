@@ -60,19 +60,29 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// The program each recent connection was attested to, by destination
     /// ("pid|host-or-ip|port"): an Allow under Enforce binaries names it in the
     /// rule it adds, so the rule works at once and stays narrow.
-    private var recentExes: [String: (exe: String, at: Date)] = [:]
+    /// `guess`: filed under a name the connection was only guessed to be for
+    /// (a DNS name cached for its IP), not one the flow itself named.
+    private var recentExes: [String: (exe: String, at: Date, guess: Bool)] = [:]
 
-    /// `replace: false` fills only destinations with no entry inside the
-    /// hour: for names the connection is only GUESSED to be for (every DNS
-    /// name cached for its IP), which mustn't displace the program attested
-    /// for one of them.
+    /// `replace: false` files the destinations as GUESSES (every DNS name
+    /// cached for the connection's IP): a guess never displaces a program
+    /// attested for that name within the hour, and a newer guess replaces an
+    /// older one. (A first guess used to hold every name for the hour, so on
+    /// a port the MiTM doesn't see, Allow named the first program to dial a
+    /// shared CDN address, not the one just blocked — Finding CWE-284,
+    /// "Drawer Allow keeps the first L4 program on a shared DNS name and
+    /// ignores the program just blocked".)
     func noteExe(_ exe: String, profileID: UUID, destinations: [String], port: Int, replace: Bool = true) {
         lock.lock(); defer { lock.unlock() }
         let cutoff = Date().addingTimeInterval(-3600)
         for d in destinations where !d.isEmpty {
             let key = "\(profileID.uuidString)|\(d.lowercased())|\(port)"
-            if !replace, let held = recentExes[key], held.at > cutoff, held.exe != exe { continue }
-            recentExes[key] = (exe, Date())
+            if !replace, let held = recentExes[key], held.at > cutoff, !held.guess {
+                // Attested: kept (and stays attested when it's this program).
+                if held.exe == exe { recentExes[key] = (exe, Date(), false) }
+                continue
+            }
+            recentExes[key] = (exe, Date(), !replace)
         }
         if recentExes.count > 2048 {
             let cutoff = Date().addingTimeInterval(-3600)
@@ -89,19 +99,23 @@ public final class BinaryIdentityService: @unchecked Sendable {
     }
 
     /// The program that connected to `destinations` on `port` within the
-    /// hour, as the attestor reported it — the FIRST destination that has
-    /// one, in the order given (a hostname, then its IP). Not the newest
-    /// across them: an IP is shared (a CDN address, or any guest process that
-    /// dials it after a deny), so a later program there must not replace the
-    /// one attested for the name on the row (Finding CWE-284, "Drawer Allow
-    /// names whichever program last used the destination IP").
+    /// hour, as the attestor reported it — the FIRST destination with an
+    /// attested one, in the order given (a hostname, then its IP); a guessed
+    /// one only when none is attested. Not the newest across them: an IP is
+    /// shared (a CDN address, or any guest process that dials it after a
+    /// deny), so a later program there must not replace the one attested for
+    /// the name on the row (Finding CWE-284, "Drawer Allow names whichever
+    /// program last used the destination IP"). A name only guessed from the
+    /// DNS cache (a port the MiTM doesn't see) gives way to the IP, whose
+    /// program is the one attested for the flow just decided.
     public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {
         lock.lock(); defer { lock.unlock() }
         let cutoff = Date().addingTimeInterval(-3600)
-        for d in destinations {
-            if let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
+        let fresh = destinations.compactMap { d -> (exe: String, at: Date, guess: Bool)? in
+            guard let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff else { return nil }
+            return r
         }
-        return nil
+        return (fresh.first { !$0.guess } ?? fresh.first)?.exe
     }
 
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
