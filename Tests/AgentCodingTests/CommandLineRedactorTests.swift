@@ -137,7 +137,24 @@ struct CommandLineRedactorTests {
         ] {
             #expect(r(cmd) == out, "\(cmd)")
         }
+        // Finding (CWE-532): "Glued equals stays in curl's cookie argument and
+        // is uploaded" — curl keeps a glued `=` in -b's argument, so that
+        // argument always holds one and is sent as `Cookie: =SECRET`.
+        for (cmd, out) in [
+            ("curl -b=SECRET x", "curl -b=*** x"),
+            ("curl -sb=SECRET x", "curl -sb=*** x"),
+            ("curl -fsSLb=SECRET https://x", "curl -fsSLb=*** https://x"),
+            ("curl -4b=TOKEN https://x", "curl -4b=*** https://x"),
+            ("curl -sb=session=SECRET x", "curl -sb=*** x"),
+            ("curl -sb=\"$SECRET\" x", "curl -sb=\"***\" x"),
+            ("curl -sb='a=1; b=2' x", "curl -sb='***' x"),
+            ("curl -sb=s=1; t=2 x", "curl -sb=*** x"),                       // the sentry's argv
+            ("curl -sbab=SECRET x", "curl -sb*** x"),                        // still the first b
+        ] {
+            #expect(r(cmd) == out, "\(cmd)")
+        }
         for kept in ["curl -sb cookies.txt x",                               // a cookie file
+                     "ls -lb=x dir",                                         // not curl
                      "git checkout -qb fix-login && git push",               // not curl
                      "tar -czvfb x=1 dir", "ls -lb a=b"] {
             #expect(r(kept) == kept, "\(kept)")
