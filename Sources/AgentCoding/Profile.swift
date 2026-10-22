@@ -4882,9 +4882,16 @@ public final class ProfileStore {
               stop_read=1
               if [ "$1" = stop ] || printf '%s' "$stop_json" | grep -q "$stop_event"; then
                 kept=$(printf '%s' "$stop_json" | BROMURE_STOP_DRAIN=1 sh "$0" policy)
+                rc=$?
                 if [ -n "$kept" ]; then printf '%s\n' "$kept"; exit 0; fi
+                # 3: a note is owed but couldn't be checked or claimed here
+                # (the sandbox can't read the mount table, the home isn't
+                # writable). Not "the turn ended": done would let the host
+                # type a held notice and finish the task over an undelivered
+                # note — the tab says it needs you instead.
+                if [ "$rc" = 3 ]; then undelivered=1; else drained=1; fi
               fi
-              set -- done "${2:-}"
+              if [ -n "${undelivered:-}" ]; then set -- needsInput "${2:-}"; else set -- done "${2:-}"; fi
             fi
             if [ "${1:-}" = policy ]; then
               pol_json=""
@@ -4917,9 +4924,16 @@ public final class ProfileStore {
                 if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
                     return False
                 return int.from_bytes(buf.raw[:ctypes.sizeof(ctypes.c_long)], sys.byteorder) == 0x9FA0
+            def owed():
+                # A note is here and cannot be handed over from this pane.
+                sys.exit(3 if os.environ.get("BROMURE_STOP_DRAIN") else 0)
             dev = None
             try:
-                with open("/proc/self/mountinfo") as h:
+                table = open("/proc/self/mountinfo")
+            except OSError:
+                owed()
+            try:
+                with table as h:
                     if not procfs(h.fileno()):
                         raise OSError("not procfs")
                     for line in h:
@@ -4941,7 +4955,7 @@ public final class ProfileStore {
             try:
                 os.makedirs(claims, mode=0o700, exist_ok=True)
             except OSError:
-                sys.exit(0)
+                owed()
             notes = []
             for f in sorted(sys.argv[1:]):
                 # Checked and read through one descriptor, so nothing can swap
@@ -4981,7 +4995,7 @@ public final class ProfileStore {
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
                                                          "additionalContext": "\n".join(notes)}}))
             ' "$@"
-              exit 0
+              exit $?
             fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
@@ -5019,6 +5033,20 @@ public final class ProfileStore {
                 *) exit 0 ;;
               esac
             fi
+            # A policy note owed to this tab that its Stop couldn't hand over
+            # (see `stop`): until new activity or a Stop that drains, no
+            # `done` for this tab — not the idle_prompt that follows a minute
+            # later, not Grok's StopCancelled, not a typed one — or the host
+            # finishes the task over the note.
+            # Kept in the outbox, beside the status this run writes: the home
+            # may be what couldn't be written (no claims folder).
+            owed="$d/.policy-owed-$idx"
+            if [ -n "${undelivered:-}" ]; then
+              : > "$owed" 2>/dev/null
+            elif [ -n "${drained:-}" ] || [ "$signal" = "working" ]; then
+              rm -f "$owed" 2>/dev/null
+            fi
+            if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
             # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
             # agent-tool-<idx>.jsonl — the call's id, tool, command and the
             # agent's pid, written BEFORE the tool runs. The host ties the

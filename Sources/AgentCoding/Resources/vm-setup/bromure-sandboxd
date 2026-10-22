@@ -154,6 +154,12 @@ ADDITIONS_READ_ONLY = [
     # The host's read-only meta share: proxy.env, api_key.env, the MCP shims and
     # the agent stubs agentd runs in panes all live here.
     (META, "host meta share (read-only)"),
+    # Process information. Claude's policy hook proves a note comes from the
+    # host by checking /proc/self/mountinfo; without it every note was
+    # refused, and the turn reported done over it. OpenShell's own baseline
+    # adds /proc only to a policy with network rules, and most tools (ps,
+    # node, python's os) read it anyway. Read-only.
+    ("/proc", "process information (the policy-note hook's mount check, ps, node)"),
 ]
 
 

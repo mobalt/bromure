@@ -675,8 +675,9 @@ struct PolicyNoteDeliveryTests {
         #expect(body.contains("d=/mnt/bromure-outbox"))
         // The notes come from the (fake) read-only share, as on the guest.
         let meta = root.appendingPathComponent("meta")
-        let script = try Self.installHook(body.replacingOccurrences(of: "d=/mnt/bromure-outbox", with: "d=\(outbox.path)"),
-                                          root: root, meta: meta).hook
+        let installed = try Self.installHook(body.replacingOccurrences(of: "d=/mnt/bromure-outbox", with: "d=\(outbox.path)"),
+                                             root: root, meta: meta)
+        let script = installed.hook
         let bin = root.appendingPathComponent("bin")
         try fm.createDirectory(at: bin, withIntermediateDirectories: true)
         try "#!/bin/sh\necho 3\n".write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
@@ -721,6 +722,83 @@ struct PolicyNoteDeliveryTests {
         #expect(!fm.fileExists(atPath: status.path))
         #expect(try stop("done").isEmpty)
         #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
+        // Finding (CWE-670): "Policy note is dropped and Stop reports done
+        // when the sandbox cannot read /proc". A Landlock ruleset without
+        // /proc: the mount check can't run, so the note can't be handed
+        // over — and that is not "the turn ended".
+        try fm.removeItem(at: status)
+        try fm.removeItem(at: installed.mountinfo)
+        let owed = try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        #expect(!fm.fileExists(atPath: claims.appendingPathComponent(owed.lastPathComponent).path))   // still owed
+        // …and stays so: the idle_prompt a minute later, Grok's
+        // StopCancelled, a typed done — none reports done over the note.
+        func hook(_ arg: String, _ json: String) throws {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = [script.path, arg]
+            proc.environment = ["HOME": home.path, "TMUX_PANE": "%1", "PATH": bin.path + ":/usr/bin:/bin"]
+            let input = Pipe()
+            proc.standardInput = input; proc.standardOutput = FileHandle.nullDevice
+            try proc.run()
+            input.fileHandleForWriting.write(Data(json.utf8))
+            try input.fileHandleForWriting.close()
+            proc.waitUntilExit()
+        }
+        for (arg, json) in [("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#),
+                            ("done", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#),
+                            ("done", "")] {
+            try hook(arg, json)
+            #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
+        }
+        // New activity clears it; the next Stop tries again, and once the
+        // table is readable the same note goes through.
+        try hook("working", #"{"hook_event_name":"UserPromptSubmit","session_id":"abc-1"}"#)
+        try installed.shareLine.write(to: installed.mountinfo, atomically: true, encoding: .utf8)
+        let later = try #require(try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])
+        #expect(later["decision"] as? String == "block")
+        // Nothing owed any more: an idle Stop is done again.
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
+        // The other way a note can't be handed over: the home can't be
+        // written (no claims folder). The mark lives in the outbox, so the
+        // idle_prompt after it still doesn't report done.
+        try fm.removeItem(at: claims)
+        chmod(home.appendingPathComponent(".bromure").path, 0o555)
+        defer { chmod(home.appendingPathComponent(".bromure").path, 0o755) }
+        let stuck = try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        try hook("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#)
+        #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"))
+        #expect(fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
+        _ = stuck
+    }
+
+    @Test("Under a filesystem ruleset the sandbox grants /proc (read-only) with the meta share",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func sandboxGrantsProc() throws {
+        let vmSetup = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/AgentCoding/Resources/vm-setup")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.currentDirectoryURL = vmSetup
+        p.arguments = ["-I", "-c", """
+            import importlib.machinery, importlib.util, os, sys, types
+            os.uname = lambda: types.SimpleNamespace(sysname='Linux', nodename='t', release='6.8', version='', machine='aarch64')
+            sys.path.insert(0, os.getcwd())
+            ld = importlib.machinery.SourceFileLoader('sandboxd', 'bromure-sandboxd')
+            m = importlib.util.module_from_spec(importlib.util.spec_from_loader('sandboxd', ld)); ld.exec_module(m)
+            print('PROC', ('/proc' in [p for p, _ in m.ADDITIONS_READ_ONLY]) and (m.META in [p for p, _ in m.ADDITIONS_READ_ONLY]))
+            """]
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+        try p.run()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        #expect(out.contains("PROC True"), Comment(rawValue: out))
     }
 }
 
