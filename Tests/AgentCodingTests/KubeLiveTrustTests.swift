@@ -67,6 +67,43 @@ struct KubeLiveTrustTests {
         poller.stopAll()
     }
 
+    /// Finding (CWE-362): "A live kubeconfig refresh cancels another
+    /// workspace's exec poller when entry ids match". Tasks were keyed by
+    /// the entry id alone, so refreshing a duplicated workspace (same entry
+    /// ids) cancelled the original's poller and took its slot.
+    @Test("A workspace's refresh restarts only its own poller, even for an entry id another workspace shares")
+    func pollerSharedEntryID() {
+        let a = UUID(), b = UUID(), entry = UUID()
+        let poller = ExecCredentialPoller(), swapper = TokenSwapper(consent: ConsentBroker())
+        let ctx = KubeconfigMaterializer.ExecContext(entryID: entry, host: "k8s.example.com", fakeToken: "brm-k8s-x",
+                                                     command: "/usr/bin/false", args: [], refreshSeconds: 3600)
+        poller.start([ctx], profileID: a, swapper: swapper)
+        poller.start([ctx], profileID: b, swapper: swapper)
+        poller.start([ctx], profileID: a, swapper: swapper)      // a's live refresh
+        #expect(poller.entries(for: a) == [entry])
+        #expect(poller.entries(for: b) == [entry])
+        poller.stopAll(profileID: a)
+        #expect(poller.entries(for: a).isEmpty)
+        #expect(poller.entries(for: b) == [entry])
+        poller.stopAll()
+    }
+
+    @Test("A duplicated workspace gets its own kubeconfig entry ids")
+    func duplicateMintsEntryIDs() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("kube-dup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.kubeconfigs = [KubeconfigEntry(name: "prod", serverURL: "https://k8s.example.com:6443", caCertPEM: "",
+                                         auth: .bearerToken("real"))]
+        try store.save(p)
+        let copy = try store.duplicate(p, named: "ws copy")
+        #expect(copy.kubeconfigs.count == 1)
+        #expect(copy.kubeconfigs[0].id != p.kubeconfigs[0].id)
+        #expect(copy.kubeconfigs[0].name == "prod" && copy.kubeconfigs[0].auth == p.kubeconfigs[0].auth)
+    }
+
     @Test("The live credential refresh applies the kubeconfigs' trust, as the launch does")
     func liveRefreshApplies() throws {
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()

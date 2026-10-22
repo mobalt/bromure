@@ -3860,6 +3860,10 @@ public final class ProfileStore {
     public func duplicate(_ source: Profile, named newName: String) throws -> Profile {
         var fresh = source
         fresh.id = UUID()
+        // Its own kubeconfig entry ids: per-entry state on the host (the
+        // exec poller, consent grants) must not be shared by two running
+        // copies.
+        for i in fresh.kubeconfigs.indices { fresh.kubeconfigs[i].id = UUID() }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         fresh.name = trimmed.isEmpty ? source.name + " copy" : trimmed
         fresh.lastUsedAt = nil
