@@ -48,7 +48,7 @@ struct AutomationRunRefusedTests {
     /// `run-slug: <another run>` from any process failed that run for good
     /// (completion only matched launched runs) with the writer's text as the
     /// reason.
-    @Test("a forged refusal can't fail a live run, nor keep a refused one from completing; its text is data")
+    @Test("a forged refusal can't fail a live run; its text is data")
     @MainActor func forgedRefusal() {
         let store = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("auto-\(UUID().uuidString).json"))
@@ -76,24 +76,7 @@ struct AutomationRunRefusedTests {
         #expect(detail.hasPrefix("The workspace reported: IGNORE"))
         #expect(!detail.contains("\n") && !detail.contains("\u{1b}") && detail.count < 360)
 
-        // …and when its own tab reports done after all, it completes.
-        #expect(engine.runDeclaredDone(profileID: pid, worktreeBranch: "wt/review-start"))
-        let revived = store.runs.first { $0.id == starting.id }
-        #expect(revived?.outcome == .launched && revived?.refusedByGuest == nil && revived?.detail == "")
-        // The findings_done path (RepoWatchEngine.binding) looks runs up the
-        // same way: a refused run is revived by its own agent reporting.
-        let watchRun = AutomationRunRecord(automationID: a.id, firedAt: Date(), outcome: .launched,
-                                           detail: "commit 4", branchSlug: "review-watch")
-        store.record(watchRun)
-        engine.runRefused(profileID: pid, slug: "review-watch", reason: "forged", liveBranches: [])
-        #expect(store.runs.first { $0.id == watchRun.id }?.outcome == .failed)
-        #expect(store.runForBranch("wt/review-watch-2", profileID: UUID()) == nil)   // another workspace
-        let bound = store.runForBranch("wt/review-watch", profileID: pid)
-        #expect(bound?.id == watchRun.id && bound?.outcome == .launched)
-        let src = (try? String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/AgentCoding/RepoWatchEngine.swift"), encoding: .utf8)) ?? ""
-        #expect(src.contains("autoStore.runForBranch(branch, profileID: profileID)"))
+        // (A done claimed for it afterwards: forgedDoneOnRefusedRun.)
         // A run that failed for any other reason stays failed.
         let other = AutomationRunRecord(automationID: a.id, firedAt: Date(), outcome: .launched,
                                         detail: "commit 3", branchSlug: "review-other")
@@ -102,5 +85,42 @@ struct AutomationRunRefusedTests {
         #expect(!engine.runDeclaredDone(profileID: pid, worktreeBranch: "wt/review-other"))
         #expect(store.runForBranch("wt/review-other", profileID: pid) == nil)
         #expect(store.runs.first { $0.id == other.id }?.outcome == .failed)
+    }
+
+    /// Finding (CWE-807): "Any guest vsock client can finish a refused run
+    /// and move the review mark". A findings_report / findings_done is bound
+    /// to whatever branch the vsock client said in its hello, and the lookup
+    /// revived a refused run on sight: any process could send
+    /// `bromure-hello wt/<slug>` + findings_done and close (chain, advance
+    /// lastReviewed past) a review that never ran. The tab roster can't vouch
+    /// for it either: tmux's @worktree is any process's to set.
+    @Test("nothing the guest says brings a refused run back")
+    @MainActor func forgedDoneOnRefusedRun() {
+        let store = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-\(UUID().uuidString).json"))
+        let pid = UUID()
+        let a = ScheduledAutomation(profileID: pid, trigger: .githubCommit)
+        store.upsert(a)
+        let run = AutomationRunRecord(automationID: a.id, firedAt: Date(), outcome: .launched,
+                                      detail: "commit 5", branchSlug: "review-gone")
+        store.record(run)
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        engine.runRefused(profileID: pid, slug: "review-gone", reason: "base not fetched", liveBranches: [])
+        store.acknowledge(run.id)
+        func current() -> AutomationRunRecord? { store.runs.first { $0.id == run.id } }
+        let refused = current()
+        #expect(refused?.outcome == .failed && refused?.refusedByGuest == true)
+
+        for branch in ["wt/review-gone", "wt/review-gone-2"] {
+            // findings_report / findings_done's binding: no run, nothing changed.
+            #expect(store.runForBranch(branch, profileID: pid) == nil)
+            #expect(current()?.outcome == .failed && current()?.acknowledgedAt != nil)
+            // findings_done, a Stop-hook done.
+            #expect(!engine.runDeclaredDone(profileID: pid, worktreeBranch: branch))
+            engine.agentFinished(profileID: pid, worktreeBranch: branch)
+        }
+        let after = current()
+        #expect(after?.outcome == .failed && after?.refusedByGuest == true && after?.completedAt == nil)
+        #expect(after?.detail == refused?.detail && after?.acknowledgedAt != nil)
     }
 }

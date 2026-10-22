@@ -406,8 +406,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// clone or a boot came first): its tab's grace starts here.
     var queuedAt: Date?
     /// Failed only because the guest said it refused the run (its outbox,
-    /// which any process there can write): a done from the run's own tab
-    /// still completes it.
+    /// which any process there can write), not by anything the host saw.
+    /// Nothing from the guest brings it back (`runForBranch`).
     var refusedByGuest: Bool?
 
     /// What a repository-watch review run covered, kept on the run so its
@@ -613,32 +613,29 @@ final class ScheduledAutomationStore {
         save()
     }
 
-    /// A launched run the guest refused to start (its base couldn't be
-    /// fetched, its checkout is gone, no tab opened): failed, with why —
-    /// not a green "launched" in Done. Only a run still launched and not done.
-    @discardableResult
-    /// The run behind a worktree branch (`wt/<slug>`, or with the guest's -N
-    /// dedup suffix) whose session runs in `profileID`, newest first: a
-    /// launched one, or one failed only by a refusal the guest reported —
-    /// which its own tab speaking (a done, findings) revives first.
+    /// The launched run behind a worktree branch (`wt/<slug>`, or with the
+    /// guest's -N dedup suffix) whose session runs in `profileID`, newest
+    /// first. A run the guest reported refused isn't one: the branch is what
+    /// a guest vsock client said in its hello, and every sign that run is up
+    /// after all (its done, its findings, its tab in the roster) comes from
+    /// the guest too, so taking one back let any process finish a review
+    /// that never ran, advance `lastReviewed` and fire the chain (Finding
+    /// CWE-807, "Any guest vsock client can finish a refused run and move the
+    /// review mark"). It stays failed; the next tick tries again.
     func runForBranch(_ branch: String, profileID: UUID) -> AutomationRunRecord? {
         guard branch.hasPrefix("wt/") else { return nil }
         let slugPart = String(branch.dropFirst(3))
         guard let run = runs.first(where: { run in
-            guard run.outcome == .launched
-                    || (run.outcome == .failed && run.refusedByGuest == true && run.completedAt == nil),
-                  let slug = run.branchSlug else { return false }
+            guard run.outcome == .launched, let slug = run.branchSlug else { return false }
             return slugPart == slug || (slugPart.hasPrefix(slug + "-")
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
         }), let automation = automation(run.automationID),
               (run.runProfileID ?? automation.profileID) == profileID
         else { return nil }
-        guard run.outcome == .failed else { return run }
-        guard revive(run.id) else { return nil }
-        return runs.first { $0.id == run.id }
+        return run
     }
 
-    /// `markFailed`, for a refusal the guest reported: revivable (`revive`).
+    /// `markFailed`, for a refusal the guest reported.
     func markRefused(_ runID: UUID, reason: String) -> Bool {
         guard markFailed(runID, reason: reason),
               let i = runs.firstIndex(where: { $0.id == runID }) else { return false }
@@ -647,20 +644,10 @@ final class ScheduledAutomationStore {
         return true
     }
 
-    /// A run the guest reported refused whose own tab spoke after all: it was
-    /// running (the report was wrong, or forged) — launched again.
-    func revive(_ runID: UUID) -> Bool {
-        guard let i = runs.firstIndex(where: { $0.id == runID }),
-              runs[i].outcome == .failed, runs[i].refusedByGuest == true,
-              runs[i].completedAt == nil else { return false }
-        runs[i].outcome = .launched
-        runs[i].refusedByGuest = nil
-        runs[i].acknowledgedAt = nil
-        runs[i].detail = ""
-        save()
-        return true
-    }
-
+    /// A launched run the guest refused to start (its base couldn't be
+    /// fetched, its checkout is gone, no tab opened): failed, with why —
+    /// not a green "launched" in Done. Only a run still launched and not done.
+    @discardableResult
     func markFailed(_ runID: UUID, reason: String) -> Bool {
         guard let i = runs.firstIndex(where: { $0.id == runID }),
               runs[i].outcome == .launched, runs[i].completedAt == nil else { return false }
@@ -2269,8 +2256,6 @@ final class ScheduledAutomationEngine {
     /// `profileID` (a clone-first run's clone, else the automation's own).
     private func launchedRun(profileID: UUID, branch: String)
         -> (run: AutomationRunRecord, automation: ScheduledAutomation)? {
-        // A run the guest reported refused comes back here: its own tab is
-        // talking, so the report was wrong (or another process wrote it).
         guard !finishSent.contains(branch),
               let run = store.runForBranch(branch, profileID: profileID),
               let automation = store.automation(run.automationID) else { return nil }
@@ -2285,8 +2270,9 @@ final class ScheduledAutomationEngine {
     /// can write (Finding CWE-807, "A guest process can fail any in-flight
     /// run by writing worktree-error.txt"), so it is a claim, not a fact: a
     /// run whose tab is up (`liveBranches`, the workspace's open worktree
-    /// tabs) isn't failed, one failed this way comes back when its own tab
-    /// reports done, and the text is shown as what the workspace said.
+    /// tabs) isn't failed, and the text is shown as what the workspace said.
+    /// One failed this way stays failed (see `runForBranch`): a wrong report
+    /// costs a retry, never a review recorded as done.
     func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?) {
         guard let run = store.runs.first(where: { r in
             r.outcome == .launched && r.completedAt == nil && r.branchSlug == slug
