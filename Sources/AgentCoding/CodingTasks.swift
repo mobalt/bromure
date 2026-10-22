@@ -2403,11 +2403,15 @@ final class CodingTaskEngine {
     }
 
     /// The guest refused to start a task's run (`worktree-error.txt` named
-    /// its slug): say why on the card now, not after the launch watch.
-    func runRefused(profileID: UUID, slug: String, reason: String) {
+    /// its slug): say why on the card now, not after the launch watch. A
+    /// claim any guest process can make (see the automation engine's
+    /// `runRefused`): not for a task whose tab is up, and shown as what the
+    /// workspace said.
+    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?) {
         guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
                                                   && $0.stage == .inProgress }) else { return }
-        store.mutate(t.id) { $0.lastError = reason }
+        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true { return }
+        store.mutate(t.id) { $0.lastError = ScheduledAutomationEngine.guestReported(reason) }
     }
 
     /// An agent that takes its brief on the command line: watch the launch
