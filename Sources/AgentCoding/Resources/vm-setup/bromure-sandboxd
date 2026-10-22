@@ -1780,8 +1780,9 @@ _APT_LOCK = threading.Lock()
 
 
 def _proc_table():
-    """{pid: (ppid, start, state)} for every process; `start` tells a reused
-    pid apart. /proc on the guest; `ps` elsewhere (the tests run on macOS)."""
+    """{pid: (ppid, start, state, pgid, sid)} for every process; `start`
+    tells a reused pid apart. /proc on the guest; `ps` elsewhere (the tests
+    run on macOS, whose ps has no session id: os.getsid)."""
     table = {}
     if os.path.isdir("/proc/self"):
         for name in os.listdir("/proc"):
@@ -1790,39 +1791,66 @@ def _proc_table():
             try:
                 with open("/proc/%s/stat" % name) as handle:
                     rest = handle.read().rsplit(")", 1)[-1].split()
-                table[int(name)] = (int(rest[1]), rest[19], rest[0])
+                table[int(name)] = (int(rest[1]), rest[19], rest[0], int(rest[2]), int(rest[3]))
             except (OSError, IndexError, ValueError):
                 pass
         return table
     try:
-        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return table
     for line in out.splitlines():
-        f = line.split(None, 3)
-        if len(f) == 4 and f[0].isdigit() and f[1].isdigit():
-            table[int(f[0])] = (int(f[1]), f[3].strip(), f[2][:1])
+        f = line.split(None, 4)
+        if len(f) == 5 and f[0].isdigit() and f[1].isdigit() and f[2].isdigit():
+            try:
+                sid = os.getsid(int(f[0]))
+            except OSError:
+                sid = None
+            table[int(f[0])] = (int(f[1]), f[4].strip(), f[3][:1], int(f[2]), sid)
     return table
 
 
-def _apt_tree(root, known):
+def _apt_tree(root, known, groups=None):
     """Update `known` ({pid: start}): drop the members that have exited, add
     every live descendant of `root` (None once apt itself is reaped: its pid
     may be reused) or of a member. A member stays one after its parent dies
-    and it is reparented -- which is what dpkg is once apt is gone."""
+    and it is reparented -- which is what dpkg is once apt is gone.
+
+    `groups` ({id}) holds the process groups and sessions the members are
+    in, and a live process in one of them is a member however it got there:
+    one started after a scan whose parent then exited (a maintainer script's
+    SIGTERM trap backgrounding a subshell) is reparented to init before any
+    scan sees its parent, so the parent link alone missed it (Finding
+    CWE-670, "apt stop misses root children reparented to init between
+    process-tree scans"). An id no live process carries any more is dropped
+    for good: only then could the kernel hand it out again. (A process that
+    calls setsid itself between two scans still gets away.)"""
     table = _proc_table()
     for pid, start in list(known.items()):
         row = table.get(pid)
         if row is None or row[1] != start or row[2] == "Z":
             del known[pid]
+    if groups is not None:
+        carried = {i for row in table.values() if row[2] != "Z" for i in row[3:5]}
+        groups.intersection_update(carried)
+    mine = {os.getpgrp(), os.getsid(0), 0, 1, None}
     grew = True
     while grew:
         grew = False
-        for pid, (ppid, start, state) in table.items():
-            if pid not in known and state != "Z" and (ppid == root or ppid in known):
+        for pid, (ppid, start, state, pgid, sid) in table.items():
+            if state == "Z":
+                continue
+            if pid not in known and (ppid == root or ppid in known
+                                     or (groups is not None and (pgid in groups or sid in groups))):
                 known[pid] = start
                 grew = True
+            # Every pass: a member (dpkg) may have called setsid since.
+            if pid in known and groups is not None:
+                for i in (pgid, sid):
+                    if i not in mine and i not in groups:
+                        groups.add(i)
+                        grew = True
     return known
 
 
@@ -1838,15 +1866,23 @@ def _apt_stop(proc):
     group, so dpkg and maintainer scripts keep running".) So the whole tree
     is tracked by pid, through the reparenting, and SIGTERMed; whatever is
     left after APT_STOP_GRACE_S is SIGKILLed."""
-    tree = _apt_tree(proc.pid, {})
+    groups = {proc.pid}                   # apt's own group and session
+    tree = _apt_tree(proc.pid, {}, groups)
     signalled = set()
 
     def send(sig):
-        if proc.returncode is None:       # once reaped, its pgid may be reused
+        # Every group a member is in (apt's; dpkg's, which apt started
+        # with setsid; a session id that isn't a group just fails), then
+        # each member: SIGTERM once each (a repeat would re-enter dpkg's
+        # handler before it's done), SIGKILL every pass.
+        for pgid in sorted(groups):
+            if sig == signal.SIGTERM and ("g", pgid) in signalled:
+                continue
             try:
-                os.killpg(proc.pid, sig)
+                os.killpg(pgid, sig)
             except OSError:
                 pass
+            signalled.add(("g", pgid))
         for pid in list(tree):
             if sig == signal.SIGTERM and pid in signalled:
                 continue
@@ -1861,7 +1897,7 @@ def _apt_stop(proc):
     killed_at = None
     while True:
         done = proc.poll() is not None
-        _apt_tree(None if done else proc.pid, tree)
+        _apt_tree(None if done else proc.pid, tree, groups)
         if done and not tree:
             return
         if killed_at is None and time.time() > grace:
