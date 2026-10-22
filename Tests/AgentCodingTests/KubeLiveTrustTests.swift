@@ -82,3 +82,71 @@ struct KubeLiveTrustTests {
         #expect(!engine.contains("execPoller.stopAll()"))
     }
 }
+
+/// Finding (CWE-670): "Live refresh publishes an empty Kubernetes exec token
+/// before the plugin runs". A live credential push re-minted every exec
+/// entry's fake with an empty real token and rewrote the guest kubeconfig
+/// with it: kubectl sent an empty bearer until the plugin next ran (never,
+/// for refreshSeconds, if it failed). A 1Password-sourced token got its
+/// `op://` reference back the same way.
+@Suite("Live refresh: a token a refresher already resolved stays in force")
+struct LiveRefreshPlaceholderTests {
+    func exec(_ args: [String] = ["get-token"]) -> KubeconfigEntry {
+        KubeconfigEntry(name: "eks", serverURL: "https://k8s.example.com:6443", caCertPEM: "",
+                        auth: .execPlugin(command: "/usr/local/bin/aws", args: args, refreshSeconds: 600))
+    }
+
+    @Test("an unchanged exec entry keeps its fake across a re-materialize; a changed plugin gets a new one")
+    @MainActor func execFakeStable() throws {
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.kubeconfigs = [exec()]
+        let m = KubeconfigMaterializer()
+        let first = m.materialize(profile: p, bromureCAPEM: "PEM")
+        let fake = try #require(first.execContexts.first?.fakeToken)
+        let again = m.materialize(profile: p, bromureCAPEM: "PEM", reusingExec: first.execContexts)
+        #expect(again.execContexts.first?.fakeToken == fake)
+        #expect(again.yaml.contains(fake))
+        // Another plugin invocation is another credential: a fresh fake.
+        p.kubeconfigs[0].auth = .execPlugin(command: "/usr/local/bin/aws", args: ["other"], refreshSeconds: 600)
+        let changed = m.materialize(profile: p, bromureCAPEM: "PEM", reusingExec: first.execContexts)
+        #expect(changed.execContexts.first?.fakeToken != fake)
+    }
+
+    @Test("the merge carries a resolved token onto a placeholder for the same fake and host, with the fresh consent")
+    func mergeCarriesResolved() {
+        let current = [
+            TokenMap.Entry(fake: "brm-k8s-a", real: "resolved-exec", host: "k8s.example.com"),
+            TokenMap.Entry(fake: "brm-op-b", real: "resolved-op", host: "api.example.com"),
+            TokenMap.Entry(fake: "brm-old", real: "old-real", host: "api.example.com"),
+        ]
+        let fresh = [
+            TokenMap.Entry(fake: "brm-k8s-a", real: "", host: "k8s.example.com",
+                           consentCredentialID: "kube:x", consentDisplayName: "kubeconfig"),
+            TokenMap.Entry(fake: "brm-op-b", real: "op://vault/item/field", host: "api.example.com"),
+            TokenMap.Entry(fake: "brm-k8s-new", real: "", host: "k8s.example.com"),        // nothing resolved yet
+            TokenMap.Entry(fake: "brm-k8s-a", real: "", host: "other.example.com"),        // another host: not carried
+            TokenMap.Entry(fake: "brm-static", real: "edited", host: "api.example.com"),
+        ]
+        let merged = TokenMap.liveMerge(fresh: fresh, current: current).entries
+        func real(_ fake: String, _ host: String) -> String? { merged.first { $0.fake == fake && $0.host == host }?.real }
+        #expect(real("brm-k8s-a", "k8s.example.com") == "resolved-exec")
+        #expect(merged.first { $0.fake == "brm-k8s-a" && $0.host == "k8s.example.com" }?.consentCredentialID == "kube:x")
+        #expect(real("brm-op-b", "api.example.com") == "resolved-op")
+        #expect(real("brm-k8s-new", "k8s.example.com") == "")
+        #expect(real("brm-k8s-a", "other.example.com") == "")
+        #expect(real("brm-static", "api.example.com") == "edited")
+        #expect(real("brm-old", "api.example.com") == "old-real")             // a not-reissued fake stays
+        #expect(merged.count == 6)
+    }
+
+    @Test("the live push re-materializes with the poller's contexts and merges, not replaces")
+    func livePushWiring() throws {
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let live = try #require(src.range(of: "func pushLiveCredentials("))
+        let body = src[live.upperBound...].prefix(6000)
+        #expect(body.contains("reusingExec: engine.kubeExecContexts(for: profile.id)"))
+        #expect(body.contains("TokenMap.liveMerge(fresh: fresh.entries"))
+    }
+}

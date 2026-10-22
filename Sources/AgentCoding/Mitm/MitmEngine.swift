@@ -73,6 +73,12 @@ public final class MitmEngine {
     /// re-resolve op-sourced credentials every 120 s and update the swap map
     /// in place. Cancelled in `unregister(profileID:)`.
     public let opRefresher = OnePasswordRefresher()
+    /// The exec contexts the poller runs per workspace, so a live refresh
+    /// can keep their fakes (`KubeconfigMaterializer.materialize(reusingExec:)`).
+    private var kubeExecContexts: [UUID: [KubeconfigMaterializer.ExecContext]] = [:]
+    public func kubeExecContexts(for profileID: UUID) -> [KubeconfigMaterializer.ExecContext] {
+        kubeExecContexts[profileID] ?? []
+    }
 
     /// Per-profile trace level + session id, set by ACAppDelegate at
     /// session launch. The HTTPProxy connection looks these up to
@@ -749,6 +755,7 @@ public final class MitmEngine {
     /// its YAML and fakes but no CA ("signed by a CA the host running
     /// Bromure AC does not trust") and no client certificate.
     public func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID) {
+        kubeExecContexts[profileID] = mat.execContexts.isEmpty ? nil : mat.execContexts
         Self.applyKubeMaterial(mat, profileID: profileID, identities: clientIdentities,
                                clusterCAs: clusterCAs, poller: execPoller, swapper: swapper)
     }
@@ -788,6 +795,7 @@ public final class MitmEngine {
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
         execPoller.stopAll(profileID: profileID)
+        kubeExecContexts[profileID] = nil
         opRefresher.stop(profileID: profileID)
         // Drop any consent grants the user issued during this session
         // — "Allow for the rest of the session" must not survive a

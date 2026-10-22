@@ -296,9 +296,15 @@ public final class KubeconfigMaterializer {
     /// hand back the swap entries + client identities. Pure function —
     /// callers thread the result into the swap map / identity registry
     /// / exec poller before VM start.
+    ///
+    /// `reusingExec`: the exec contexts in force (a live refresh). An exec
+    /// entry whose plugin, arguments and host are unchanged keeps its fake,
+    /// so the guest's kubeconfig keeps naming the token the poller already
+    /// resolved rather than a new one with nothing behind it yet.
     public func materialize(profile: Profile,
                             bromureCAPEM: String,
-                            directClusters: [KubeDirectCluster] = []) -> Materialized {
+                            directClusters: [KubeDirectCluster] = [],
+                            reusingExec: [ExecContext] = []) -> Materialized {
         var contexts: [String] = []
         var clusters: [String] = []
         var users: [String] = []
@@ -413,7 +419,9 @@ public final class KubeconfigMaterializer {
                 // plugin, the host poller does. Initial fake is a
                 // placeholder; the poller updates the real value
                 // before kubectl needs it.
-                let fake = makeFakeToken()
+                let fake = reusingExec.first {
+                    $0.entryID == entry.id && $0.host == entry.hostPattern && $0.command == cmd && $0.args == args
+                }?.fakeToken ?? makeFakeToken()
                 bearerSwaps.append(BearerSwap(
                     host: entry.hostPattern,
                     fakeToken: fake, realToken: "",

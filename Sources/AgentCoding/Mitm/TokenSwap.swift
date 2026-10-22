@@ -76,9 +76,41 @@ public struct TokenMap: Sendable {
             self.consentCredentialID = consentCredentialID
             self.consentDisplayName = consentDisplayName
         }
+
+        /// This entry with another real value, everything else kept.
+        public func withReal(_ real: String) -> Entry {
+            Entry(fake: fake, real: real, host: host, header: header, body: body,
+                  acceptSiblings: acceptSiblings, consentCredentialID: consentCredentialID,
+                  consentDisplayName: consentDisplayName, paths: paths)
+        }
+
+        /// A real value a refresher fills in later: an exec plugin's
+        /// (empty until it first runs) or a 1Password reference.
+        var isPlaceholder: Bool { real.isEmpty || OnePasswordCLI.reference(in: real) != nil }
     }
 
     public var entries: [Entry]
+
+    /// A live refresh's map: `fresh` (re-minted from the profile) merged
+    /// over `current` (what the proxy holds). A fresh entry whose real is
+    /// still a placeholder takes the real value `current` already has for
+    /// that fake and host -- the exec poller or 1Password loop resolved it
+    /// -- instead of publishing the placeholder: an empty bearer to the
+    /// cluster (or the `op://` literal) until the refresher next ran
+    /// (Finding CWE-670, "Live refresh publishes an empty Kubernetes exec
+    /// token before the plugin runs"). Its consent metadata is the fresh
+    /// one's. Entries whose fakes weren't reissued stay, so a process still
+    /// holding an old fake finishes its work.
+    public static func liveMerge(fresh: [Entry], current: [Entry]) -> TokenMap {
+        let freshFakes = Set(fresh.map(\.fake))
+        let carried = fresh.map { e -> Entry in
+            guard e.isPlaceholder,
+                  let held = current.first(where: { $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder })
+            else { return e }
+            return e.withReal(held.real)
+        }
+        return TokenMap(entries: carried + current.filter { !freshFakes.contains($0.fake) })
+    }
 
     public init(entries: [Entry] = []) {
         self.entries = entries

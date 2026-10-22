@@ -11689,7 +11689,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var fresh = plan.tokenMap()
             let kubeMat = KubeconfigMaterializer().materialize(
                 profile: profile, bromureCAPEM: engine.ca.certificatePEM,
-                directClusters: kubeClusterEngine.directClusters(for: profile.id))
+                directClusters: kubeClusterEngine.directClusters(for: profile.id),
+                reusingExec: engine.kubeExecContexts(for: profile.id))
             kubeYAML = kubeMat.yaml
             for swap in kubeMat.bearerSwaps {
                 fresh.entries.append(TokenMap.Entry(
@@ -11703,10 +11704,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // reissued) lets in-flight work finish on the old value instead
             // of erroring, while new shells pick up the new fake. Same
             // additive pattern the subscription / OAuth coordinators use.
-            let freshFakes = Set(fresh.entries.map(\.fake))
-            let preserved = engine.swapper.entries(for: profile.id)
-                .filter { !freshFakes.contains($0.fake) }
-            engine.swapper.setMap(TokenMap(entries: fresh.entries + preserved),
+            // A placeholder (an exec token not fetched yet, a 1Password
+            // reference) keeps the real value already resolved for its fake.
+            engine.swapper.setMap(TokenMap.liveMerge(fresh: fresh.entries,
+                                                     current: engine.swapper.entries(for: profile.id)),
                                   for: profile.id)
             // …and the rest of what the kubeconfigs need, as at launch: a
             // kubeconfig imported while the VM runs must be trusted (its
