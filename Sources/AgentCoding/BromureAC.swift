@@ -2671,6 +2671,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
     private var ephemeralProfiles: Set<Profile.ID> = []
+    /// Workspaces between a reboot's teardown and its relaunch: a reboot
+    /// isn't the end of a `vm run --rm` one. Deleting it there left the
+    /// relaunch nothing to boot -- the waits for Kimi or a remote prompt
+    /// found it gone and gave up, and a direct relaunch recreated it no
+    /// longer ephemeral (Finding CWE-670, "Ephemeral reboot is cancelled
+    /// when launch waits on Kimi or a remote prompt").
+    private var rebootingProfiles: Set<Profile.ID> = []
 
     // MARK: Boot filesystem-failure remedies
     //
@@ -6915,6 +6922,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
+        rebootingProfiles.insert(id)
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -6928,6 +6936,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] == nil { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        rebootingProfiles.remove(id)
         launch(profile, detached: !wasAttached, remoteInitiated: remoteInitiated)
         var up = false
         for _ in 0..<600 {   // first boots can take a while
@@ -12115,7 +12124,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
                 }
                 // Stopped while it provisioned: it stays off.
-                guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else { return }
+                guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else {
+                    self.dropAbandonedEphemeral(profile.id); return
+                }
                 self.launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                             remoteInitiated: remoteInitiated, preflightResolved: preflightResolved,
                             unattended: unattended, quiet: quiet, kimiProvisioned: true)
@@ -12189,7 +12200,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             launchQuestions.end(profile.id)
             switch wipe {
             case .wiped: break
-            case .cancelled: return
+            case .cancelled: dropAbandonedEphemeral(profile.id); return
             case .diskInUse:
                 // Confirmed, but not carried out: say so, never wipe the open disk.
                 showWipeSkipped(profile)
@@ -14522,7 +14533,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if SessionDisk.isCompromised(profile: profile, store: store) {
             switch await confirmWipeAndProceedAsync(profile: profile) {
             case .wiped: break
-            case .cancelled: return
+            case .cancelled: dropAbandonedEphemeral(profile.id); return
             case .diskInUse:
                 // The start already returned to the client: it hears it
                 // through the same prompt channel the question came on.
@@ -14531,6 +14542,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 _ = await PendingPromptBroker.shared.askAsync(
                     profileID: profile.id, title: title, message: message,
                     buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
                 return
             }
         }
@@ -14554,6 +14566,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: profile.id, title: title, message: message,
                         buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
                 }
+                dropAbandonedEphemeral(profile.id)
                 return
             }
         }
@@ -15524,6 +15537,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// explicit stop). Idempotent: runs per-session teardown once, drops the
     /// registry entry, and closes any attached window.
     @MainActor
+    /// A launch that gave up before booting -- a stop asked while it waited
+    /// (Kimi provisioning, a boot remedy), a remote or local prompt
+    /// cancelled or skipped: a `vm run --rm` workspace that isn't running is
+    /// over, and goes as its stop would have taken it. (A reboot keeps it
+    /// through its teardown -- `rebootingProfiles` -- so it can boot again;
+    /// abandoned, nothing else would ever delete it.)
+    private func dropAbandonedEphemeral(_ id: Profile.ID) {
+        // Not while a boot holds the disk (begun, not registered yet): that
+        // boot is the workspace's, and its stop deletes it.
+        guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),
+              ephemeralProfiles.remove(id) != nil,
+              let p = profiles.first(where: { $0.id == id }) else { return }
+        try? store.delete(p)
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
     func handleSessionStopped(profileID: Profile.ID) {
         guard let session = runningSessions[profileID] else { return }   // already handled
         // The boot-failure cycle (if any) dies with the session. A queued
@@ -15543,8 +15573,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // own view in `removePane`, wired in the unified-window phase).
         unifiedWindow?.removePane(profileID)
         unregisterPane(profileID)
-        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped.
-        if ephemeralProfiles.remove(profileID) != nil,
+        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped
+        // -- not when it is only rebooting (it stays ephemeral).
+        if !rebootingProfiles.contains(profileID), ephemeralProfiles.remove(profileID) != nil,
            let p = profiles.first(where: { $0.id == profileID }) {
             try? store.delete(p)
             profiles = store.loadAll()
@@ -15663,7 +15694,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // teardown — handleSessionStopped clears the remedy queue.
             let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
+            rebootingProfiles.insert(profileID)
             handleSessionStopped(profileID: profileID)
+            rebootingProfiles.remove(profileID)
             if let profile {
                 if let remedy {
                     // In use while the remedy works on the disk; handed to
@@ -15674,7 +15707,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let stop = await self.whileHoldingDisk(profileID) {
                             await self.executeBootRemedy(remedy, profile: profile, pane: nil)
                         }
-                        guard stop == nil else { return }
+                        guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }
                         self.launch(profile, detached: true)
                     }
                 } else {
