@@ -90,6 +90,53 @@ public final class BinaryIdentityService: @unchecked Sendable {
         }
     }
 
+    /// The program attested for the latest connection DENIED to each
+    /// destination ("pid|host-or-ip|port"), filed when the deny is decided.
+    /// A lookup in `recentExes` at Allow's click follows whatever connected
+    /// there since -- any guest program can dial the address after the deny
+    /// and so be the one the rule names (Finding CWE-284, "Drawer Allow on an
+    /// L4 port names whoever last dialed the destination IP"). An allowed
+    /// connection never touches this; a later blocked one is the row's
+    /// latest block, so it is its program.
+    private var deniedExes: [String: (exe: String, at: Date)] = [:]
+    /// As long as the Sandbox drawer lists a block (`PolicyDrawer`'s two
+    /// hours): past `recentExes`' hour, Allow would follow the newest
+    /// connection again.
+    static let deniedSpan: TimeInterval = 2 * 3600
+
+    /// A connection to `destinations` (the names it was decided for, then
+    /// its IP) on `port` was denied for the program `exe`.
+    public func noteDenied(_ exe: String?, profileID: UUID, destinations: [String], port: Int) {
+        guard let exe, !exe.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        for d in destinations where !d.isEmpty {
+            deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, now)
+        }
+        if deniedExes.count > 2048 {
+            let cutoff = now.addingTimeInterval(-Self.deniedSpan)
+            deniedExes = deniedExes.filter { $0.value.at > cutoff }
+        }
+    }
+
+    /// The program the latest deny to `destinations` on `port` was for, within
+    /// `deniedSpan` -- the first destination that has one, in the order given.
+    public func deniedExe(profileID: UUID, destinations: [String], port: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        let cutoff = Date().addingTimeInterval(-Self.deniedSpan)
+        for d in destinations {
+            if let r = deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
+        }
+        return nil
+    }
+
+    /// The program a blocked row's Allow names: its deny's, else (a row from
+    /// before the deny was filed) the one that last connected there.
+    public func blockedExe(profileID: UUID, destinations: [String], port: Int) -> String? {
+        deniedExe(profileID: profileID, destinations: destinations, port: port)
+            ?? recentExe(profileID: profileID, destinations: destinations, port: port)
+    }
+
     /// The MiTM learned the flow's name (SNI or Host header) after asking
     /// by IP: file the attested program under the name as well, which is
     /// what the blocked row shows and what Allow looks it up by.
@@ -99,23 +146,21 @@ public final class BinaryIdentityService: @unchecked Sendable {
     }
 
     /// The program that connected to `destinations` on `port` within the
-    /// hour, as the attestor reported it — the FIRST destination with an
-    /// attested one, in the order given (a hostname, then its IP); a guessed
-    /// one only when none is attested. Not the newest across them: an IP is
-    /// shared (a CDN address, or any guest process that dials it after a
-    /// deny), so a later program there must not replace the one attested for
-    /// the name on the row (Finding CWE-284, "Drawer Allow names whichever
-    /// program last used the destination IP"). A name only guessed from the
-    /// DNS cache (a port the MiTM doesn't see) gives way to the IP, whose
-    /// program is the one attested for the flow just decided.
+    /// hour, as the attestor reported it — the FIRST destination with one, in
+    /// the order given (a hostname, then its IP), a guessed name included.
+    /// Not the newest across them: an IP is shared (a CDN address, or any
+    /// guest process that dials it after a deny), so a later program there
+    /// must not replace the one filed for the name on the row (Finding
+    /// CWE-284, "Drawer Allow names whichever program last used the
+    /// destination IP"; and "Drawer Allow on an L4 port names whoever last
+    /// dialed the destination IP" for a name guessed from the DNS cache).
     public func recentExe(profileID: UUID, destinations: [String], port: Int) -> String? {
         lock.lock(); defer { lock.unlock() }
         let cutoff = Date().addingTimeInterval(-3600)
-        let fresh = destinations.compactMap { d -> (exe: String, at: Date, guess: Bool)? in
-            guard let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff else { return nil }
-            return r
+        for d in destinations {
+            if let r = recentExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
         }
-        return (fresh.first { !$0.guess } ?? fresh.first)?.exe
+        return nil
     }
 
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
@@ -198,6 +243,7 @@ public final class BinaryIdentityService: @unchecked Sendable {
             // don't replace the program attested for any of them.
             if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport), replace: false) }
             let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
+            if v == .deny { self.noteDenied(id?.exe, profileID: profileID, destinations: hostnames + [dst], port: Int(dport)) }
             self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, Date()); self.lock.unlock()
         }
         return nil

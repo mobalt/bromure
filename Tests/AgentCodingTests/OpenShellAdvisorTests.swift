@@ -303,10 +303,11 @@ struct OpenShellAdvisorTests {
         l4("/usr/bin/tool")                                        // the connection just blocked
         #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 8443, ip: ip).binaries == ["/usr/bin/tool"])
         #expect(ids.recentExe(profileID: pid, destinations: ["cdn.example"], port: 8443) == "/usr/bin/tool")
-        // The row's IP is attested for the flow just decided; a guessed name
-        // gives way to it.
+        // A later program on the IP alone doesn't take the row's name over
+        // (Finding CWE-284, "Drawer Allow on an L4 port names whoever last
+        // dialed the destination IP"): the name comes first, guess or not.
         ids.noteExe("/tmp/third", profileID: pid, destinations: [ip], port: 8443)
-        #expect(ids.recentExe(profileID: pid, destinations: ["api.example", ip], port: 8443) == "/tmp/third")
+        #expect(ids.recentExe(profileID: pid, destinations: ["api.example", ip], port: 8443) == "/usr/bin/tool")
         // A name the flow itself named (SNI / Host) stays attested: a guess
         // doesn't replace it, nor turn it into a guess.
         ids.noteHost(.init(exe: "/usr/bin/curl", sha256: "a", ancestors: []), profileID: pid, host: "named.example", port: 8443)
@@ -314,6 +315,40 @@ struct OpenShellAdvisorTests {
         ids.noteExe("/usr/bin/curl", profileID: pid, destinations: ["named.example"], port: 8443, replace: false)
         ids.noteExe("/tmp/evil", profileID: pid, destinations: ["named.example"], port: 8443, replace: false)
         #expect(ids.recentExe(profileID: pid, destinations: ["named.example", ip], port: 8443) == "/usr/bin/curl")
+    }
+
+    /// Finding (CWE-284): "Drawer Allow on an L4 port names whoever last
+    /// dialed the destination IP". Allow looked the program up when clicked,
+    /// so any guest program that connected to the address since the deny --
+    /// filing both the IP and its cached names -- was the one the rule named.
+    /// The program is now filed with the deny itself.
+    @Test("Allow names the program the deny was for, whatever connected there since")
+    func allowNamesTheDeniedProgram() throws {
+        let pid = UUID(), ids = BinaryIdentityService.shared
+        let ip = "104.16.0.9"
+        func l4(_ exe: String, denied: Bool) {
+            ids.noteExe(exe, profileID: pid, destinations: [ip], port: 9443)
+            ids.noteExe(exe, profileID: pid, destinations: ["api.example"], port: 9443, replace: false)
+            if denied { ids.noteDenied(exe, profileID: pid, destinations: ["api.example", ip], port: 9443) }
+        }
+        l4("/usr/bin/tool", denied: true)                          // the row
+        Thread.sleep(forTimeInterval: 0.01)
+        l4("/tmp/steer", denied: false)                            // allowed, after the deny
+        #expect(ids.recentExe(profileID: pid, destinations: ["api.example", ip], port: 9443) == "/tmp/steer")
+        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 9443, ip: ip).binaries == ["/usr/bin/tool"])
+        // Looked up by the IP alone (an IP row) too.
+        #expect(ids.blockedExe(profileID: pid, destinations: [ip], port: 9443) == "/usr/bin/tool")
+        // A later deny there is the row's latest block: its program.
+        l4("/usr/bin/other", denied: true)
+        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 9443, ip: ip).binaries == ["/usr/bin/other"])
+        // Every place a deny is decided for a program files it.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ident = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BinaryIdentityService.swift"), encoding: .utf8)
+        #expect(ident.contains("if v == .deny { self.noteDenied(id?.exe"))
+        let mitm = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/Mitm/MitmEngine.swift"), encoding: .utf8)
+        #expect(mitm.components(separatedBy: "BinaryIdentityService.shared.noteDenied(identity?.exe").count == 3)
+        let drawer = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/PolicyDrawer.swift"), encoding: .utf8)
+        #expect(!drawer.contains("BinaryIdentityService.shared.recentExe("))
     }
 
     @Test("Allow names the program attested for the row's hostname, not a newer occupant of its IP")
