@@ -80,3 +80,45 @@ struct VsockFramePoolTests {
         #expect(r.held == 0)
     }
 }
+
+/// The same flaw, wider (found auditing for the above): long-lived loops on
+/// raw threads, never-returning GCD blocks, or inside one never-suspending
+/// task job (the WebSocket relays: the runtime drains only between jobs)
+/// each drain once per pass.
+@Suite("Long-lived MITM and relay loops drain per pass")
+struct LongLivedLoopPoolTests {
+    private static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+
+    private func source(_ path: String) throws -> String {
+        try String(contentsOf: Self.root.appendingPathComponent(path), encoding: .utf8)
+    }
+
+    /// The text from `start` up to the next `func ` (one function's body).
+    private func body(_ src: String, _ start: String) throws -> Substring {
+        let r = try #require(src.range(of: start))
+        let rest = src[r.upperBound...]
+        return rest[..<(rest.range(of: " func ")?.lowerBound ?? rest.endIndex)]
+    }
+
+    @Test("each long-lived loop opens one pool per pass")
+    func loopsArePooled() throws {
+        let checks: [(file: String, fn: String, pooled: String)] = [
+            ("Sources/AgentCoding/Mitm/WebSocketTransform.swift", "static func clientToUpstream(", "let go = autoreleasepool {"),
+            ("Sources/AgentCoding/Mitm/WebSocketTransform.swift", "static func upstreamToClient(", "let go = autoreleasepool {"),
+            ("Sources/AgentCoding/Mitm/HTTPProxy.swift", "private static func pumpDirection(", "let go = autoreleasepool {"),
+            ("Sources/AgentCoding/BrowserCDP.swift", "private func receiveLoop()", "autoreleasepool { handleMessage(payload) }"),
+            ("Sources/AgentCoding/Inference/InferenceRepairProxy.swift", "private func handle(clientFD: Int32, enginePort: Int)", "while autoreleasepool(invoking:"),
+            ("Sources/AgentCoding/Inference/MLXServer.swift", "private func handle(clientFD: Int32)", "while autoreleasepool(invoking:"),
+            ("Sources/AgentCoding/DelegationRelayClient.swift", "func start()", "let go = autoreleasepool {"),
+            ("Sources/AgentCoding/BrowserMCPRelayClient.swift", "func start()", "let go = autoreleasepool {"),
+            ("Sources/SandboxEngine/VMNetSwitch.swift", "private func readVMLoop(", "autoreleasepool { handleFromVM(port.id, buf, n) }"),
+            ("Sources/AgentCoding/P2P/TurnTLS.swift", "private static func startUplink(", "while autoreleasepool(invoking:"),
+            ("Sources/AgentCoding/P2P/TurnTLS.swift", "private static func startDownlink(", "while autoreleasepool(invoking:"),
+        ]
+        for c in checks {
+            let b = try body(try source(c.file), c.fn)
+            #expect(b.contains(c.pooled), "\(c.file) \(c.fn) runs without a per-pass pool")
+        }
+    }
+}

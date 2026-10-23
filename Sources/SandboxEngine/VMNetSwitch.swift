@@ -475,7 +475,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         while !port.stopped {
             let n = Darwin.read(port.hostFD, buf, bufSize)
             guard n > 0 else { break }
-            handleFromVM(port.id, buf, n)
+            // This GCD block never returns, so its pool never drains; the
+            // egress observer handleFromVM calls builds Foundation objects.
+            autoreleasepool { handleFromVM(port.id, buf, n) }
         }
     }
 

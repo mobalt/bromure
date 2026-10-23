@@ -712,75 +712,81 @@ enum WSTransformRelay {
         var eof = false
         var skippedReported = 0
         while true {
-            if Task.isCancelled { return }
-            if !eof {
-                drain: while true {
-                    let outcome: StreamReadOutcome
-                    do { outcome = try client.readNB() } catch { return }
-                    switch outcome {
-                    case .bytes(let d): onChunk(d); reader.feed(d)
-                    case .wouldBlock: break drain
-                    case .eof: eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                if !eof {
+                    drain: while true {
+                        let outcome: StreamReadOutcome
+                        do { outcome = try client.readNB() } catch { return false }
+                        switch outcome {
+                        case .bytes(let d): onChunk(d); reader.feed(d)
+                        case .wouldBlock: break drain
+                        case .eof: eof = true; break drain
+                        }
                     }
                 }
-            }
-            while let f = reader.next() {
-                if f.isControl {
-                    // Close waits behind held messages; ping/pong may go
-                    // between them (RFC 6455 §5.4 lets control frames
-                    // interleave with a message's fragments).
-                    if f.opcode == WSFrame.close { queue.append(.raw(f.raw)) } else { out.append(f.raw) }
-                    continue
-                }
-                switch assembler.add(f) {
-                case .incomplete: break
-                case .passthrough(let raw): queue.append(.raw(raw))
-                case .complete(let op, let payload, let raw):
-                    queue.append(f.rsv == 0 ? .message(opcode: op, payload: payload, raw: raw) : .raw(raw))
-                case .protocolError:
-                    FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad client framing — closing\n".utf8))
-                    return
-                }
-            }
-            if reader.failed { return }
-            if assembler.oversized > skippedReported {
-                skippedReported = assembler.oversized
-                HTTPMitmConnection.recordScanSkipped(
-                    host: g.host, path: g.path, engines: ["pii", "prompt_injection"],
-                    reason: "WebSocket message too large to scan", profileID: g.profileID)
-            }
-            while let first = queue.first {
-                if let inf = inflight {
-                    guard let verdict = inf.box.take() else { break }
-                    inflight = nil
-                    queue.removeFirst()
-                    guard case .message(let op, _, let raw) = first else { continue }
-                    switch verdict {
-                    case .forward(nil): out.append(raw)
-                    case .forward(let p?): out.append(WSFrame.encode(opcode: op, payload: p, masked: true))
-                    case .block(let reply):
-                        inject.push(WSFrame.encode(opcode: WSFrame.text, payload: reply, masked: false))
+                while let f = reader.next() {
+                    if f.isControl {
+                        // Close waits behind held messages; ping/pong may go
+                        // between them (RFC 6455 §5.4 lets control frames
+                        // interleave with a message's fragments).
+                        if f.opcode == WSFrame.close { queue.append(.raw(f.raw)) } else { out.append(f.raw) }
+                        continue
                     }
-                    continue
+                    switch assembler.add(f) {
+                    case .incomplete: break
+                    case .passthrough(let raw): queue.append(.raw(raw))
+                    case .complete(let op, let payload, let raw):
+                        queue.append(f.rsv == 0 ? .message(opcode: op, payload: payload, raw: raw) : .raw(raw))
+                    case .protocolError:
+                        FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad client framing — closing\n".utf8))
+                        return false
+                    }
                 }
-                switch first {
-                case .raw(let r):
-                    out.append(r)
-                    queue.removeFirst()
-                case .message(_, let payload, _):
-                    let box = Box<WSContentGuard.ClientVerdict>()
-                    let task = Task.detached { box.set(await g.client(payload)) }
-                    inflight = (box, task)
+                if reader.failed { return false }
+                if assembler.oversized > skippedReported {
+                    skippedReported = assembler.oversized
+                    HTTPMitmConnection.recordScanSkipped(
+                        host: g.host, path: g.path, engines: ["pii", "prompt_injection"],
+                        reason: "WebSocket message too large to scan", profileID: g.profileID)
                 }
+                while let first = queue.first {
+                    if let inf = inflight {
+                        guard let verdict = inf.box.take() else { break }
+                        inflight = nil
+                        queue.removeFirst()
+                        guard case .message(let op, _, let raw) = first else { continue }
+                        switch verdict {
+                        case .forward(nil): out.append(raw)
+                        case .forward(let p?): out.append(WSFrame.encode(opcode: op, payload: p, masked: true))
+                        case .block(let reply):
+                            inject.push(WSFrame.encode(opcode: WSFrame.text, payload: reply, masked: false))
+                        }
+                        continue
+                    }
+                    switch first {
+                    case .raw(let r):
+                        out.append(r)
+                        queue.removeFirst()
+                    case .message(_, let payload, _):
+                        let box = Box<WSContentGuard.ClientVerdict>()
+                        let task = Task.detached { box.set(await g.client(payload)) }
+                        inflight = (box, task)
+                    }
+                }
+                if !flush(&out, to: upstream) { return false }
+                if eof && queue.isEmpty && inflight == nil { return false }
+                if eof {
+                    usleep(20_000)   // only a scan left to finish
+                    return true
+                }
+                var pfd = pollfd(fd: client.fd, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, inflight == nil ? 250 : 20) < 0 && errno != EINTR { return false }
+                return true
             }
-            if !flush(&out, to: upstream) { return }
-            if eof && queue.isEmpty && inflight == nil { return }
-            if eof {
-                usleep(20_000)   // only a scan left to finish
-                continue
-            }
-            var pfd = pollfd(fd: client.fd, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, inflight == nil ? 250 : 20) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 
@@ -790,48 +796,54 @@ enum WSTransformRelay {
         var assembler = WSMessageAssembler()
         var out = Data()
         while true {
-            if Task.isCancelled { return }
-            var eof = false
-            drain: while true {
-                let outcome: StreamReadOutcome
-                do { outcome = try upstream.readNB() } catch { return }
-                switch outcome {
-                case .bytes(let d): onChunk(d); reader.feed(d)
-                case .wouldBlock: break drain
-                case .eof: eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                var eof = false
+                drain: while true {
+                    let outcome: StreamReadOutcome
+                    do { outcome = try upstream.readNB() } catch { return false }
+                    switch outcome {
+                    case .bytes(let d): onChunk(d); reader.feed(d)
+                    case .wouldBlock: break drain
+                    case .eof: eof = true; break drain
+                    }
                 }
-            }
-            while let f = reader.next() {
-                if f.isControl {
-                    if f.opcode == WSFrame.close {
-                        for p in g.serverFinish() {
-                            out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false))
+                while let f = reader.next() {
+                    if f.isControl {
+                        if f.opcode == WSFrame.close {
+                            for p in g.serverFinish() {
+                                out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false))
+                            }
                         }
+                        out.append(f.raw)
+                        continue
                     }
-                    out.append(f.raw)
-                    continue
-                }
-                switch assembler.add(f) {
-                case .incomplete: break
-                case .passthrough(let raw): out.append(raw)
-                case .complete(let op, let payload, let raw):
-                    if f.rsv == 0, let restored = g.server(payload) {
-                        for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
-                    } else {
-                        out.append(raw)
+                    switch assembler.add(f) {
+                    case .incomplete: break
+                    case .passthrough(let raw): out.append(raw)
+                    case .complete(let op, let payload, let raw):
+                        if f.rsv == 0, let restored = g.server(payload) {
+                            for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
+                        } else {
+                            out.append(raw)
+                        }
+                    case .protocolError:
+                        FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad server framing — closing\n".utf8))
+                        return false
                     }
-                case .protocolError:
-                    FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad server framing — closing\n".utf8))
-                    return
                 }
+                if reader.failed { return false }
+                for d in inject.drain() { out.append(d) }
+                if !out.isEmpty { onOut(out) }
+                if !flush(&out, to: client) { return false }
+                if eof { return false }
+                var pfd = pollfd(fd: upstream.fd, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, 100) < 0 && errno != EINTR { return false }
+                return true
             }
-            if reader.failed { return }
-            for d in inject.drain() { out.append(d) }
-            if !out.isEmpty { onOut(out) }
-            if !flush(&out, to: client) { return }
-            if eof { return }
-            var pfd = pollfd(fd: upstream.fd, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, 100) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 
