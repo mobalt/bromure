@@ -33,16 +33,39 @@ enum FatClientTunnelDaemon {
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(lfd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard bound == 0, listen(lfd, 16) == 0 else { exit(1) }
-        // Reachable only by the console user (who runs the app).
-        var st = stat()
-        if stat("/dev/console", &st) == 0 { chown(socketPath, st.st_uid, st.st_gid) }
-        chmod(socketPath, 0o600)
+        // Anyone may connect; each connection is checked against the console
+        // user AT THAT MOMENT. The socket used to be chowned to the console
+        // owner at start -- and launchd starts this at boot, before anyone
+        // logs in, when /dev/console is root's: the user's app then got
+        // EACCES on every connect, reboot after reboot ("helper isn't
+        // reachable" with the helper enabled).
+        chmod(socketPath, 0o666)
         while true {
             let cfd = accept(lfd, nil, nil)
             if cfd < 0 { if errno == EINTR { continue }; break }
+            var uid: uid_t = 0, gid: gid_t = 0
+            let peer: uid_t? = getpeereid(cfd, &uid, &gid) == 0 ? uid : nil
+            guard let peer, peerAllowed(peer, console: consoleUID()) else {
+                let why = "ERR denied: uid \(peer.map(String.init) ?? "?") isn't the console user (\(consoleUID().map(String.init) ?? "nobody"))\n"
+                _ = why.withCString { Darwin.write(cfd, $0, strlen($0)) }
+                close(cfd); continue
+            }
             Thread.detachNewThread { serve(cfd) }
         }
         exit(0)
+    }
+
+    /// Whoever owns /dev/console now (the logged-in GUI user); nil when it
+    /// can't be read.
+    static func consoleUID() -> uid_t? {
+        var st = stat()
+        return stat("/dev/console", &st) == 0 ? st.st_uid : nil
+    }
+
+    /// Only the console user (who runs the app) or root may set up a tunnel:
+    /// routes are system-wide.
+    static func peerAllowed(_ peer: uid_t, console: uid_t?) -> Bool {
+        peer == 0 || (console.map { $0 != 0 && $0 == peer } ?? false)
     }
 
     /// One tunnel: SETUP → create utun + route + pass the fd; hold until the app
@@ -53,11 +76,18 @@ enum FatClientTunnelDaemon {
             _ = write(fd, "ERR bad request\n", 16); return
         }
         let cidr = String(line.dropFirst("SETUP ".count)).trimmingCharacters(in: .whitespaces)
-        guard let (utunFD, name) = openUtun(),
-              run("/sbin/ifconfig", [name, linkAddr(name), linkPeer(name), "netmask", "255.255.255.252", "up"]),
-              run("/sbin/route", ["-n", "add", "-net", cidr, "-interface", name]) else {
-            _ = write(fd, "ERR setup\n", 10); return
+        // Each failure says which step and why: the app shows it as is.
+        func fail(_ why: String) {
+            let line = "ERR " + why.replacingOccurrences(of: "\n", with: " ") + "\n"
+            _ = line.withCString { Darwin.write(fd, $0, strlen($0)) }
         }
+        guard let (utunFD, name) = openUtun() else {
+            fail("utun: \(String(cString: strerror(errno)))"); return
+        }
+        let ifc = run("/sbin/ifconfig", [name, linkAddr(name), linkPeer(name), "netmask", "255.255.255.252", "up"])
+        guard ifc.ok else { Darwin.close(utunFD); fail("ifconfig \(name): \(ifc.output)"); return }
+        let rt = run("/sbin/route", ["-n", "add", "-net", cidr, "-interface", name])
+        guard rt.ok else { Darwin.close(utunFD); fail("route \(cidr): \(rt.output)"); return }
         // Hand the utun fd to the app; keep our own ref so the interface survives
         // until we delete the route on teardown.
         _ = sendFD(fd, fd: utunFD, message: "OK \(name)\n")
@@ -101,16 +131,22 @@ enum FatClientTunnelDaemon {
         return (fd, String(cString: nameBuf))
     }
 
+    /// Runs a tool; on failure, what it printed (stderr, then stdout).
     @discardableResult
-    private static func run(_ path: String, _ args: [String]) -> Bool {
+    private static func run(_ path: String, _ args: [String]) -> (ok: Bool, output: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        do { try p.run() } catch { return (false, "\(error.localizedDescription)") }
+        let e = err.fileHandleForReading.readDataToEndOfFile()
+        let o = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return p.terminationStatus == 0
+        let text = [e, o].map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "exit \(p.terminationStatus)"
+        return (p.terminationStatus == 0, text)
     }
 
     private static func readLine(_ fd: Int32) -> String? {
@@ -171,12 +207,13 @@ enum FatClientTunnelDaemon {
             }
         }
         guard received > 0 else { return nil }
+        let msg = String(decoding: msgBuf[0..<received], as: UTF8.self)
         // The fd sits at offset 12 in the cmsg buffer (after the 12-byte cmsghdr).
+        // None (an `ERR …` reply): the message still says why, fd -1.
         let level = cmsgBuf.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
         let type = cmsgBuf.withUnsafeBytes { $0.load(fromByteOffset: 8, as: Int32.self) }
-        guard level == Int32(SOL_SOCKET), type == 1 else { return nil }
+        guard level == Int32(SOL_SOCKET), type == 1 else { return (msg, -1) }
         let fd = cmsgBuf.withUnsafeBytes { $0.load(fromByteOffset: 12, as: Int32.self) }
-        let msg = String(decoding: msgBuf[0..<received], as: UTF8.self)
         return (msg, fd)
     }
 }

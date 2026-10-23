@@ -1197,6 +1197,17 @@
 "Couldn't start the network tunnel" = "無法啟動網路通道";
 "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure 會繼續透過其內建的逐應用程式通道運作——此輔助程式只是讓其他本機應用程式能直接存取遠端虛擬機器。";
 "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "無法連線特權網路輔助程式。請確認「系統設定 › 一般 › 登入項目」中已允許「Bromure Agentic Coding」，然後再試一次。";
+"The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed)." = "輔助程式正在執行，但它的通訊端只允許使用者 %d 存取，而不是你（%d）。舊版輔助程式會把通訊端交給啟動時已登入的使用者，而它在 Mac 開機時、還沒有人登入前就已啟動。請重新啟動它：在「系統設定 › 一般 › 登入項目」中關閉再開啟「Bromure Agentic Coding」（或在安裝此版本後重新啟動 Mac）。";
+"The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy." = "輔助程式沒有執行。macOS 是從該 App 的另一個副本（%@）註冊它的——當時在那裡獲得了核准，而該副本已被移動、取代或刪除。請在「登入項目」中關閉「Bromure Agentic Coding」，然後在這裡重新開啟通道，以註冊目前的副本。";
+"The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items." = "輔助程式沒有執行：macOS 啟動它後它立即結束（上次結束：%@）。這通常是因為 App 重新建置或更新後的簽署與你核准時不同。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items." = "儘管「登入項目」中顯示了輔助程式，但它沒有載入 launchd。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper isn't running yet, so its socket isn't there." = "輔助程式尚未執行，因此它的通訊端不存在。";
+"The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items." = "輔助程式的通訊端存在，但沒有回應：輔助程式已停止。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper didn't accept the connection." = "輔助程式沒有接受連線。";
+"The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items." = "網路輔助程式未作回應就關閉了連線。如果你剛更新了 App，請重新啟動輔助程式：在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "這台 Mac 已經把 %@ 路由到別處——通常是它自己的工作區，它們與遠端的工作區使用相同的子網路。通道無法接管它。\n\n輔助程式：%@";
+"The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "網路輔助程式只為在螢幕上登入的使用者服務。\n\n輔助程式：%@";
+"The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "網路輔助程式無法建立通道介面。\n\n輔助程式：%@";
 "The network helper couldn't create the tunnel interface." = "網路輔助程式無法建立通道介面。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
