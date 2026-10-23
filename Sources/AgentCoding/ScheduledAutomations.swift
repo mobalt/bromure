@@ -383,7 +383,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// Stable identity of the event this run handled ("pr:123",
     /// "issue:45", "commit:abc1234", "linear:ENG-1"). An event with a
     /// `launched` or `blocked` record here is considered processed and never
-    /// fires again — this is the dedup key. nil for schedule runs.
+    /// fires again — this is the dedup key (but for a run the guest refused:
+    /// `handledItemKeys`). nil for schedule runs.
     var itemKey: String?
     /// The workspace the run actually executed in, when it differs from the
     /// automation's own — i.e. the disposable clone of a clone-first run.
@@ -407,7 +408,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var queuedAt: Date?
     /// Failed only because the guest said it refused the run (its outbox,
     /// which any process there can write), not by anything the host saw.
-    /// Nothing from the guest brings it back (`runForBranch`).
+    /// Nothing from the guest brings it back (`runForBranch`); its event
+    /// fires again instead (`requeueRefused`).
     var refusedByGuest: Bool?
     /// A refusal the guest reported before the run's tab could be listed
     /// (inside `tabAppearGrace`): held, not applied, until the tab shows up
@@ -522,6 +524,10 @@ final class ScheduledAutomationStore {
         /// back from — the next poll walks the branch's first-parent chain
         /// down to it, so each landing is seen once whatever it touched.
         var tipSHA: String?
+        /// Commit trigger: the tip each dispatched commit's poll walked down
+        /// from ("commit:<sha7>" → sha), so a run the guest refuses can be
+        /// walked again (`requeueRefused`).
+        var commitBases: [String: String]?
     }
 
     private let fileURL: URL
@@ -645,6 +651,16 @@ final class ScheduledAutomationStore {
         guard let i = runs.firstIndex(where: { $0.id == runID }), runs[i].pendingRefusal != reason else { return }
         runs[i].pendingRefusal = reason
         save()
+    }
+
+    /// The events this automation has handled: every run's `itemKey` but a
+    /// refused one's. A refusal is the guest's word only, and nothing from
+    /// the guest completes that run (`runForBranch`), so its event fires
+    /// again on the next poll (Finding CWE-670, "A guest refusal
+    /// permanently drops a commit, PR, or issue scan"). A run still
+    /// launched keeps its key: a live run never fires twice.
+    func handledItemKeys(for automationID: UUID) -> Set<String> {
+        Set(runs(for: automationID).filter { $0.refusedByGuest != true }.compactMap(\.itemKey))
     }
 
     /// `markFailed`, for a refusal the guest reported.
@@ -1675,7 +1691,16 @@ final class ScheduledAutomationEngine {
         let previous = store.pollState(for: a.id)
         var next = ScheduledAutomationStore.PRPollState(
             lastPolledAt: now, highWater: previous?.highWater, tipSHA: previous?.tipSHA)
-        defer { store.setPollState(next, for: a.id) }
+        next.commitBases = previous?.commitBases
+        defer {
+            // A refusal while this poll ran rewound the tip or asked for a
+            // poll soon (`requeueRefused`): this poll's view is older.
+            if let current = store.pollState(for: a.id) {
+                if current.tipSHA != previous?.tipSHA { next.tipSHA = current.tipSHA }
+                if current.lastPolledAt == nil { next.lastPolledAt = nil }
+            }
+            store.setPollState(next, for: a.id)
+        }
 
         guard let delegate,
               let profile = delegate.profile(for: a.profileID) else {
@@ -1714,7 +1739,7 @@ final class ScheduledAutomationEngine {
                     // skips a merge whose branch the old listing reviewed
                     // commit by commit.
                     let upgraded = previous?.highWater != nil && previous?.tipSHA == nil
-                    let known = upgraded ? Set(store.runs(for: a.id).compactMap { $0.itemKey }) : []
+                    let known = upgraded ? store.handledItemKeys(for: a.id) : []
                     let isKnown = { (sha: String) in known.contains("commit:\(sha.prefix(7))") }
                     let walk = try await GitHubPRPoller.fetchLandedCommits(
                         repo: a.githubRepo, token: token,
@@ -1761,11 +1786,12 @@ final class ScheduledAutomationEngine {
         // An event is "processed" once a run record carries its itemKey —
         // written at DISPATCH for launched runs, and also for blocked and
         // backlog-seeded (.skipped) items. Failed-to-launch runs carry NO
-        // itemKey, so they retry on the next poll. This is why "processed"
+        // itemKey, and a guest-refused run's key doesn't count, so they
+        // retry on the next poll. This is why "processed"
         // means dispatched, not "Claude finished": polls recur every few
         // minutes, so completion-gating would relaunch an item while its
         // first run is still working.
-        let processed = Set(store.runs(for: a.id).compactMap { $0.itemKey })
+        let processed = store.handledItemKeys(for: a.id)
             .union(launchesUnderWay(a.id))
 
         let firstPoll = previous?.highWater == nil
@@ -1848,6 +1874,21 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: firing for \(label) \(enriched.displayKey)")
             slots -= 1
+            if a.trigger == .githubCommit {
+                // Where to walk from again should the guest refuse it: the
+                // commit before it on the branch, or this poll's own tip.
+                let at = landed.firstIndex { GitHubPRPoller.eventKey($0.item, kind: a.trigger) == key }
+                if let base = at.flatMap({ $0 > 0 ? landed[$0 - 1].sha : next.tipSHA }) {
+                    var bases = next.commitBases ?? [:]
+                    bases[key] = base
+                    if bases.count > 200 {
+                        let open = Set(store.runs(for: a.id).filter { $0.outcome == .launched || $0.refusedByGuest == true }
+                            .compactMap(\.itemKey))
+                        bases = bases.filter { open.contains($0.key) || $0.key == key }
+                    }
+                    next.commitBases = bases
+                }
+            }
             fire(a, now: Date(),
                  promptOverride: GitHubPRPoller.substitute(a.prompt, item: enriched,
                                                            kind: a.trigger),
@@ -2313,7 +2354,28 @@ final class ScheduledAutomationEngine {
         }
         guard store.markRefused(run.id, reason: Self.guestReported(reason)) else { return }
         BACDebug.log("automation", "run \(slug) refused by the guest: \(reason)")
-        repollSoon(run.automationID)
+        requeueRefused(run.automationID)
+    }
+
+    /// A refused run's event fires again (it no longer counts as handled:
+    /// `handledItemKeys`). A commit watch also walks back to before the
+    /// oldest refused commit not yet fired again — its poll tip had moved
+    /// past it, so it would never be listed. Then a poll soon.
+    func requeueRefused(_ automationID: UUID) {
+        guard let a = store.automation(automationID) else { return }
+        if a.trigger == .githubCommit, var state = store.pollState(for: automationID),
+           let bases = state.commitBases {
+            let handled = store.handledItemKeys(for: automationID)
+            let oldest = store.runs(for: automationID)
+                .filter { $0.refusedByGuest == true }
+                .compactMap { r in r.itemKey.flatMap { k in handled.contains(k) ? nil : bases[k].map { (r.firedAt, $0) } } }
+                .min { $0.0 < $1.0 }
+            if let base = oldest?.1, state.tipSHA != base {
+                state.tipSHA = base
+                store.setPollState(state, for: automationID)
+            }
+        }
+        repollSoon(automationID)
     }
 
     /// Held refusals: dropped once the run's tab is listed (or the run is
@@ -2334,7 +2396,7 @@ final class ScheduledAutomationEngine {
                 store.setPendingRefusal(run.id, nil)
                 guard store.markRefused(run.id, reason: reason) else { continue }
                 BACDebug.log("automation", "run \(slug) refused by the guest (no tab came up)")
-                repollSoon(run.automationID)
+                requeueRefused(run.automationID)
             }
         }
     }
