@@ -293,6 +293,17 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
 
     static let maxFrame = 1 << 20
 
+    /// Hand each frame to `handle` until EOF. One pool per frame: this runs
+    /// on a raw Thread for the VM's lifetime, whose pool never drains, and
+    /// every frame's JSON objects would stay alive until the VM stopped.
+    static func serveFrames(_ fd: Int32, _ handle: ([String: Any]) -> Void) {
+        while autoreleasepool(invoking: { () -> Bool in
+            guard let frame = readFrame(fd) else { return false }
+            handle(frame)
+            return true
+        }) {}
+    }
+
     /// Read one frame; nil on EOF / error / oversize.
     static func readFrame(_ fd: Int32) -> [String: Any]? {
         var header = [UInt8](repeating: 0, count: 4)
@@ -386,9 +397,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
 
         tv = timeval(tv_sec: 0, tv_usec: 0)
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        while let frame = Self.readFrame(cfd) {
-            handle(frame)
-        }
+        Self.serveFrames(cfd) { handle($0) }
         lock.lock()
         let wasOurs = fd == cfd
         if wasOurs { fd = -1 }
