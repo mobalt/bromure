@@ -4275,6 +4275,7 @@
 
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "Fahren Sie den Workspace zuerst herunter: Seine Festplatte wird verwendet.";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "Einige seiner Dateien konnten nicht gelöscht werden (%@), daher ist er weiterhin als kompromittiert markiert. Fahren Sie ihn herunter und versuchen Sie es erneut.";
 "Wipe “%@”?" = "„%@“ löschen?";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Systemfestplatte, Home und gespeicherter Zustand werden gelöscht; Einstellungen und Zugangsdaten bleiben erhalten, ebenso die eingebundenen Projektordner. Er ist danach nicht mehr als kompromittiert markiert und startet beim nächsten Mal frisch.";
 "Wipe" = "Löschen";

@@ -4275,6 +4275,7 @@
 
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "Desligue o espaço de trabalho primeiro: o disco dele está em uso.";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "Não foi possível apagar alguns dos seus ficheiros (%@), por isso continua marcado como comprometido. Desligue-o e tente novamente.";
 "Wipe “%@”?" = "Apagar “%@”?";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "O disco do sistema, a home e o estado salvo são apagados; as configurações e credenciais continuam, assim como as pastas de projeto que ele monta. Ele deixa de estar marcado como comprometido e inicia do zero na próxima vez.";
 "Wipe" = "Apagar";

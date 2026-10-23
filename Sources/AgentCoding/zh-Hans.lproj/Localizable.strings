@@ -4275,6 +4275,7 @@
 
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "请先关闭该工作区：它的磁盘正在使用中。";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "部分文件无法擦除（%@），因此它仍被标记为已遭入侵。请将其关闭后重试。";
 "Wipe “%@”?" = "要抹掉“%@”吗？";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "它的系统磁盘、主目录和已保存的状态将被抹掉；它的设置和凭据会保留，挂载的项目文件夹也不受影响。它将不再被标记为已入侵，下次启动时为全新状态。";
 "Wipe" = "抹掉";
