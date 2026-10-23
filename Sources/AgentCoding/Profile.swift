@@ -5059,6 +5059,20 @@ public final class ProfileStore {
               [ -n "$left" ] || rm -f "$owed" 2>/dev/null
             fi
             if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
+            # The mark goes on new activity (a PreToolUse `working`), but the
+            # note it held for may still be unread: a `done` that didn't drain
+            # (StopCancelled, an Interrupt, a typed `done`) is no turn end
+            # while a note for this tab sits unclaimed (Finding CWE-670,
+            # "PreToolUse working clears an owed policy note, so a non-Stop
+            # done finishes the task"). Notes are only written for tabs whose
+            # hooks drain them (Claude's).
+            if [ "$signal" = "done" ] && [ -z "${drained:-}" ]; then
+              for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
+                [ -e "$n" ] || continue
+                [ -e "$HOME/.bromure/policy-claims/${n##*/}" ] && continue
+                signal="needsInput"; break
+              done
+            fi
             # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
             # agent-tool-<idx>.jsonl — the call's id, tool, command and the
             # agent's pid, written BEFORE the tool runs. The host ties the

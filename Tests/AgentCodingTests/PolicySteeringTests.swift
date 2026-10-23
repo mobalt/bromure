@@ -753,9 +753,19 @@ struct PolicyNoteDeliveryTests {
             try hook(arg, json)
             #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
         }
-        // New activity clears it; the next Stop tries again, and once the
-        // table is readable the same note goes through.
+        // New activity clears the mark; the next Stop tries again, and once
+        // the table is readable the same note goes through.
         try hook("working", #"{"hook_event_name":"UserPromptSubmit","session_id":"abc-1"}"#)
+        // Finding (CWE-670): "PreToolUse working clears an owed policy note,
+        // so a non-Stop done finishes the task". The mark is gone, but the
+        // note is still unread: a done that doesn't drain (the task nudge's
+        // typed `done`, StopCancelled) is not the turn's end.
+        try hook("working", #"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"abc-1"}"#)
+        #expect(!fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
+        for (arg, json) in [("done", ""), ("done", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#)] {
+            try hook(arg, json)
+            #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
+        }
         try installed.shareLine.write(to: installed.mountinfo, atomically: true, encoding: .utf8)
         let later = try #require(try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])
         #expect(later["decision"] as? String == "block")
