@@ -217,7 +217,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         didSet {
             if oldValue != windowIndex {
                 windowID = nil; agentProcessStart = nil
-                hostLaunchedWindow = nil
+                // Kept through an unbind (reconcile unbinds a tab whose
+                // @display changed -- a guest edit): bound back to that
+                // index it is the launch's tab again until the probe seals it.
+                if let w = windowIndex, w != hostLaunchedWindow { hostLaunchedWindow = nil }
                 agentProcessPID = nil; agentProcessUptime = nil
                 if windowIndex != nil { releasedWindowIndex = nil }
             }
@@ -253,7 +256,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var launchBaselineIndex: Int?
     /// The tab a launch of ours bound (reconcile step 2: a tab the host's
     /// own launch opened, past its baseline) -- set only there, and
-    /// forgotten once the session is bound anywhere else. Tabs the store
+    /// forgotten once the session is bound to another index or its machine
+    /// rebooted. At most one per launch: what a guest could borrow is
+    /// bounded by the host's own sessions, never the pin cap. Tabs the store
     /// adopted from the guest roster never have it: their @label, @display
     /// and @worktree are any guest process's to set (Finding CWE-807,
     /// "Guest-adopted tmux windows are spared from pid-pin eviction, so a
@@ -1049,6 +1054,7 @@ final class AgentSessionStore {
         guard sessions[i].bootID != bootID else { return true }
         sessions[i].windowIndex = nil
         sessions[i].bootID = nil
+        sessions[i].hostLaunchedWindow = nil   // indices start over
         if !sessions[i].isLaunching { sessions[i].endedAt = now }
         sessions[i].agentAlive = nil
         save()

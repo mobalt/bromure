@@ -48,8 +48,14 @@ struct HostLaunchedPinTests {
         s.noteAgent(profileID: ws, pid: 500, window: 1, hostWindows: host)
         #expect(s.agentWindows(profileID: ws).contains(1))
 
-        // Rebound before the probe read the tab: no proof it's the same one.
+        // Unbound before the probe read it (a guest @display edit makes
+        // reconcile do that) and bound back to its index: still the launch's.
         store.mutate(launch.id) { $0.windowIndex = nil }
+        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
+        store.mutate(launch.id) { $0.windowIndex = 1 }
+        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws) == [1])
+        // Bound to another index: not.
+        store.mutate(launch.id) { $0.windowIndex = 7 }
         store.mutate(launch.id) { $0.windowIndex = 1 }
         #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
     }
@@ -73,8 +79,9 @@ struct HostLaunchedPinTests {
         func spared(_ st: AgentSessionStore) -> Set<Int> { ACAppDelegate.hostAgentWindows(st.sessions, profileID: ws) }
         #expect(spared(store) == [1])
 
-        // Unbound and bound back (a guest @display edit), then probed: the same window.
-        store.mutate(launch.id) { $0.windowIndex = nil; $0.bootID = nil }
+        // Bound elsewhere then back (the index mark is gone), then probed:
+        // the same window, so still the host's.
+        store.mutate(launch.id) { $0.windowIndex = 3; $0.bootID = nil }
         store.mutate(launch.id) { $0.windowIndex = 1 }
         #expect(spared(store).isEmpty)                       // not proven yet
         _ = store.checkBoot(launch.id, bootID: "boot-1")
@@ -89,7 +96,7 @@ struct HostLaunchedPinTests {
         _ = store.checkWindow(launch.id, windowID: "@9")
         #expect(spared(store).isEmpty)
         // …nor the same window id after a reboot (tmux numbers start over).
-        store.mutate(launch.id) { $0.windowIndex = nil; $0.bootID = nil }
+        store.mutate(launch.id) { $0.windowIndex = 3; $0.bootID = nil }
         store.mutate(launch.id) { $0.windowIndex = 1 }
         _ = store.checkBoot(launch.id, bootID: "boot-2")
         _ = store.checkWindow(launch.id, windowID: "@4")
@@ -103,5 +110,21 @@ struct HostLaunchedPinTests {
             .appendingPathComponent("Sources/AgentCoding/AgentSessions.swift"), encoding: .utf8)
         #expect(src.components(separatedBy: "hostLaunchedWindow = tab.index").count == 2)
         #expect(src.contains("s.windowIndex = tab.index\n                        s.hostLaunchedWindow = tab.index"))
+    }
+
+    @Test("a reboot drops an unsealed launch mark: the index is someone else's now")
+    func rebootDropsIndexMark() {
+        let store = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("sessions-\(UUID().uuidString).json"))
+        let ws = UUID()
+        var launch = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
+        launch.launchingSince = Date(); launch.launchBaselineIndex = 0; launch.launchDisplay = "Fix login"
+        store.upsert(launch)
+        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0),
+                                              TabsModel.Tab(label: "claude", index: 1, display: "Fix login")])])
+        _ = store.checkBoot(launch.id, bootID: "boot-1")
+        #expect(!store.checkBoot(launch.id, bootID: "boot-2"))   // rebooted: unbound
+        store.mutate(launch.id) { $0.windowIndex = 1 }
+        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
     }
 }
