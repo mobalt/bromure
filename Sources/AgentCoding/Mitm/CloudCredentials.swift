@@ -60,6 +60,22 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
         perProfile.removeValue(forKey: profileID)
     }
 
+    /// Replace a profile's identities in ONE locked swap. Clearing and
+    /// re-adding them one by one left a gap a handshake on the proxy's
+    /// queue could hit -- no client certificate for that request (Finding
+    /// CWE-362, "Live kube trust rebuild drops the cluster CA and client
+    /// cert between lock acquisitions").
+    public func replaceAll(_ identities: [(host: String, entry: Entry)], for profileID: UUID) {
+        var byHost: [String: Entry] = [:]
+        for (host, entry) in identities {
+            let h = host.lowercased()
+            byHost[h] = entry
+            if let bare = h.split(separator: ":").first.map(String.init), bare != h { byHost[bare] = entry }
+        }
+        lock.lock(); defer { lock.unlock() }
+        perProfile[profileID] = byHost.isEmpty ? nil : byHost
+    }
+
     public func entry(for host: String, profileID: UUID) -> Entry? {
         let h = host.lowercased()
         lock.lock(); defer { lock.unlock() }
@@ -109,6 +125,33 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     public func clearAll(for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         perProfile.removeValue(forKey: profileID)
+    }
+
+    /// Replace a profile's cluster CAs in ONE locked swap, every PEM parsed
+    /// first -- a lookup never sees the profile cleared (an empty slot is
+    /// system trust for that handshake: Finding CWE-362, "Live kube trust
+    /// rebuild drops the cluster CA and client cert between lock
+    /// acquisitions"). A host whose new PEM doesn't parse keeps the CA it
+    /// had, rather than falling back to system trust.
+    public func replaceAll(_ cas: [(pem: String, host: String)], for profileID: UUID) {
+        var parsed: [String: SecCertificate] = [:]
+        var failed: [String] = []
+        for (pem, host) in cas {
+            let h = host.lowercased()
+            guard let cert = Self.parseFirstCertPEM(pem) else { failed.append(h); continue }
+            parsed[h] = cert
+            if let bare = h.split(separator: ":").first.map(String.init), bare != h { parsed[bare] = cert }
+        }
+        lock.lock(); defer { lock.unlock() }
+        let previous = perProfile[profileID] ?? [:]
+        for h in failed {
+            FileHandle.standardError.write(Data(
+                "[mitm] cluster CA parse failed for host=\(h) — keeping its previous CA\n".utf8))
+            for key in [h] + (h.split(separator: ":").first.map { [String($0)] } ?? []) where parsed[key] == nil {
+                if let old = previous[key] { parsed[key] = old }
+            }
+        }
+        perProfile[profileID] = parsed.isEmpty ? nil : parsed
     }
 
     public func ca(for host: String, profileID: UUID) -> SecCertificate? {
