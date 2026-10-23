@@ -773,10 +773,9 @@ public final class MitmEngine {
         for entry in mat.clusterCAs {
             clusterCAs.setCA(pem: entry.caPEM, host: entry.host, profileID: profileID)
         }
-        poller.stopAll(profileID: profileID)
-        if !mat.execContexts.isEmpty {
-            poller.start(mat.execContexts, profileID: profileID, swapper: swapper)
-        }
+        // Unchanged contexts keep their poller (no second run of the same
+        // plugin racing the first); changed ones restart, removed ones stop.
+        poller.sync(mat.execContexts, profileID: profileID, swapper: swapper)
     }
 
     public func unregister(profileID: UUID) {

@@ -88,6 +88,65 @@ struct KubeLiveTrustTests {
         poller.stopAll()
     }
 
+    /// Finding (CWE-362): "A cancelled kube exec poll writes an older token
+    /// onto the reused fake". A live push restarted every poller; the run it
+    /// replaced still wrote its token when its plugin returned -- after the
+    /// new run's, on the same reused fake -- and could put back an entry the
+    /// map had dropped.
+    @Test("Only the current poller run writes its token; an unchanged context keeps its poller")
+    func pollerLateRunWritesNothing() async throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("kube-exec-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        func plugin(_ name: String, token: String, delay: String) throws -> String {
+            let path = dir.appendingPathComponent(name).path
+            try """
+                #!/bin/sh
+                echo run >> "\(dir.path)/\(name).runs"
+                sleep \(delay)
+                echo '{"status":{"token":"\(token)"}}'
+                """.write(toFile: path, atomically: true, encoding: .utf8)
+            chmod(path, 0o755)
+            return path
+        }
+        let slow = try plugin("slow", token: "token-old", delay: "1")
+        let fast = try plugin("fast", token: "token-new", delay: "0")
+        let pid = UUID(), entry = UUID(), fake = "brm-k8s-reused"
+        let poller = ExecCredentialPoller(), swapper = TokenSwapper(consent: ConsentBroker())
+        func real() -> String? { swapper.entries(for: pid).first { $0.fake == fake }?.real }
+        func ctx(_ command: String) -> KubeconfigMaterializer.ExecContext {
+            .init(entryID: entry, host: "k8s.example.com", fakeToken: fake, command: command, args: [], refreshSeconds: 3600)
+        }
+        swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "", host: "k8s.example.com",
+                                                         consentCredentialID: "kube:x")]), for: pid)
+        // The old run is in its plugin when a live push replaces it.
+        poller.sync([ctx(slow)], profileID: pid, swapper: swapper)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        poller.sync([ctx(fast)], profileID: pid, swapper: swapper)
+        for _ in 0..<100 where real() != "token-new" { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(real() == "token-new")
+        try await Task.sleep(nanoseconds: 1_500_000_000)          // the old plugin has returned by now
+        #expect(real() == "token-new")
+        #expect(swapper.entries(for: pid).first { $0.fake == fake }?.consentCredentialID == "kube:x")
+
+        // An unchanged context keeps its poller: no second run of its plugin.
+        poller.sync([ctx(fast)], profileID: pid, swapper: swapper)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect((try? String(contentsOfFile: dir.appendingPathComponent("fast.runs").path, encoding: .utf8))?
+            .split(separator: "\n").count == 1)
+
+        // A removed kubeconfig: a run still in its plugin doesn't put it back.
+        poller.sync([ctx(slow)], profileID: pid, swapper: swapper)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        swapper.setMap(TokenMap(entries: []), for: pid)
+        poller.sync([], profileID: pid, swapper: swapper)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(swapper.entries(for: pid).isEmpty)
+        #expect(poller.entries(for: pid).isEmpty)
+        poller.stopAll()
+    }
+
     @Test("A duplicated workspace gets its own kubeconfig entry ids")
     func duplicateMintsEntryIDs() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("kube-dup-\(UUID().uuidString)")
