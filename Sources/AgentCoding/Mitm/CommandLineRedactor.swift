@@ -110,8 +110,16 @@ enum CommandLineRedactor {
     /// curl's are: `-B` is `--use-ascii` and takes nothing, so `-fsSLB -b
     /// s=x` is a cluster then the real cookie, and `-fsSLB URL` keeps its URL
     /// (Finding CWE-532, "A curl -B cluster is read as -b, so the real cookie
-    /// is uploaded").
-    private static let cookieFlag = re(#"((?:^|\s)(?:(?-i:-[a-zA-Z0-9#]*?b)(?:\s+|=)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// is uploaded"). A `b` glued to `=` is `gluedCookie`'s.
+    private static let cookieFlag = re(#"((?:^|\s)(?:(?-i:-[a-zA-Z0-9#]*?b)(?!=)(?:\s+)?|--cookie(?:\s+|=)))(['"]?)"#)
+    /// A short `-b` glued to `=` (`-b=x`, `-sb=x`, `-sb="$SECRET"`): curl
+    /// keeps that `=` in its argument, so the argument always holds one and
+    /// is always sent as a Cookie header (`-sb=hunter2` sends
+    /// `Cookie: =hunter2`), never read as a file (Finding CWE-532, "Glued
+    /// equals stays in curl's cookie argument and is uploaded"). The first
+    /// `b` of the cluster only: `-sbab=x` is the cookie `ab=x`. Case-sensitive
+    /// like `cookieFlag` (`-B=x` is no cookie).
+    private static let gluedCookie = re(#"((?:^|\s)(?-i:-[ac-zA-Z0-9#]*b=))(['"]?)"#)
     /// curl's `-E` / `--cert` / `--proxy-cert certificate:passphrase`: the
     /// passphrase after the first `:` (a value without one is a path). `-E`
     /// is case-sensitive (`-e` is the referer) and may close a cluster.
@@ -222,9 +230,13 @@ enum CommandLineRedactor {
             v.firstIndex(of: ":").map { String(v[..<$0]) + ":" + mask }
         }
         // name=value cookies — a clustered short -b only for curl.
+        out = replacingValues(out, gluedCookie, when: { m, ns in
+            let flag = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
+            return flag == "-b=" || userFlagIsCurl(ns, before: m.range.location)
+        }, cookiePairs: { _, _ in true }) { _ in mask }
         out = replacingValues(out, cookieFlag, when: { m, ns in
             let flag = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
-            return flag.hasPrefix("--") || flag == "-b" || flag == "-b=" || userFlagIsCurl(ns, before: m.range.location)
+            return flag.hasPrefix("--") || flag == "-b" || userFlagIsCurl(ns, before: m.range.location)
         }, cookiePairs: { _, _ in true }) { $0.contains("=") ? mask : nil }
         // A client certificate's passphrase (curl only).
         out = replacingValues(out, certFlag, when: { m, ns in userFlagIsCurl(ns, before: m.range.location) }) { v in
