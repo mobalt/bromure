@@ -612,6 +612,7 @@ final class AgentSessionStore {
     /// Dropped once the index leaves the live roster, a probe reads another
     /// window or boot there, or the machine reboots. At most one per launch.
     private(set) var hostLaunchedTabs: [UUID: [Int: String?]] = [:]
+    private var hostTabMissingSince: [UUID: [Int: Date]] = [:]
 
     /// The windows of the tabs the host launched in `profileID` that are
     /// still open.
@@ -1050,6 +1051,7 @@ final class AgentSessionStore {
         }
         guard sessions[i].bootID != bootID else { return true }
         hostLaunchedTabs[sessions[i].profileID] = nil   // a reboot: indices start over
+        hostTabMissingSince[sessions[i].profileID] = nil
         sessions[i].windowIndex = nil
         sessions[i].bootID = nil
         if !sessions[i].isLaunching { sessions[i].endedAt = now }
@@ -1279,10 +1281,21 @@ final class AgentSessionStore {
             // saved pill. Only the guest's own roster counts.
             guard !tabs.isEmpty, entry.model.rosterLive else { continue }
             let indices = Set(tabs.map(\.index))
-            // A host tab that closed: its index may go to anyone next.
-            if let held = hostLaunchedTabs[entry.id], !held.keys.allSatisfy(indices.contains) {
-                hostLaunchedTabs[entry.id] = held.filter { indices.contains($0.key) }
-                changed = true
+            // A host tab that closed: its index may go to anyone next. Not
+            // on one roster without it (a refresh mid-way, a window moved
+            // out and back): only once it's been gone `missingGrace`, as a
+            // session's binding is.
+            if let held = hostLaunchedTabs[entry.id] {
+                for w in held.keys {
+                    if indices.contains(w) { hostTabMissingSince[entry.id]?[w] = nil; continue }
+                    let first = hostTabMissingSince[entry.id]?[w] ?? now
+                    hostTabMissingSince[entry.id, default: [:]][w] = first
+                    if now.timeIntervalSince(first) >= Self.missingGrace {
+                        hostLaunchedTabs[entry.id]?[w] = nil
+                        hostTabMissingSince[entry.id]?[w] = nil
+                        changed = true
+                    }
+                }
             }
             // 0. Stale bindings: after a reboot the window indices start over,
             // so a session's index may now be another tab (one we opened

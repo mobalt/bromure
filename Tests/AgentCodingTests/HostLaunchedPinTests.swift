@@ -91,8 +91,15 @@ struct HostLaunchedPinTests {
         _ = restarted.checkWindow(other.id, windowID: "@9")
         #expect(restarted.hostLaunchedWindows(profileID: ws).isEmpty)
 
-        // The tab closes (its index leaves the live roster): dropped.
-        store.reconcile(entries: [roster(ws, [shell])])
+        // Missing from one roster (a refresh mid-way, a window moved out and
+        // back): kept, as a session's binding is.
+        let t0 = Date()
+        store.reconcile(entries: [roster(ws, [shell])], now: t0)
+        store.reconcile(entries: [roster(ws, [shell, mine])], now: t0.addingTimeInterval(1))
+        store.reconcile(entries: [roster(ws, [shell])], now: t0.addingTimeInterval(2))
+        #expect(store.hostLaunchedWindows(profileID: ws) == [1])
+        // Gone past the grace: the tab closed, dropped.
+        store.reconcile(entries: [roster(ws, [shell])], now: t0.addingTimeInterval(2 + AgentSessionStore.missingGrace))
         #expect(store.hostLaunchedWindows(profileID: ws).isEmpty)
 
         // A reboot drops every one in the workspace.
