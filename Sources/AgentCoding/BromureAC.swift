@@ -15544,7 +15544,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// through its teardown -- `rebootingProfiles` -- so it can boot again;
     /// abandoned, nothing else would ever delete it.)
     private func dropAbandonedEphemeral(_ id: Profile.ID) {
-        guard runningSessions[id] == nil, !rebootingProfiles.contains(id),
+        // Not while a boot holds the disk (begun, not registered yet): that
+        // boot is the workspace's, and its stop deletes it.
+        guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),
               ephemeralProfiles.remove(id) != nil,
               let p = profiles.first(where: { $0.id == id }) else { return }
         try? store.delete(p)

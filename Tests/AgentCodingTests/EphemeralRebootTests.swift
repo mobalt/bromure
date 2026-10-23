@@ -57,7 +57,7 @@ struct EphemeralRebootTests {
     func abandonedLaunchDeletes() throws {
         let src = try String(contentsOf: Self.source, encoding: .utf8)
         let drop = try body(src, "private func dropAbandonedEphemeral(_ id: Profile.ID) {")
-        #expect(drop.contains("guard runningSessions[id] == nil, !rebootingProfiles.contains(id),"))
+        #expect(drop.contains("guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),"))
         #expect(drop.contains("ephemeralProfiles.remove(id) != nil") && drop.contains("try? store.delete(p)"))
         // Kimi provisioning stopped, the boot remedy stopped, a wipe
         // cancelled (remote and local), a wipe or an upgrade skipped (remote).
