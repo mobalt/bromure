@@ -60,7 +60,8 @@ public struct TokenMap: Sendable {
         public let paths: [String]
 
         /// The 1Password reference `real` was resolved from (the refresher
-        /// sets it), nil for a value given as is. A live refresh carries a
+        /// sets it; on a blank too, which `isPlaceholder` still marks as
+        /// unresolved), nil for a value given as is. A live refresh carries a
         /// resolved secret only to the same reference: a placeholder fake
         /// (`openshell:resolve:env:VAR`) stays the same whatever the secret.
         public let resolvedFrom: String?
@@ -119,12 +120,18 @@ public struct TokenMap: Sendable {
     public static func liveMerge(fresh: [Entry], current: [Entry]) -> TokenMap {
         let freshFakes = Set(fresh.map(\.fake))
         let carried = fresh.map { e -> Entry in
-            guard e.isPlaceholder,
-                  let held = current.first(where: { $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder })
-            else { return e }
+            guard e.isPlaceholder else { return e }
             if let ref = OnePasswordCLI.reference(in: e.real) {
-                return held.resolvedFrom == ref ? e.withReal(held.real, resolvedFrom: ref) : e
+                // This reference's own resolved secret, not the first entry
+                // that shares the fake (another credential's, under an
+                // OpenShell placeholder).
+                guard let held = current.first(where: {
+                    $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder && $0.resolvedFrom == ref
+                }) else { return e }
+                return e.withReal(held.real, resolvedFrom: ref)
             }
+            guard let held = current.first(where: { $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder })
+            else { return e }
             return e.withReal(held.real, resolvedFrom: held.resolvedFrom)
         }
         return TokenMap(entries: carried + current.filter { !freshFakes.contains($0.fake) })

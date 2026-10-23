@@ -95,12 +95,14 @@ public final class OnePasswordRefresher {
         reportedFailures[profileID] = reportedFailures[profileID]?.intersection(live)
         guard !refs.isEmpty else { reportedFailures[profileID] = nil; return }
         // Replace the plan's fake→"op://…" placeholder with fake→"" until the
-        // real secret resolves; the guest already holds the fake. A secret
-        // already resolved from this reference (kept by a live refresh) stays.
+        // real secret resolves; the guest already holds the fake. Only the
+        // reference's own still-unresolved entries: a secret already resolved
+        // from it (kept by a live refresh) stays, and so does another
+        // credential's entry sharing the fake.
         for r in refs {
             let entries = swapper.entries(for: profileID)
-            for host in r.hosts where !entries.contains(where: {
-                $0.fake == r.fake && $0.host == host && $0.resolvedFrom == r.opRef && !$0.isPlaceholder
+            for host in r.hosts where entries.contains(where: {
+                $0.fake == r.fake && $0.host == host && OnePasswordCLI.reference(in: $0.real) == r.opRef
             }) {
                 Self.updateSwap(swapper: swapper, profileID: profileID, ref: r, real: "", hosts: [host])
             }
@@ -123,8 +125,7 @@ public final class OnePasswordRefresher {
                         // it would put the previous secret back.
                         if Task.isCancelled { return }
                         Self.updateSwap(swapper: swapper, profileID: profileID, ref: r,
-                                        real: real.trimmingCharacters(in: .whitespacesAndNewlines),
-                                        resolved: true)
+                                        real: real.trimmingCharacters(in: .whitespacesAndNewlines))
                         self?.noteSuccess(profileID, r.opRef)
                     } catch let e as OnePasswordCLI.OpError {
                         if Task.isCancelled { return }
@@ -162,23 +163,32 @@ public final class OnePasswordRefresher {
         reportedFailures.removeAll()
     }
 
-    /// Replace this ref's entries (same fake + host) with the new real value,
-    /// keeping everything else the entry had (header, paths, body, consent):
-    /// keying by `fake` keeps the guest's exported fake valid across the
-    /// swap. `resolved`: `real` came from the reference (not a blank).
+    /// Give this reference's own entries (same fake + host, and their value
+    /// is this `op://` reference or was resolved from it) the new real value,
+    /// in place, each keeping everything else it had (header, paths, body,
+    /// consent): keying by `fake` keeps the guest's exported fake valid
+    /// across the swap. Another credential's entry that shares the fake and
+    /// host (an OpenShell placeholder, `openshell:resolve:env:VAR`, is one
+    /// per env var) is left as it is, and so is the order the swap walks
+    /// them in (Finding CWE-284, "1Password refresh collapses shared
+    /// OpenShell placeholders and blanks the other credential"). An entry no
+    /// longer in the map (a live save dropped it) isn't brought back.
+    /// A blank keeps the reference in `resolvedFrom`: still this entry, but
+    /// a placeholder, so never taken for a resolved secret.
     private static func updateSwap(swapper: TokenSwapper, profileID: UUID,
-                                   ref: Ref, real: String, resolved: Bool = false,
-                                   hosts: [String?]? = nil) {
+                                   ref: Ref, real: String, hosts: [String?]? = nil) {
         var entries = swapper.entries(for: profileID)
-        for host in hosts ?? ref.hosts {
-            let prior = entries.first(where: { $0.fake == ref.fake && $0.host == host })
-            entries.removeAll { $0.fake == ref.fake && $0.host == host }
-            let from = resolved ? ref.opRef : nil
-            entries.append(prior?.withReal(real, resolvedFrom: from) ?? TokenMap.Entry(
-                fake: ref.fake, real: real, host: host,
-                consentCredentialID: ref.consentID, consentDisplayName: ref.consentName,
-                resolvedFrom: from))
+        let hosts = hosts ?? ref.hosts
+        for i in entries.indices where entries[i].fake == ref.fake && hosts.contains(entries[i].host)
+            && Self.belongs(entries[i], to: ref.opRef) {
+            entries[i] = entries[i].withReal(real, resolvedFrom: ref.opRef)
         }
         swapper.setMap(TokenMap(entries: entries), for: profileID)
+    }
+
+    /// The entry is this reference's: its value is still the `op://`
+    /// reference, or was resolved (or blanked) from it.
+    static func belongs(_ e: TokenMap.Entry, to opRef: String) -> Bool {
+        e.resolvedFrom == opRef || OnePasswordCLI.reference(in: e.real) == opRef
     }
 }
