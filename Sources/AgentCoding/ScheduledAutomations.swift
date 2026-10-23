@@ -409,6 +409,10 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// which any process there can write): a done from the run's own tab
     /// still completes it.
     var refusedByGuest: Bool?
+    /// A refusal the guest reported before the run's tab could be listed
+    /// (inside `tabAppearGrace`): held, not applied, until the tab shows up
+    /// (dropped) or the grace runs out without it (the run fails then).
+    var pendingRefusal: String?
 
     /// What a repository-watch review run covered, kept on the run so its
     /// completion can move the watch's "reviewed through" mark.
@@ -636,6 +640,14 @@ final class ScheduledAutomationStore {
         guard run.outcome == .failed else { return run }
         guard revive(run.id) else { return nil }
         return runs.first { $0.id == run.id }
+    }
+
+    /// Hold (or drop, nil) a refusal reported before the run's tab could
+    /// be listed.
+    func setPendingRefusal(_ runID: UUID, _ reason: String?) {
+        guard let i = runs.firstIndex(where: { $0.id == runID }), runs[i].pendingRefusal != reason else { return }
+        runs[i].pendingRefusal = reason
+        save()
     }
 
     /// `markFailed`, for a refusal the guest reported: revivable (`revive`).
@@ -1617,6 +1629,11 @@ final class ScheduledAutomationEngine {
     }
 
     func tick(now: Date = Date()) {
+        if let delegate {
+            let live = { (pid: UUID) in delegate.openWorktreeBranches(profileID: pid) }
+            settlePendingRefusals(now: now, liveBranches: live)
+            delegate.codingTaskEngine.settlePendingRefusals(now: now, liveBranches: live)
+        }
         for a in store.automations where a.enabled {
             switch a.trigger {
             case .schedule:
@@ -2287,7 +2304,14 @@ final class ScheduledAutomationEngine {
     /// run whose tab is up (`liveBranches`, the workspace's open worktree
     /// tabs) isn't failed, one failed this way comes back when its own tab
     /// reports done, and the text is shown as what the workspace said.
-    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?) {
+    ///
+    /// Before its tab could be listed (`tabAppearGrace`, as `activeRunCount`
+    /// counts it), no tab says nothing: the refusal is held, the run keeps
+    /// its slot, and `settlePendingRefusals` applies it only if the grace
+    /// runs out with no tab (Finding CWE-807, "A guest worktree-error before
+    /// the tab is listed still fails Codex, Grok, and omp runs for good").
+    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
+                    now: Date = Date()) {
         guard let run = store.runs.first(where: { r in
             r.outcome == .launched && r.completedAt == nil && r.branchSlug == slug
                 && (r.runProfileID ?? store.automation(r.automationID)?.profileID) == profileID
@@ -2296,9 +2320,37 @@ final class ScheduledAutomationEngine {
             BACDebug.log("automation", "run \(slug): refusal ignored, its tab is live")
             return
         }
+        if now.timeIntervalSince(run.queuedAt ?? run.firedAt) < Self.tabAppearGrace {
+            BACDebug.log("automation", "run \(slug): refusal held until its tab can be listed")
+            store.setPendingRefusal(run.id, Self.guestReported(reason))
+            return
+        }
         guard store.markRefused(run.id, reason: Self.guestReported(reason)) else { return }
         BACDebug.log("automation", "run \(slug) refused by the guest: \(reason)")
         repollSoon(run.automationID)
+    }
+
+    /// Held refusals: dropped once the run's tab is listed (or the run is
+    /// over), applied once `tabAppearGrace` ran out with no tab.
+    /// `liveBranches`: a workspace's open worktree tabs.
+    func settlePendingRefusals(now: Date = Date(), liveBranches: (UUID) -> [String]) {
+        for run in store.runs where run.pendingRefusal != nil {
+            guard let reason = run.pendingRefusal else { continue }
+            guard run.outcome == .launched, run.completedAt == nil, let slug = run.branchSlug,
+                  let pid = run.runProfileID ?? store.automation(run.automationID)?.profileID else {
+                store.setPendingRefusal(run.id, nil)
+                continue
+            }
+            if liveBranches(pid).contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) {
+                BACDebug.log("automation", "run \(slug): its tab is up, the held refusal is dropped")
+                store.setPendingRefusal(run.id, nil)
+            } else if now.timeIntervalSince(run.queuedAt ?? run.firedAt) >= Self.tabAppearGrace {
+                store.setPendingRefusal(run.id, nil)
+                guard store.markRefused(run.id, reason: reason) else { continue }
+                BACDebug.log("automation", "run \(slug) refused by the guest (no tab came up)")
+                repollSoon(run.automationID)
+            }
+        }
     }
 
     /// A reason the guest wrote, as data: one line, no control characters,

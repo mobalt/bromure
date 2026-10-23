@@ -82,6 +82,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// that holds after a relaunch — and only while it's still what the
     /// card shows.
     var answerRefusal: String?
+    /// A refusal the guest reported before the run's tab could be listed:
+    /// held until the tab shows up (dropped) or the grace runs out without
+    /// it (then `lastError`). See `CodingTaskEngine.runRefused`.
+    var pendingRefusal: String?
     /// A start is being checked (workspace up, folder present, a repo of
     /// its own) — the card stays where it is with a "Starting…" spinner and
     /// moves to In Progress only once the launch can actually happen.
@@ -2407,11 +2411,37 @@ final class CodingTaskEngine {
     /// claim any guest process can make (see the automation engine's
     /// `runRefused`): not for a task whose tab is up, and shown as what the
     /// workspace said.
-    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?) {
+    /// Before the tab could be listed (`tabAppearGrace` from the start), no
+    /// tab says nothing: the refusal is held, and `settlePendingRefusals`
+    /// puts it on the card only if the grace runs out with no tab.
+    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
+                    now: Date = Date()) {
         guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
                                                   && $0.stage == .inProgress }) else { return }
         if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true { return }
-        store.mutate(t.id) { $0.lastError = ScheduledAutomationEngine.guestReported(reason) }
+        let text = ScheduledAutomationEngine.guestReported(reason)
+        if let started = t.startedAt, now.timeIntervalSince(started) < ScheduledAutomationEngine.tabAppearGrace {
+            store.mutate(t.id) { $0.pendingRefusal = text }
+            return
+        }
+        store.mutate(t.id) { $0.lastError = text }
+    }
+
+    /// Held refusals: dropped once the task's tab is listed (or it left In
+    /// Progress), put on the card once the grace ran out with no tab.
+    func settlePendingRefusals(now: Date = Date(), liveBranches: (UUID) -> [String]) {
+        for t in store.tasks where t.pendingRefusal != nil {
+            guard let reason = t.pendingRefusal else { continue }
+            guard t.stage == .inProgress, let slug = t.branchSlug else {
+                store.mutate(t.id) { $0.pendingRefusal = nil }
+                continue
+            }
+            if liveBranches(t.profileID).contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) {
+                store.mutate(t.id) { $0.pendingRefusal = nil }
+            } else if now.timeIntervalSince(t.startedAt ?? .distantPast) >= ScheduledAutomationEngine.tabAppearGrace {
+                store.mutate(t.id) { $0.pendingRefusal = nil; $0.lastError = reason }
+            }
+        }
     }
 
     /// An agent that takes its brief on the command line: watch the launch
