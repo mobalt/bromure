@@ -4306,3 +4306,17 @@
 "Always Allow %@ in This Workspace" = "Always Allow %@ in This Workspace";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "Change this workspace's trusted packages in its settings on the Mac that runs it.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Shut the workspace down first: its disk is in use.";
+"Wipe “%@”?" = "Wipe “%@”?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time.";
+"Wipe" = "Wipe";
+"Clear the compromised mark on “%@”?" = "Clear the compromised mark on “%@”?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event.";
+"Clear Mark" = "Clear Mark";
+"Couldn't wipe “%@”" = "Couldn't wipe “%@”";
+"Couldn't clear the mark on “%@”" = "Couldn't clear the mark on “%@”";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm.";
+"Wipe and Restore…" = "Wipe and Restore…";
+"Clear Compromised Mark…" = "Clear Compromised Mark…";

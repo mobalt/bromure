@@ -4272,3 +4272,17 @@
 "Always Allow %@ in This Workspace" = "Toujours autoriser %@ dans cet espace de travail";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Faire confiance à ce paquet malgré son avertissement de réputation — ses prochains téléchargements dans cet espace de travail ne sont plus bloqués par celui-ci";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "Modifiez les paquets de confiance de cet espace de travail dans ses réglages, sur le Mac qui l’exécute.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Arrêtez d’abord l’espace de travail : son disque est utilisé.";
+"Wipe “%@”?" = "Effacer « %@ » ?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Son disque système, son dossier personnel et son état enregistré sont effacés ; ses réglages et identifiants sont conservés, tout comme les dossiers de projet qu’il monte. Il n’est plus marqué comme compromis et démarre à neuf la prochaine fois.";
+"Wipe" = "Effacer";
+"Clear the compromised mark on “%@”?" = "Retirer la marque « compromis » de « %@ » ?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Uniquement en cas de fausse alerte : l’espace de travail démarre sur son disque et son dossier personnel actuels, sans effacement, comme si de rien n’était. La fuite a été bloquée dans tous les cas ; la Chronologie de sécurité conserve l’événement.";
+"Clear Mark" = "Retirer la marque";
+"Couldn't wipe “%@”" = "Impossible d’effacer « %@ »";
+"Couldn't clear the mark on “%@”" = "Impossible de retirer la marque de « %@ »";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marqué comme compromis : Bromure a vu cet espace de travail envoyer un identifiant là où il ne devait pas (la requête a été bloquée). Au démarrage, il propose d’abord d’effacer son disque et son dossier personnel. Clic droit pour l’effacer maintenant, ou pour retirer la marque s’il s’agissait d’une fausse alerte.";
+"Wipe and Restore…" = "Effacer et restaurer…";
+"Clear Compromised Mark…" = "Retirer la marque « compromis »…";

@@ -4272,3 +4272,17 @@
 "Always Allow %@ in This Workspace" = "%@ in diesem Workspace immer erlauben";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Diesem Paket trotz Reputationswarnung vertrauen — spätere Downloads in diesem Workspace werden dadurch nicht mehr blockiert";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "Ändern Sie die vertrauenswürdigen Pakete dieses Workspace in seinen Einstellungen auf dem Mac, auf dem er läuft.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Fahren Sie den Workspace zuerst herunter: Seine Festplatte wird verwendet.";
+"Wipe “%@”?" = "„%@“ löschen?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Systemfestplatte, Home und gespeicherter Zustand werden gelöscht; Einstellungen und Zugangsdaten bleiben erhalten, ebenso die eingebundenen Projektordner. Er ist danach nicht mehr als kompromittiert markiert und startet beim nächsten Mal frisch.";
+"Wipe" = "Löschen";
+"Clear the compromised mark on “%@”?" = "Kompromittiert-Markierung von „%@“ entfernen?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Nur bei einem Fehlalarm: Der Workspace startet mit seiner aktuellen Festplatte und seinem Home, ohne Löschen, als wäre nichts geschehen. Das Datenleck wurde ohnehin blockiert; die Sicherheitszeitleiste behält das Ereignis.";
+"Clear Mark" = "Markierung entfernen";
+"Couldn't wipe “%@”" = "„%@“ konnte nicht gelöscht werden";
+"Couldn't clear the mark on “%@”" = "Markierung von „%@“ konnte nicht entfernt werden";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Als kompromittiert markiert: Bromure hat erkannt, dass dieser Workspace Zugangsdaten an ein unzulässiges Ziel senden wollte (die Anfrage wurde blockiert). Beim Start wird zuerst angeboten, Festplatte und Home zu löschen. Rechtsklick, um ihn jetzt zu löschen oder die Markierung bei einem Fehlalarm zu entfernen.";
+"Wipe and Restore…" = "Löschen und wiederherstellen …";
+"Clear Compromised Mark…" = "Kompromittiert-Markierung entfernen …";

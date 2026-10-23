@@ -485,6 +485,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
             onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
+            onCompromise: { [weak self] id, action in self?.acDelegate?.sidebarCompromise(id, action) },
             // Option-click runs the credential wizard first (same as the
             // Workspaces menu's alternate item), so the new workspace starts
             // pre-filled from this Mac's config files.
@@ -3934,6 +3935,9 @@ struct SessionSidebar: View {
     let onDuplicate: ((Profile.ID) -> Void)?
     let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    /// A workspace marked compromised: wipe it, or clear a false alarm.
+    /// nil where the host has no route for it.
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onNewProfile: () -> Void
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
@@ -4258,6 +4262,7 @@ struct SessionSidebar: View {
                 onDuplicate: onDuplicate,
                 onReset: onReset,
                 onDelete: onDelete,
+                onCompromise: onCompromise,
                 onAddAllToGrid: onAddAllToGrid,
                 onRewindHome: onRewindHome,
                 sessionStore: model.sessionsFirst ? sessionStore : nil)
@@ -4922,6 +4927,7 @@ private struct VMSection: View {
     let onDuplicate: ((Profile.ID) -> Void)?
     let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
     /// Sessions-first: a tab whose session the user renamed shows that name.
@@ -4953,6 +4959,15 @@ private struct VMSection: View {
         }
     }
 
+    private func controlMenu(items: Bool = false) -> ControlMenu {
+        ControlMenu(row: row,
+                    onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
+                    onEdit: onEdit, onDuplicate: onDuplicate,
+                    onReset: onReset, onDelete: onDelete, onCompromise: onCompromise,
+                    onAddAllToGrid: onAddAllToGrid, onRewindHome: onRewindHome,
+                    itemsOnly: items)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             // Profile header
@@ -4968,6 +4983,7 @@ private struct VMSection: View {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 9))
                                 .foregroundStyle(.red)
+                                .help(CompromiseRemedy.badgeHelp)
                         }
                     }
                     if let stateLabel {
@@ -4988,11 +5004,7 @@ private struct VMSection: View {
                 if isLive {
                     IconButton(system: "plus", help: "New tab (⌘T)") { onNewTab(row.id) }
                 }
-                ControlMenu(row: row,
-                            onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
-                            onEdit: onEdit, onDuplicate: onDuplicate,
-                            onReset: onReset, onDelete: onDelete,
-                            onAddAllToGrid: onAddAllToGrid, onRewindHome: onRewindHome)
+                controlMenu()
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -5010,6 +5022,8 @@ private struct VMSection: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(row.id) }
+            // Right-click: the same verbs as the "…" menu.
+            .contextMenu { controlMenu(items: true) }
 
             // Nested rows for a running, attached VM: top-level tabs (attach
             // tabs are nested under their container instead), then the always-on
@@ -5082,6 +5096,17 @@ private struct VMSection: View {
 
 /// State-aware "⋯" control menu for a profile row: start/stop/restart plus
 /// edit / duplicate / reset / delete.
+typealias CompromiseRemedy = SessionDisk.CompromiseRemedy
+
+extension SessionDisk.CompromiseRemedy {
+    /// The red triangle by a workspace's name.
+    static var badgeHelp: String {
+        NSLocalizedString(
+            "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm.",
+            comment: "compromised workspace badge")
+    }
+}
+
 private struct ControlMenu: View {
     let row: SessionListModel.ProfileRow
     let onStart: (Profile.ID) -> Void
@@ -5092,11 +5117,43 @@ private struct ControlMenu: View {
     let onDuplicate: ((Profile.ID) -> Void)?
     let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
 
+    /// The items alone (a right-click menu), not the "…" button.
+    var itemsOnly = false
+
     var body: some View {
-        Menu {
+        if itemsOnly {
+            items
+        } else {
+            Menu { items } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder private var items: some View {
+            // A running or booting VM has the disk open: shut it down first
+            // (the host refuses too).
+            let inUse = row.state == .running || row.state == .booting
+            if row.compromised, let onCompromise {
+                Button(NSLocalizedString("Wipe and Restore…", comment: "compromised workspace")) {
+                    onCompromise(row.id, .wipe)
+                }.disabled(inUse)
+                Button(NSLocalizedString("Clear Compromised Mark…", comment: "compromised workspace")) {
+                    onCompromise(row.id, .clear)
+                }
+                Divider()
+            }
             switch row.state {
             case .off:
                 Button("Start") { onStart(row.id) }
@@ -5117,21 +5174,8 @@ private struct ControlMenu: View {
             if let onDuplicate { Button("Duplicate") { onDuplicate(row.id) } }
             Button(NSLocalizedString("Rewind home…", comment: "machine menu")) { onRewindHome(row.id) }
             Divider()
-            // A running or booting VM has the disk open: shut it down first
-            // (the host refuses too).
-            let inUse = row.state == .running || row.state == .booting
             if let onReset { Button("Reset disk", role: .destructive) { onReset(row.id) }.disabled(inUse) }
             Button("Delete workspace", role: .destructive) { onDelete(row.id) }.disabled(inUse)
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: 20)
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
     }
 }
 

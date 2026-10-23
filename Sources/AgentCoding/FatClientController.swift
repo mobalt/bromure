@@ -5110,6 +5110,36 @@ final class RemoteHostWindow: NSWindow {
         alert.beginSheetModal(for: self, completionHandler: go)
     }
 
+    /// "Wipe and Restore…" / "Clear Compromised Mark…" on a remote workspace
+    /// marked compromised: asked here, done by the server.
+    private func confirmCompromiseRemedy(_ id: UUID, _ remedy: CompromiseRemedy) {
+        guard let p = controller.profile(for: id) else { return }
+        let (title, message, button) = ACAppDelegate.compromiseActionParts(remedy, name: p.name)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.first?.keyEquivalent = ""   // an explicit click, never Return
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn, let self else { return }
+            self.controller.request("POST", "/profiles/\(ControlClient.encodeSegment(id.uuidString))/compromised",
+                                    body: ["action": remedy.rawValue]) { [weak self] status, json in
+                guard status != 200, let self else { return }
+                let fail = NSAlert()
+                fail.messageText = String(format: remedy == .wipe
+                    ? NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace")
+                    : NSLocalizedString("Couldn't clear the mark on “%@”", comment: "compromised workspace"), p.name)
+                fail.informativeText = (json["error"] as? String) ?? NSLocalizedString(
+                    "The server didn't answer.", comment: "delete workspace failure")
+                fail.beginSheetModal(for: self)
+            }
+        }
+        alert.beginSheetModal(for: self, completionHandler: go)
+    }
+
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
         if SessionHome.branchNeedsWord(s) { askBranchFate(s, deleting: true); return }
@@ -6985,6 +7015,7 @@ final class RemoteHostWindow: NSWindow {
             onDuplicate: nil,
             onReset: nil,
             onDelete: { [weak self] id in self?.confirmDeleteWorkspace(id) },
+            onCompromise: { [weak self] id, remedy in self?.confirmCompromiseRemedy(id, remedy) },
             // Option-click runs the credential wizard first, same gesture as
             // the local window's "+".
             onNewProfile: { [weak self] in

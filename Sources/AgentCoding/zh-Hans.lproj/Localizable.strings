@@ -4272,3 +4272,17 @@
 "Always Allow %@ in This Workspace" = "在此工作区中始终允许 %@";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "尽管有信誉警告，仍信任此软件包 — 此工作区中之后的下载不会再因此被阻止";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "请在运行此工作区的 Mac 上，于其设置中更改受信任的软件包。";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "请先关闭该工作区：它的磁盘正在使用中。";
+"Wipe “%@”?" = "要抹掉“%@”吗？";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "它的系统磁盘、主目录和已保存的状态将被抹掉；它的设置和凭据会保留，挂载的项目文件夹也不受影响。它将不再被标记为已入侵，下次启动时为全新状态。";
+"Wipe" = "抹掉";
+"Clear the compromised mark on “%@”?" = "要清除“%@”的已入侵标记吗？";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "仅在误报时使用：工作区将使用当前的磁盘和主目录启动，不做抹掉，就像什么都没发生过。泄露本身无论如何都已被阻止；安全时间线会保留该事件。";
+"Clear Mark" = "清除标记";
+"Couldn't wipe “%@”" = "无法抹掉“%@”";
+"Couldn't clear the mark on “%@”" = "无法清除“%@”的标记";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已标记为入侵：Bromure 发现此工作区试图把凭据发送到不应发送的地方（请求已被阻止）。启动时会先询问是否抹掉其磁盘和主目录。右键点按可立即抹掉，或在误报时清除标记。";
+"Wipe and Restore…" = "抹掉并恢复…";
+"Clear Compromised Mark…" = "清除已入侵标记…";

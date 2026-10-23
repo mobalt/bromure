@@ -4275,3 +4275,17 @@
 "Always Allow %@ in This Workspace" = "在此工作區中一律允許 %@";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "儘管有信譽警告，仍信任此套件 — 此工作區中之後的下載不會再因此被封鎖";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "請在執行此工作區的 Mac 上，於其設定中更改受信任的套件。";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "請先關閉此工作區：它的磁碟正在使用中。";
+"Wipe “%@”?" = "要清除「%@」嗎？";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "它的系統磁碟、主目錄和已儲存的狀態將被清除；它的設定和憑證會保留，掛載的專案檔案夾也不受影響。它將不再被標示為遭入侵，下次啟動時為全新狀態。";
+"Wipe" = "清除";
+"Clear the compromised mark on “%@”?" = "要移除「%@」的遭入侵標記嗎？";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "僅在誤報時使用：工作區將以目前的磁碟和主目錄啟動，不做清除，就像什麼都沒發生過。外洩本身無論如何都已被阻擋；安全時間軸會保留該事件。";
+"Clear Mark" = "移除標記";
+"Couldn't wipe “%@”" = "無法清除「%@」";
+"Couldn't clear the mark on “%@”" = "無法移除「%@」的標記";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已標示為遭入侵：Bromure 發現此工作區試圖將憑證傳送到不應傳送的地方（請求已被阻擋）。啟動時會先詢問是否清除其磁碟和主目錄。按右鍵可立即清除，或在誤報時移除標記。";
+"Wipe and Restore…" = "清除並復原…";
+"Clear Compromised Mark…" = "移除遭入侵標記…";

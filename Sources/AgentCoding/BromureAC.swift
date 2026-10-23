@@ -5436,6 +5436,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
         }
+        server.onCompromise = { [weak self] key, action in
+            self?.automationCompromise(key, action) ?? ["ok": false, "error": "unavailable"]
+        }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
         server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
         server.onUpdateModelSettings = { [weak self] doc in
@@ -14621,6 +14624,74 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // session window will reflect the change once focus returns.)
         refreshSidebar()
         return true
+    }
+
+    /// The sidebar's "Wipe and Restore…" / "Clear Compromised Mark…" on a
+    /// workspace marked compromised. nil when done (or not marked), else why
+    /// not. A wipe needs the disk closed; clearing keeps the disk as it is.
+    @MainActor func resolveCompromise(_ profile: Profile, _ action: CompromiseRemedy) -> String? {
+        guard SessionDisk.isCompromised(profile: profile, store: store) else { return nil }
+        switch action {
+        case .wipe:
+            guard wipeCompromised(profile: profile) else {
+                return NSLocalizedString("Shut the workspace down first: its disk is in use.",
+                                         comment: "compromised workspace")
+            }
+        case .clear:
+            SessionDisk(profile: profile, store: store, baseDiskURL: imageManager.baseDiskURL).clearCompromised()
+            FileHandle.standardError.write(Data("[compromise] mark cleared on \(profile.name) (\(profile.id)) by the user\n".utf8))
+            BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "vm.compromise_cleared",
+                                                eventData: ["reason": .string("false alarm")])
+            refreshSidebar()
+        }
+        return nil
+    }
+
+    /// The confirmation for `resolveCompromise`, on this Mac.
+    static func compromiseActionParts(_ action: CompromiseRemedy, name: String) -> (title: String, message: String, button: String) {
+        switch action {
+        case .wipe:
+            return (String(format: NSLocalizedString("Wipe “%@”?", comment: "compromised workspace"), name),
+                    NSLocalizedString("Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time.", comment: "compromised workspace"),
+                    NSLocalizedString("Wipe", comment: "compromised workspace"))
+        case .clear:
+            return (String(format: NSLocalizedString("Clear the compromised mark on “%@”?", comment: "compromised workspace"), name),
+                    NSLocalizedString("Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event.", comment: "compromised workspace"),
+                    NSLocalizedString("Clear Mark", comment: "compromised workspace"))
+        }
+    }
+
+    func sidebarCompromise(_ id: Profile.ID, _ action: CompromiseRemedy) {
+        guard let p = profiles.first(where: { $0.id == id }) else { return }
+        let (title, message, button) = Self.compromiseActionParts(action, name: p.name)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.first?.keyEquivalent = ""   // an explicit click, never Return
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if let why = resolveCompromise(p, action) {
+            let fail = NSAlert()
+            fail.messageText = String(format: action == .wipe
+                    ? NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace")
+                    : NSLocalizedString("Couldn't clear the mark on “%@”", comment: "compromised workspace"), p.name)
+            fail.informativeText = why
+            fail.runModal()
+        }
+    }
+
+    /// POST /profiles/{id}/compromised {"action": "wipe" | "clear"}: a fat
+    /// client's "Wipe and Restore…" / "Clear Compromised Mark…" (it asked).
+    @MainActor func automationCompromise(_ key: String, _ action: String) -> [String: Any] {
+        guard let a = CompromiseRemedy(rawValue: action) else { return ["ok": false, "error": "action must be wipe or clear"] }
+        guard let p = profiles.first(where: { $0.id.uuidString == key || $0.name == key }) else {
+            return ["ok": false, "error": "workspace not found"]
+        }
+        if let why = resolveCompromise(p, a) { return ["ok": false, "error": why] }
+        return ["ok": true]
     }
 
     /// How a compromise-wipe question ended.

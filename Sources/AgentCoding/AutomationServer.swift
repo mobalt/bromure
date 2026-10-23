@@ -233,6 +233,8 @@ final class ACAutomationServer {
     /// where they live here (sized off the main thread by the route).
     var onDescribeStorage: ((_ idOrName: String) -> ProfileStorageContext?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
+    /// POST /profiles/{id}/compromised {"action": "wipe" | "clear"}.
+    var onCompromise: ((_ idOrName: String, _ action: String) -> [String: Any])?
     /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
     /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
     var onExportProfile: ((_ idOrName: String) -> [String: Any]?)?
@@ -1851,6 +1853,15 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
             }
+            return
+        }
+        if method == "POST", raw.hasSuffix("/compromised") {
+            let key = String(raw.dropLast("/compromised".count))
+            let id = key.removingPercentEncoding ?? key
+            let action = bodyJSON["action"] as? String ?? ""
+            let result = DispatchQueue.main.sync(execute: { self.onCompromise?(id, action) })
+                ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 409, body: result)
             return
         }
         if method == "POST", raw.hasSuffix("/firewall") {

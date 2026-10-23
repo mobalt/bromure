@@ -4272,3 +4272,17 @@
 "Always Allow %@ in This Workspace" = "このワークスペースで %@ を常に許可";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "評判の警告がありますが、このパッケージを信頼します — このワークスペースでの以降のダウンロードはこの警告でブロックされません";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "このワークスペースの信頼するパッケージは、ワークスペースを実行している Mac の設定で変更してください。";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "先にワークスペースをシャットダウンしてください。ディスクが使用中です。";
+"Wipe “%@”?" = "「%@」を消去しますか？";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "システムディスク、ホーム、保存された状態が消去されます。設定と認証情報、マウントしているプロジェクトフォルダはそのまま残ります。侵害のマークは外れ、次回はクリーンな状態で起動します。";
+"Wipe" = "消去";
+"Clear the compromised mark on “%@”?" = "「%@」の侵害マークを外しますか？";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "誤検知だった場合のみ：ワークスペースは消去せずに現在のディスクとホームで起動し、何もなかったかのように動作します。漏えい自体はいずれにせよブロックされており、セキュリティタイムラインにはイベントが残ります。";
+"Clear Mark" = "マークを外す";
+"Couldn't wipe “%@”" = "「%@」を消去できませんでした";
+"Couldn't clear the mark on “%@”" = "「%@」のマークを外せませんでした";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "侵害の可能性あり：このワークスペースが認証情報を本来送るべきでない宛先へ送ろうとしたことを Bromure が検出しました（リクエストはブロック済み）。起動時にはまずディスクとホームの消去を確認します。右クリックで今すぐ消去するか、誤検知ならマークを外せます。";
+"Wipe and Restore…" = "消去して復元…";
+"Clear Compromised Mark…" = "侵害マークを外す…";

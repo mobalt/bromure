@@ -4274,3 +4274,17 @@
 "Always Allow %@ in This Workspace" = "Permitir siempre %@ en este espacio de trabajo";
 "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Confiar en este paquete a pesar de su aviso de reputación: las próximas descargas en este espacio de trabajo no se bloquearán por él";
 "Change this workspace's trusted packages in its settings on the Mac that runs it." = "Cambia los paquetes de confianza de este espacio de trabajo en sus ajustes, en el Mac que lo ejecuta.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Apaga primero el espacio de trabajo: su disco está en uso.";
+"Wipe “%@”?" = "¿Borrar «%@»?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Se borran su disco del sistema, su home y su estado guardado; se conservan sus ajustes y credenciales, y también las carpetas de proyecto que monta. Deja de estar marcado como comprometido y arranca limpio la próxima vez.";
+"Wipe" = "Borrar";
+"Clear the compromised mark on “%@”?" = "¿Quitar la marca de comprometido de «%@»?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Solo si fue una falsa alarma: el espacio de trabajo arranca con su disco y su home actuales, sin borrar nada, como si no hubiera pasado nada. La fuga se bloqueó de todos modos; la Cronología de seguridad conserva el evento.";
+"Clear Mark" = "Quitar marca";
+"Couldn't wipe “%@”" = "No se pudo borrar «%@»";
+"Couldn't clear the mark on “%@”" = "No se pudo quitar la marca de «%@»";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marcado como comprometido: Bromure detectó que este espacio de trabajo enviaba una credencial a donde no debía (la solicitud se bloqueó). Al iniciarlo se te pide primero borrar su disco y su home. Haz clic derecho para borrarlo ahora o para quitar la marca si fue una falsa alarma.";
+"Wipe and Restore…" = "Borrar y restaurar…";
+"Clear Compromised Mark…" = "Quitar marca de comprometido…";
