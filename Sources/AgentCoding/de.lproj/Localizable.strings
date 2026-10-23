@@ -4275,6 +4275,9 @@
 
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "Fahren Sie den Workspace zuerst herunter: Seine Festplatte wird verwendet.";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "Seine Kompromittierungsmarkierung wurde inzwischen entfernt, daher wurde nichts gelöscht: Er startet mit seiner aktuellen Festplatte.";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "Er wurde bereits gelöscht: Festplatte und Home-Verzeichnis wurden entfernt, beim nächsten Mal startet er frisch.";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "Seine Kompromittierungsmarkierung wurde als Fehlalarm entfernt, während die Frage angezeigt wurde. Daher wurde nichts gelöscht und er wurde nicht gestartet. Starten Sie ihn erneut, um ihn mit seiner aktuellen Festplatte zu starten.";
 "Wipe “%@”?" = "„%@“ löschen?";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Systemfestplatte, Home und gespeicherter Zustand werden gelöscht; Einstellungen und Zugangsdaten bleiben erhalten, ebenso die eingebundenen Projektordner. Er ist danach nicht mehr als kompromittiert markiert und startet beim nächsten Mal frisch.";
 "Wipe" = "Löschen";

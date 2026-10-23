@@ -243,9 +243,30 @@ public final class SessionDisk {
         let dir = compromisedFlagURL.deletingLastPathComponent()
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         try? Data().write(to: compromisedFlagURL, options: .atomic)
+        try? fm.removeItem(at: compromiseResolutionURL)
     }
     public func clearCompromised() {
         try? fm.removeItem(at: compromisedFlagURL)
+    }
+
+    /// How the latest mark went away: a wipe, or a clear as a false alarm.
+    /// A wipe or a clear confirmed while the other one ran finds the mark
+    /// gone, and this tells it whether the disk was erased. nil: never
+    /// marked, or the mark predates the record.
+    public var compromiseResolutionURL: URL {
+        store.profileDirectory(for: profile).appendingPathComponent("compromise.resolved")
+    }
+    public var lastCompromiseResolution: CompromiseRemedy? {
+        (try? String(contentsOf: compromiseResolutionURL, encoding: .utf8)).flatMap(CompromiseRemedy.init(rawValue:))
+    }
+    private func recordCompromiseResolution(_ how: CompromiseRemedy) {
+        try? Data(how.rawValue.utf8).write(to: compromiseResolutionURL, options: .atomic)
+    }
+
+    /// "Clear Compromised Mark…": a false alarm, the disk is kept.
+    public func clearCompromisedAsFalseAlarm() {
+        clearCompromised()
+        recordCompromiseResolution(.clear)
     }
 
     /// Static lookup used by the picker to badge profiles whose
@@ -283,6 +304,7 @@ public final class SessionDisk {
         try? fm.removeItem(at: dir.appendingPathComponent("meta-share"))
         try? fm.removeItem(at: dir.appendingPathComponent("outbox"))
         clearCompromised()
+        recordCompromiseResolution(.wipe)
     }
 
     /// Per-tab snapshot persisted alongside `vm.state` so the host

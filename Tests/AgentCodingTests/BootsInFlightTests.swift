@@ -50,7 +50,7 @@ import Testing
         let later = delegate.applyBaseImageUpgradeAnswer(2, profile: &p, current: "999")
         #expect(later == .diskInUse(upgradeSkipped: false))
         #expect(p.baseImageUpgradeRemindAfter != nil && p.baseImageUpgradeDeclinedFor == nil)
-        #expect(!delegate.wipeCompromised(profile: p))
+        #expect(delegate.wipeCompromised(profile: p) != .wiped)
         // Once that boot is over, the answer applies.
         delegate.bootsInFlight.end(p.id)
         let after = delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999")
@@ -159,10 +159,10 @@ struct CompromiseWipeOutcomeTests {
     func outcomes() {
         final class Calls: @unchecked Sendable { var n = 0 }
         let calls = Calls()
-        #expect(ACAppDelegate.compromiseWipe(confirmed: false, wiped: { calls.n += 1; return true }) == .cancelled)
+        #expect(ACAppDelegate.compromiseWipe(confirmed: false, wiped: { calls.n += 1; return .wiped }) == .cancelled)
         #expect(calls.n == 0)                                   // Cancel never wipes
-        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { true }) == .wiped)
-        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { false }) == .diskInUse)
+        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { .wiped }) == .wiped)
+        #expect(ACAppDelegate.compromiseWipe(confirmed: true, wiped: { .diskInUse }) == .diskInUse)
     }
 
     @Test("the notice says nothing was wiped and how to retry")
