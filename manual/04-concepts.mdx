@@ -211,6 +211,8 @@ Everything interactive between the Mac and the guest travels over virtio sockets
 | 8447 | Codex sign-in | Stand-in keys for ChatGPT subscriptions. |
 | 5800 | Shell bridge | Terminal attach, `bromure-cli exec`, the Files pane, and file uploads from the chat and terminal. |
 | 5010 | Sign-in callback relay | Loopback sign-in redirects (for `gh`, `gcloud`, and similar tools) delivered back into the guest. |
+| 5840 | Binary attestor | Under **Enforce binaries**: the root-owned attestor naming the program behind each connection. Pinned by a secret. See [Sandbox Policy](10b-sandbox-policy.mdx#the-guest-sandbox). |
+| 5841 | Kernel sentry | The [kernel sentry](10b-sandbox-policy.mdx#the-kernel-sentry)'s event stream from the guest kernel, authenticated, numbered and watched for gaps. |
 
 **Built-in MCP servers** — tools the host offers to every agent on the machine, each reached through a small shim in the guest:
 

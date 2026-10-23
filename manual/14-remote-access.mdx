@@ -200,6 +200,10 @@ Bromure Remote is a client-only mirror, reached exactly the same way (sign in an
 
 - **iPhone** — a **Sessions** list with a count of sessions that need you, a new-session screen ("What can I help you with?"), and a screen per session: its chat, a **Linux** button for its terminal, and a menu with **Resume**, **Rename…**, **New worktree…**, the machine's settings, **Archive** (or **End & Archive**), **End session** and **Delete session**. A room opens as a tab per session, swiping between them, with the room's Switchboard.
 - **iPad** — a persistent sidebar with sessions, rooms and machines; a room shows its grid of chats like the Mac.
+
+On both, the list is ordered as on the Mac's sidebar: **New session** first, **Coding Tasks** and **Automations** right under it, then the sessions. Machines are split into **Virtual Machines** (with the Grid) and **Native Machines** — the Sidecar Macs the remote has attached, shown only when there is one; a native machine offers **New Terminal**. On iPad, **New Session** stays visible above the foldable Sessions section.
+
+When a remote refuses to start a session (on a Sidecar Mac without that agent, for example), the client shows the remote's reason instead of doing nothing.
 - **Apple Vision Pro** — the iPad layout, plus spatial windows: pin any terminal as its own window anywhere in the room, open the Grid as a dedicated stage window, or turn the whole grid into floating windows with **Pin All as Windows**.
 
 In a room, one composer at the bottom has a **To** picker — the room's Switchboard or any session in it — and an attach menu (**Photo Library**, **Choose Files**, **Paste Image**); attachments are uploaded into the target's machine when you send. On iPhone and iPad, a session that needs your input can reach you as a push notification while the app is in the background; tapping it opens that session. The Models board isn't available on these devices; change models from a Mac.

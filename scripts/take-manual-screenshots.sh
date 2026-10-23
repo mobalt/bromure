@@ -211,6 +211,8 @@ for entry in "${ALL_LOCALES[@]}"; do
 
     # Self-rendered views (no app window needed).
     offline security-timeline "$sfx" "$loc" timeline
+    offline network-lineage   "$sfx" "$loc" lineage
+    offline sandbox-drawer    "$sfx" "$loc" policy-drawer-openshell
 done
 
 echo "Done: $(ls "$OUT"/*.jpg 2>/dev/null | wc -l | tr -d ' ') images in manual/images"
