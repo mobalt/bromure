@@ -175,8 +175,10 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// (SNI / Host header) and the destination IP.
     static func allowRule(profileID: UUID, host: String, port: Int, ip: String? = nil) -> OpenShellPolicy.NetworkRule {
         let h = host.lowercased()
-        let exe = BinaryIdentityService.shared.recentExe(profileID: profileID,
-                                                         destinations: [h] + (ip.map { [$0] } ?? []), port: port)
+        // The program the block was for, filed at the deny -- not whatever
+        // connected there since.
+        let exe = BinaryIdentityService.shared.blockedExe(profileID: profileID,
+                                                          destinations: [h] + (ip.map { [$0] } ?? []), port: port)
         func slug(_ s: String) -> String { s.map { $0.isLetter || $0.isNumber ? $0 : "_" }.reduce(into: "") { $0.append($1) } }
         var key = "allow_" + slug(h) + "_\(port)"
         if let exe { key += "_" + slug((exe as NSString).lastPathComponent) }

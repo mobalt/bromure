@@ -243,7 +243,7 @@ struct PolicyDrawer: View {
     /// The program that tried: the attestor's answer, else the kernel
     /// sentry's flow report (the leaf of its process chain).
     private func program(_ item: Blocked, _ profile: Profile) -> String? {
-        if let exe = BinaryIdentityService.shared.recentExe(
+        if let exe = BinaryIdentityService.shared.blockedExe(
             profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) {
             return exe
         }
@@ -264,7 +264,7 @@ struct PolicyDrawer: View {
         if isOpenShell {
             Button("Allow") { allowOpenShell(item, profile) }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-                .help(Text(BinaryIdentityService.shared.recentExe(profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) != nil
+                .help(Text(BinaryIdentityService.shared.blockedExe(profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) != nil
                            ? "Add a rule for this host and port, for the program that tried"
                            : "Add a rule for this host and port"))
         } else if let target = FirewallRuleActions.targets(for: item.fw).first,

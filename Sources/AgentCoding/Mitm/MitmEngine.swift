@@ -548,6 +548,8 @@ public final class MitmEngine {
                                           hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
                                           port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
+                        BinaryIdentityService.shared.noteDenied(identity?.exe, profileID: profileID,
+                                                                destinations: [host, destIP], port: destPort)
                         if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
                                                                    port: destPort, denied: true) {
                         SupplyChainLog.shared.record(
@@ -608,6 +610,8 @@ public final class MitmEngine {
                                       port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                 case .deny:
                     let label = sniHost ?? destIP
+                    BinaryIdentityService.shared.noteDenied(identity?.exe, profileID: profileID,
+                                                            destinations: [label, destIP], port: destPort)
                     if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
                                                                port: destPort, denied: true) {
                     SupplyChainLog.shared.record(
