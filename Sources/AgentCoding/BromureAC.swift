@@ -2671,6 +2671,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
     private var ephemeralProfiles: Set<Profile.ID> = []
+    /// Workspaces between a reboot's teardown and its relaunch: a reboot
+    /// isn't the end of a `vm run --rm` one. Deleting it there left the
+    /// relaunch nothing to boot -- the waits for Kimi or a remote prompt
+    /// found it gone and gave up, and a direct relaunch recreated it no
+    /// longer ephemeral (Finding CWE-670, "Ephemeral reboot is cancelled
+    /// when launch waits on Kimi or a remote prompt").
+    private var rebootingProfiles: Set<Profile.ID> = []
 
     // MARK: Boot filesystem-failure remedies
     //
@@ -6915,6 +6922,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
+        rebootingProfiles.insert(id)
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -6928,6 +6936,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] == nil { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        rebootingProfiles.remove(id)
         launch(profile, detached: !wasAttached, remoteInitiated: remoteInitiated)
         var up = false
         for _ in 0..<600 {   // first boots can take a while
@@ -15543,8 +15552,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // own view in `removePane`, wired in the unified-window phase).
         unifiedWindow?.removePane(profileID)
         unregisterPane(profileID)
-        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped.
-        if ephemeralProfiles.remove(profileID) != nil,
+        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped
+        // -- not when it is only rebooting (it stays ephemeral).
+        if !rebootingProfiles.contains(profileID), ephemeralProfiles.remove(profileID) != nil,
            let p = profiles.first(where: { $0.id == profileID }) {
             try? store.delete(p)
             profiles = store.loadAll()
@@ -15663,7 +15673,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // teardown — handleSessionStopped clears the remedy queue.
             let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
+            rebootingProfiles.insert(profileID)
             handleSessionStopped(profileID: profileID)
+            rebootingProfiles.remove(profileID)
             if let profile {
                 if let remedy {
                     // In use while the remedy works on the disk; handed to
