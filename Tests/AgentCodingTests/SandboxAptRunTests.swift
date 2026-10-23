@@ -54,11 +54,38 @@ struct SandboxAptRunTests {
                 import subprocess
                 subprocess.Popen(["sh", "-c", "trap '( sleep 30 ) & echo $! > $FAKE_DIR/bg.pid; exit 0' TERM; "
                                   "touch $FAKE_DIR/postinst.up; while :; do sleep 0.1; done"])
+            if os.environ.get("DPKG") == "daemon":
+                # The same, but what it backgrounds daemonizes: setsid, its
+                # parent gone at once -- no group or session to follow.
+                import subprocess
+                subprocess.Popen(["sh", "-c", "trap 'setsid $FAKE_DIR/daemon.sh & exit 0' TERM; "
+                                  "touch $FAKE_DIR/postinst.up; while :; do sleep 0.1; done"])
+            if os.environ.get("DPKG") == "leaves":
+                # A postinst that starts a daemon and is done: the install is.
+                import subprocess
+                subprocess.Popen(["python3", os.environ["FAKE_DIR"] + "/daemon.py"])
+                note("dpkg-done"); sys.exit(0)
             note("dpkg-start")
             for _ in range(600): time.sleep(0.1)
             note("dpkg-ran-out")
             """
         try dpkg.write(to: dir.appendingPathComponent("dpkg.py"), atomically: true, encoding: .utf8)
+        try """
+            import os, time
+            os.setsid()
+            null = os.open(os.devnull, os.O_RDWR)    # a daemon lets go of apt's output
+            for fd in (0, 1, 2): os.dup2(null, fd)
+            open(os.environ["FAKE_DIR"] + "/bg.pid", "w").write(str(os.getpid()))
+            time.sleep(60)
+            """.write(to: dir.appendingPathComponent("daemon.py"), atomically: true, encoding: .utf8)
+        // The same at once (setsid(1) execs it in a session of its own),
+        // the way `setsid sleep 60 &` in a trap does it. Linux has setsid(1).
+        try """
+            #!/bin/sh
+            echo $$ > "$FAKE_DIR/bg.pid"
+            exec sleep 60 </dev/null >/dev/null 2>&1
+            """.write(to: dir.appendingPathComponent("daemon.sh"), atomically: true, encoding: .utf8)
+        chmod(dir.appendingPathComponent("daemon.sh").path, 0o755)
         // Knows every name once the lists exist (the exact-name check), logs nothing.
         let cache = """
             #!/bin/sh
@@ -173,6 +200,48 @@ struct SandboxAptRunTests {
             if bg and alive(bg): os.kill(bg, 9)
             """)
         #expect(out.contains("REPARENTED True"), Comment(rawValue: out))
+    }
+
+    /// Finding (CWE-670): "apt stop still returns while a setsid child
+    /// reparented to init keeps running". A process that calls setsid and
+    /// whose parent exits between two scans is in no tracked group or
+    /// session and, its ppid 1, no one's child: the stop returned (the lock
+    /// with it) while it ran on as root. apt now runs under a subreaper of
+    /// its own, which such a process is reparented to -- Linux only.
+    @Test("A stop doesn't return while a daemon a maintainer script started on SIGTERM still runs",
+          .enabled(if: SandboxAptRunTests.runnable && FileManager.default.fileExists(atPath: "/proc/self/stat")))
+    func stopsDaemonizedChildren() throws {
+        let out = try run("""
+            def alive(p):
+                try: return open('/proc/%d/stat' % p).read().rsplit(')', 1)[1].split()[0] != 'Z'
+                except OSError: return False
+            open(D + '/lists', 'w').close()
+            os.environ['DPKG'] = 'daemon'; m.APT_STOP_GRACE_S = 3
+            gone = time.time() + 2.5
+            t = time.time(); code, text = m.apt_install(['curl'], cancelled=lambda: time.time() > gone)
+            bg = int(open(D + '/bg.pid').read()) if os.path.exists(D + '/bg.pid') else None
+            print('DAEMON', code != 0 and bg is not None and not alive(bg) and time.time() - t < 20, bg, bg and alive(bg))
+            if bg and alive(bg): os.kill(bg, 9)
+            """)
+        #expect(out.contains("DAEMON True"), Comment(rawValue: out))
+    }
+
+    /// The subreaper waits for everything only when stopping: an install
+    /// whose postinst leaves a daemon running is over when apt is.
+    @Test("A completed install whose postinst left a daemon returns at once", .enabled(if: SandboxAptRunTests.runnable))
+    func completedInstallLeavesDaemon() throws {
+        let out = try run("""
+            open(D + '/lists', 'w').close()
+            os.environ['DPKG'] = 'leaves'
+            t = time.time(); code, text = m.apt_install(['curl'])
+            for _ in range(50):
+                if os.path.exists(D + '/bg.pid'): break
+                time.sleep(0.1)
+            bg = int(open(D + '/bg.pid').read())
+            print('DONE', code == 0 and 'installed' in text and time.time() - t < 15)
+            os.kill(bg, 9)
+            """)
+        #expect(out.contains("DONE True"), Comment(rawValue: out))
     }
 
     @Test("A second install waits for the one in flight instead of running beside it",
