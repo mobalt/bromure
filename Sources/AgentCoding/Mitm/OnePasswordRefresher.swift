@@ -52,6 +52,25 @@ public final class OnePasswordRefresher {
     }
 
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    /// Per profile, the references whose failure the user was already told
+    /// about (and `cliMissing` for a missing `op`): kept across `start()`,
+    /// which every live credential push, model restage and kubeconfig
+    /// rewrite calls -- each one re-armed the app-modal alert while the
+    /// reference kept failing (Finding CWE-670, "A failing 1Password read
+    /// shows the error alert again on every live credential push"). Told
+    /// again only once it has worked, or the reference changed.
+    private var reportedFailures: [UUID: Set<String>] = [:]
+    static let cliMissing = "op-cli-missing"
+
+    /// A failure to tell the user about: true the first time for it.
+    func noteFailure(_ profileID: UUID, _ key: String) -> Bool {
+        reportedFailures[profileID, default: []].insert(key).inserted
+    }
+
+    func noteSuccess(_ profileID: UUID, _ opRef: String) {
+        reportedFailures[profileID]?.remove(opRef)
+        reportedFailures[profileID]?.remove(Self.cliMissing)   // `op` ran
+    }
     /// Resolves a reference (`op read`; tests stand one in).
     private let read: @Sendable (String) async throws -> String
     public init(read: @escaping @Sendable (String) async throws -> String = { try await OnePasswordCLI.read($0) }) {
@@ -63,13 +82,18 @@ public final class OnePasswordRefresher {
     /// literal); this owns resolving the real secret. It first **blanks** each
     /// placeholder (so a premature request gets no valid key rather than the
     /// literal `op://…`), then resolves immediately and every 120 s thereafter.
-    /// `onFirstError` fires once, on the main actor, if the very first resolution
-    /// fails (op missing / not signed in) so the caller can surface instructions.
+    /// `onFirstError` fires on the main actor when a reference starts failing
+    /// (op missing / not signed in) so the caller can surface instructions --
+    /// once per reference until it works or changes, across restarts.
     /// No-op for an empty list (and clears any prior loop).
     public func start(profileID: UUID, refs: [Ref], swapper: TokenSwapper,
                       onFirstError: (@MainActor (OnePasswordCLI.OpError) -> Void)? = nil) {
-        stop(profileID: profileID)
-        guard !refs.isEmpty else { return }
+        cancel(profileID: profileID)
+        // A reference no longer used (removed, or changed to another) is
+        // told about again should it come back and fail.
+        let live = Set(refs.map(\.opRef)).union([Self.cliMissing])
+        reportedFailures[profileID] = reportedFailures[profileID]?.intersection(live)
+        guard !refs.isEmpty else { reportedFailures[profileID] = nil; return }
         // Replace the plan's fake→"op://…" placeholder with fake→"" until the
         // real secret resolves; the guest already holds the fake. A secret
         // already resolved from this reference (kept by a live refresh) stays.
@@ -82,8 +106,7 @@ public final class OnePasswordRefresher {
             }
         }
         let read = self.read
-        let task = Task { [weak swapper] in
-            var reported = false
+        let task = Task { [weak self, weak swapper] in
             var first = true
             while !Task.isCancelled {
                 if !first {
@@ -102,10 +125,14 @@ public final class OnePasswordRefresher {
                         Self.updateSwap(swapper: swapper, profileID: profileID, ref: r,
                                         real: real.trimmingCharacters(in: .whitespacesAndNewlines),
                                         resolved: true)
+                        self?.noteSuccess(profileID, r.opRef)
                     } catch let e as OnePasswordCLI.OpError {
                         if Task.isCancelled { return }
-                        if !reported {
-                            reported = true
+                        // Once per failing reference (a missing CLI: once),
+                        // whatever restarted the loop since.
+                        let key: String
+                        if case .notInstalled = e { key = Self.cliMissing } else { key = r.opRef }
+                        if self?.noteFailure(profileID, key) == true {
                             onFirstError?(e)
                         }
                         // A missing CLI won't fix itself mid-session — stop the
@@ -118,7 +145,13 @@ public final class OnePasswordRefresher {
         tasks[profileID] = task
     }
 
+    /// The session ended: its loop, and what it told the user, go.
     public func stop(profileID: UUID) {
+        cancel(profileID: profileID)
+        reportedFailures[profileID] = nil
+    }
+
+    private func cancel(profileID: UUID) {
         tasks[profileID]?.cancel()
         tasks.removeValue(forKey: profileID)
     }
@@ -126,6 +159,7 @@ public final class OnePasswordRefresher {
     public func stopAll() {
         for (_, t) in tasks { t.cancel() }
         tasks.removeAll()
+        reportedFailures.removeAll()
     }
 
     /// Replace this ref's entries (same fake + host) with the new real value,
