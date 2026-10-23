@@ -50,6 +50,64 @@ struct KubeLiveTrustTests {
         #expect(cas.ca(for: "k8s.other", profileID: other) != nil)
     }
 
+    /// Finding (CWE-362): "Live kube trust rebuild drops the cluster CA and
+    /// client cert between lock acquisitions". The rebuild cleared the
+    /// workspace's CAs (and identities) and re-added them one lock at a
+    /// time, the PEM parsed in between: a handshake on the proxy's queue in
+    /// that gap found no CA -- system trust -- and no client certificate.
+    @Test("a live rebuild never leaves the cluster CA out, and a PEM that won't parse keeps the old CA")
+    func rebuildIsAtomic() async throws {
+        let ca = try #require(try Self.selfSignedPEM())
+        let pid = UUID()
+        var p = Profile(name: "glm", tool: .claude, authMode: .token)
+        p.kubeconfigs = [KubeconfigEntry(name: "admin@k", serverURL: "https://10.163.15.50:6443",
+                                         caCertPEM: ca, auth: .bearerToken("real"))]
+        let ids = ClientIdentityRegistry(), cas = ClusterCATrustRegistry(), poller = ExecCredentialPoller()
+        let swapper = TokenSwapper(consent: ConsentBroker())
+        let mat = KubeconfigMaterializer().materialize(profile: p, bromureCAPEM: "PEM")
+        MitmEngine.applyKubeMaterial(mat, profileID: pid, identities: ids, clusterCAs: cas, poller: poller, swapper: swapper)
+        #expect(cas.ca(for: "10.163.15.50", profileID: pid) != nil)
+
+        // The proxy's queue looks the CA up while live pushes rebuild it.
+        final class Probe: @unchecked Sendable {
+            let lock = NSLock(); var stop = false; var misses = 0; var looks = 0
+        }
+        let probe = Probe()
+        let reader = Thread {
+            while true {
+                probe.lock.lock(); let done = probe.stop; probe.lock.unlock()
+                if done { return }
+                let miss = cas.ca(for: "10.163.15.50:6443", profileID: pid) == nil
+                probe.lock.lock(); probe.looks += 1; if miss { probe.misses += 1 }; probe.lock.unlock()
+            }
+        }
+        reader.start()
+        for _ in 0..<3000 {
+            MitmEngine.applyKubeMaterial(mat, profileID: pid, identities: ids, clusterCAs: cas, poller: poller, swapper: swapper)
+        }
+        probe.lock.lock(); probe.stop = true; let misses = probe.misses, looks = probe.looks; probe.lock.unlock()
+        #expect(looks > 0)
+        #expect(misses == 0, "\(misses) of \(looks) lookups found no CA")
+        poller.stopAll(profileID: pid)
+
+        // An edit that breaks the PEM: the cluster keeps its pinned CA.
+        cas.replaceAll([(pem: "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----",
+                         host: "10.163.15.50:6443")], for: pid)
+        #expect(cas.ca(for: "10.163.15.50:6443", profileID: pid) != nil)
+        #expect(cas.ca(for: "10.163.15.50", profileID: pid) != nil)
+        // Removed: gone.
+        cas.replaceAll([], for: pid)
+        #expect(cas.ca(for: "10.163.15.50", profileID: pid) == nil)
+
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Mitm/MitmEngine.swift"), encoding: .utf8)
+        let apply = try #require(src.range(of: "static func applyKubeMaterial("))
+        let body = src[apply.upperBound...].prefix(1500)
+        #expect(body.contains("identities.replaceAll(") && body.contains("clusterCAs.replaceAll("))
+        #expect(!body.contains("clearAll("))
+    }
+
     @Test("Stopping one workspace's exec pollers leaves the others running")
     func pollerPerWorkspace() {
         let a = UUID(), b = UUID()

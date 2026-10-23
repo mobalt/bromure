@@ -767,16 +767,13 @@ public final class MitmEngine {
     static func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID,
                                   identities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry,
                                   poller: ExecCredentialPoller, swapper: TokenSwapper) {
-        identities.clearAll(for: profileID)
-        for ident in mat.clientIdentities {
-            identities.setIdentity(ident.identity, host: ident.host, profileID: profileID,
-                                   consentCredentialID: ident.consentCredentialID,
-                                   consentDisplayName: ident.consentDisplayName)
-        }
-        clusterCAs.clearAll(for: profileID)
-        for entry in mat.clusterCAs {
-            clusterCAs.setCA(pem: entry.caPEM, host: entry.host, profileID: profileID)
-        }
+        // Each registry swapped in one locked step: a handshake on the
+        // proxy's queue never sees the workspace cleared mid-rebuild.
+        identities.replaceAll(mat.clientIdentities.map {
+            (host: $0.host, entry: .init(identity: $0.identity, consentCredentialID: $0.consentCredentialID,
+                                         consentDisplayName: $0.consentDisplayName))
+        }, for: profileID)
+        clusterCAs.replaceAll(mat.clusterCAs.map { (pem: $0.caPEM, host: $0.host) }, for: profileID)
         // Unchanged contexts keep their poller (no second run of the same
         // plugin racing the first); changed ones restart, removed ones stop.
         poller.sync(mat.execContexts, profileID: profileID, swapper: swapper)
