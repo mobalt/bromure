@@ -1712,6 +1712,8 @@ final class ScheduledAutomationEngine {
         let items: [TriggerItem]
         var landed: [GitHubPRPoller.LandedCommit] = []
         var reviewedBefore: (GitHubPRPoller.LandedCommit) -> Bool = { _ in false }
+        /// The commit the walk stopped above (the oldest landed's parent).
+        var walkBase: String?
         let scope: String
         do {
             switch a.trigger {
@@ -1747,6 +1749,7 @@ final class ScheduledAutomationEngine {
                         subfolder: a.filters.commitSubfolder,
                         since: previous?.tipSHA, isKnown: isKnown)
                     landed = walk.landed
+                    walkBase = walk.base
                     if upgraded {
                         // Once: from here on the tip is where this walk stopped.
                         next.tipSHA = walk.base
@@ -1876,9 +1879,10 @@ final class ScheduledAutomationEngine {
             slots -= 1
             if a.trigger == .githubCommit {
                 // Where to walk from again should the guest refuse it: the
-                // commit before it on the branch, or this poll's own tip.
+                // commit before it on the branch, or this poll's own tip —
+                // or, with none yet, where the walk stopped (its parent).
                 let at = landed.firstIndex { GitHubPRPoller.eventKey($0.item, kind: a.trigger) == key }
-                if let base = at.flatMap({ $0 > 0 ? landed[$0 - 1].sha : next.tipSHA }) {
+                if let base = at.flatMap({ $0 > 0 ? landed[$0 - 1].sha : next.tipSHA ?? walkBase }) {
                     var bases = next.commitBases ?? [:]
                     bases[key] = base
                     if bases.count > 200 {

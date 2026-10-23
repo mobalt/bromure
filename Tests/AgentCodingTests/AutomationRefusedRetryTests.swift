@@ -84,6 +84,10 @@ struct AutomationRefusedRetryTests {
             .appendingPathComponent("Sources/AgentCoding/ScheduledAutomations.swift"), encoding: .utf8)
         #expect(src.contains("if current.tipSHA != previous?.tipSHA { next.tipSHA = current.tipSHA }"))
         #expect(src.contains("next.commitBases = previous?.commitBases"))
+        // A commit fired with no tip yet (the first walk) still has a base:
+        // its parent, where the walk stopped.
+        #expect(src.contains("$0 > 0 ? landed[$0 - 1].sha : next.tipSHA ?? walkBase"))
+        #expect(src.contains("walkBase = walk.base"))
         #expect(src.contains("let processed = store.handledItemKeys(for: a.id)"))
         #expect(src.components(separatedBy: "requeueRefused(run.automationID)").count == 3)
     }
