@@ -122,20 +122,31 @@ struct EphemeralRebootTests {
         #expect(store.ephemeralSweepable(orphan, mine: false, isAlive: alive))
         #expect(!store.ephemeralSweepable(other, mine: false, isAlive: alive))
         #expect(!store.ephemeralSweepable(mine, mine: false, isAlive: alive))
-        // Booting one claims it.
-        store.markEphemeral(other)
-        #expect(store.ephemeralSweepable(other, mine: true, isAlive: alive))
+        // Neither a stop here nor a boot here takes a live owner's.
+        #expect(!store.mayTakeEphemeral(other, isAlive: alive))
+        #expect(!store.claimEphemeral(other, isAlive: alive))
+        #expect(store.ephemeralOwner(other) == 4242)
+        #expect(!store.ephemeralSweepable(other, mine: true, isAlive: alive))
+        // Its own, or one whose owner is gone: taken (and claimed by a boot).
+        #expect(store.mayTakeEphemeral(mine, isAlive: alive) && store.mayTakeEphemeral(orphan, isAlive: alive))
+        #expect(store.claimEphemeral(orphan, isAlive: alive) && store.ephemeralOwner(orphan) == getpid())
+        // An unmarked workspace is never taken; marking one claims it.
+        let plain = Profile(name: "plain", tool: .claude, authMode: .token)
+        try store.save(plain)
+        #expect(!store.mayTakeEphemeral(plain, isAlive: alive))
+        #expect(store.claimEphemeral(plain, isAlive: alive) && store.ephemeralOwner(plain) == getpid())
         #expect(ProfileStore.processAlive(getpid()))
     }
 
     @Test("a quit, a caught signal and the next launch delete every stopped --rm workspace")
     func sweeps() throws {
         let src = try String(contentsOf: Self.source, encoding: .utf8)
-        #expect(src.contains("if spec[\"rm\"] as? Bool == true { ephemeralProfiles.insert(saved.id); store.markEphemeral(saved) }"))
+        #expect(src.contains("if spec[\"rm\"] as? Bool == true, store.claimEphemeral(saved) { ephemeralProfiles.insert(saved.id) }"))
         let sweep = try body(src, "func sweepStoppedEphemeral(atLaunch: Bool = false) {")
         #expect(sweep.contains("runningSessions[p.id] == nil && !diskInUse(p.id)"))
         #expect(sweep.contains("store.ephemeralSweepable(p, mine: !atLaunch)"))
-        #expect(src.contains("if store.isEphemeral(profile) { store.markEphemeral(profile) }"))
+        #expect(src.contains("if store.isEphemeral(profile) { store.claimEphemeral(profile) }"))
+        #expect(!src.contains("store.markEphemeral("))
         let quit = try body(src, "func applicationWillTerminate(_ notification: Notification) {")
         #expect(quit.contains("sweepStoppedEphemeral()"))
         let signals = try body(src, "private func installCleanupSignalHandlers() {")
@@ -143,6 +154,6 @@ struct EphemeralRebootTests {
         let launched = try body(src, "func applicationDidFinishLaunching(_ notification: Notification) {")
         #expect(before("profiles = store.loadAll()", "sweepStoppedEphemeral(atLaunch: true)", in: launched))
         let take = try body(src, "private func takeEphemeral(_ p: Profile) -> Bool {")
-        #expect(take.contains("store.isEphemeral(p)"))
+        #expect(take.contains("return store.isEphemeral(p) ? store.mayTakeEphemeral(p) : inMemory"))
     }
 }

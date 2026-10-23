@@ -7085,7 +7085,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         let saved = profiles.first { $0.id == profile.id } ?? profile
-        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id); store.markEphemeral(saved) }
+        if spec["rm"] as? Bool == true, store.claimEphemeral(saved) { ephemeralProfiles.insert(saved.id) }
 
         // 4. Boot via the shared launch path. A headless `-d` run boots
         //    window-less from the start (no pane is ever hosted) so no window
@@ -12445,7 +12445,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // no pane behind.
         guard bootsInFlight.begin(profile.id) else { return }
         // A `--rm` workspace this process boots is this process's to sweep.
-        if store.isEphemeral(profile) { store.markEphemeral(profile) }
+        if store.isEphemeral(profile) { store.claimEphemeral(profile) }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -15632,11 +15632,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         refreshSidebar()
     }
 
-    /// `p` is a `vm run --rm` workspace (in memory, or by its on-disk
-    /// marker); forgets the in-memory mark.
+    /// `p` is a `vm run --rm` workspace this process may delete: its
+    /// on-disk mark is ours, or its owner is gone -- never a live other
+    /// process's (the login agent's or the GUI's: it may be running it).
+    /// Forgets the in-memory mark (which alone still counts if the marker
+    /// couldn't be written: then nobody else has one either).
     private func takeEphemeral(_ p: Profile) -> Bool {
         let inMemory = ephemeralProfiles.remove(p.id) != nil
-        return inMemory || store.isEphemeral(p)
+        return store.isEphemeral(p) ? store.mayTakeEphemeral(p) : inMemory
     }
 
     /// Delete the `vm run --rm` workspaces that are over: at a quit or a

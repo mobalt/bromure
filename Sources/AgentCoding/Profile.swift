@@ -3688,6 +3688,23 @@ public final class ProfileStore {
         return owner != getpid() && (owner <= 0 || !isAlive(owner))
     }
 
+    /// Whether this process may claim or delete `profile`'s `--rm` mark:
+    /// there is one, and it is this process's or its owner is gone. Never a
+    /// live other process's (it may be running that workspace right now).
+    public func mayTakeEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        return owner == getpid() || owner <= 0 || !isAlive(owner)
+    }
+
+    /// `vm run --rm`, or a boot of a marked workspace: mark it this
+    /// process's -- unless a live other process owns it.
+    @discardableResult
+    public func claimEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        if isEphemeral(profile), !mayTakeEphemeral(profile, isAlive: isAlive) { return false }
+        markEphemeral(profile)
+        return true
+    }
+
     public static func processAlive(_ pid: pid_t) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
     }
