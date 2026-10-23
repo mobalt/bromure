@@ -48,4 +48,26 @@ struct EphemeralRebootTests {
         #expect(before("handleSessionStopped(profileID: profileID)", "rebootingProfiles.remove(profileID)", in: guest))
         #expect(before("rebootingProfiles.remove(profileID)", "self.launch(profile, detached: true)", in: guest))
     }
+
+    /// Review of the above: kept through the teardown, a workspace whose
+    /// relaunch then gave up (a stop while it waited, a prompt cancelled or
+    /// skipped) was never booted, so its stop never came and it stayed on
+    /// disk for good. Every place a launch gives up drops it.
+    @Test("a launch that gives up deletes a --rm workspace that isn't running")
+    func abandonedLaunchDeletes() throws {
+        let src = try String(contentsOf: Self.source, encoding: .utf8)
+        let drop = try body(src, "private func dropAbandonedEphemeral(_ id: Profile.ID) {")
+        #expect(drop.contains("guard runningSessions[id] == nil, !rebootingProfiles.contains(id),"))
+        #expect(drop.contains("ephemeralProfiles.remove(id) != nil") && drop.contains("try? store.delete(p)"))
+        // Kimi provisioning stopped, the boot remedy stopped, a wipe
+        // cancelled (remote and local), a wipe or an upgrade skipped (remote).
+        #expect(src.contains("""
+            guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else {
+                                self.dropAbandonedEphemeral(profile.id); return
+            """))
+        #expect(src.contains("guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }"))
+        #expect(src.components(separatedBy: "case .cancelled: dropAbandonedEphemeral(profile.id); return").count == 3)
+        let prompts = try body(src, "@MainActor private func resolveRemoteLaunchPrompts(")
+        #expect(prompts.components(separatedBy: "dropAbandonedEphemeral(profile.id)").count == 4)
+    }
 }
