@@ -242,8 +242,7 @@ final class RepoWatchEngine {
     func binding(profileID: UUID, branch: String?) -> Binding {
         guard let delegate, let branch, branch.hasPrefix("wt/") else { return Binding() }
         let autoStore = delegate.scheduledAutomationStore
-        // Same lookup as the automation engine's: a run failed only by a
-        // refusal the guest reported is revived by its own agent reporting.
+        // Same lookup as the automation engine's: launched runs only.
         guard let run = autoStore.runForBranch(branch, profileID: profileID),
               let automation = autoStore.automation(run.automationID)
         else { return Binding() }
