@@ -283,7 +283,9 @@ public final class SessionDisk {
             homeImageURL, bootstrapHomeDirectory, store.homeBackupDirectory(for: profile),
             // Rollback images of both (checkpoints/ holds home/).
             store.checkpointsDirectory(for: profile),
-            dir.appendingPathComponent("vm.state"),
+            // The saved RAM image + its fingerprint, and the EFI variable
+            // store the guest could write (the next boot copies the base's).
+            savedStateURL, savedStateURL.appendingPathExtension("json"), efiVarsURL,
             dir.appendingPathComponent("tabs.json"),
             dir.appendingPathComponent("meta-share"),
             dir.appendingPathComponent("outbox"),

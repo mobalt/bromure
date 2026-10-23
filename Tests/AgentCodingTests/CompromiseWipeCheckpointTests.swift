@@ -19,7 +19,8 @@ struct CompromiseWipeCheckpointTests {
         try fm.createDirectory(at: store.homeCheckpointsDirectory(for: p), withIntermediateDirectories: true)
         for url in [store.diskURL(for: p), store.homeImageURL(for: p),
                     store.checkpointsDirectory(for: p).appendingPathComponent("1700000000.img"),
-                    store.homeCheckpointsDirectory(for: p).appendingPathComponent("1700000000.img")] {
+                    store.homeCheckpointsDirectory(for: p).appendingPathComponent("1700000000.img"),
+                    disk.efiVarsURL, disk.savedStateURL] {
             try Data("contaminated".utf8).write(to: url)
         }
         disk.markCompromised()
@@ -38,6 +39,8 @@ struct CompromiseWipeCheckpointTests {
         #expect(!FileManager.default.fileExists(atPath: store.checkpointsDirectory(for: p).path))
         #expect(!FileManager.default.fileExists(atPath: store.diskURL(for: p).path))
         #expect(!FileManager.default.fileExists(atPath: store.homeImageURL(for: p).path))
+        #expect(!FileManager.default.fileExists(atPath: disk.efiVarsURL.path))
+        #expect(!disk.hasSavedState)
     }
 
     @Test("a delete that fails keeps the mark and says what is left")
