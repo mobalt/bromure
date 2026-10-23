@@ -217,6 +217,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         didSet {
             if oldValue != windowIndex {
                 windowID = nil; agentProcessStart = nil
+                hostLaunchedWindow = nil
                 agentProcessPID = nil; agentProcessUptime = nil
                 if windowIndex != nil { releasedWindowIndex = nil }
             }
@@ -250,6 +251,16 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// told apart from the ones already there.
     var launchingSince: Date?
     var launchBaselineIndex: Int?
+    /// The tab a launch of ours bound (reconcile step 2: a tab the host's
+    /// own launch opened, past its baseline) -- set only there, and
+    /// forgotten once the session is bound anywhere else. Tabs the store
+    /// adopted from the guest roster never have it: their @label, @display
+    /// and @worktree are any guest process's to set (Finding CWE-807,
+    /// "Guest-adopted tmux windows are spared from pid-pin eviction, so a
+    /// guest can still fill every slot").
+    var hostLaunchedWindow: Int?
+    /// The session's tab is the one a host launch opened.
+    var isOnHostLaunchedTab: Bool { windowIndex != nil && windowIndex == hostLaunchedWindow }
     var endedAt: Date?
     var lastSeenAt: Date?
     var lastError: String?
@@ -1322,6 +1333,7 @@ final class AgentSessionStore {
                     }
                     if let tab = Self.launchTab(for: s, in: candidates, soleLaunch: soleLaunch) {
                         s.windowIndex = tab.index
+                        s.hostLaunchedWindow = tab.index
                         s.bootID = nil   // stamped by the next probe
                         s.launchingSince = nil
                         s.launchBaselineIndex = nil
