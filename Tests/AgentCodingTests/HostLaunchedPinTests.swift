@@ -48,11 +48,52 @@ struct HostLaunchedPinTests {
         s.noteAgent(profileID: ws, pid: 500, window: 1, hostWindows: host)
         #expect(s.agentWindows(profileID: ws).contains(1))
 
-        // Rebound anywhere else (a lost binding taken back, a twin merge):
-        // no longer the tab the launch opened.
+        // Rebound before the probe read the tab: no proof it's the same one.
         store.mutate(launch.id) { $0.windowIndex = nil }
         store.mutate(launch.id) { $0.windowIndex = 1 }
         #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
+    }
+
+    /// Review of the above: the mark was the index only, so a guest @display
+    /// edit (reconcile unbinds the tab, then binds it back) or anything else
+    /// that rebinds it dropped the host's reservation.
+    @Test("once probed, the launched tab stays the host's across a rebind and a restart; another window or boot doesn't")
+    func sealedByWindowID() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("sessions-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = AgentSessionStore(fileURL: url)
+        let ws = UUID()
+        var launch = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
+        launch.launchingSince = Date(); launch.launchBaselineIndex = 0; launch.launchDisplay = "Fix login"
+        store.upsert(launch)
+        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0),
+                                              TabsModel.Tab(label: "claude", index: 1, display: "Fix login")])])
+        #expect(store.checkBoot(launch.id, bootID: "boot-1"))
+        #expect(store.checkWindow(launch.id, windowID: "@4"))
+        func spared(_ st: AgentSessionStore) -> Set<Int> { ACAppDelegate.hostAgentWindows(st.sessions, profileID: ws) }
+        #expect(spared(store) == [1])
+
+        // Unbound and bound back (a guest @display edit), then probed: the same window.
+        store.mutate(launch.id) { $0.windowIndex = nil; $0.bootID = nil }
+        store.mutate(launch.id) { $0.windowIndex = 1 }
+        #expect(spared(store).isEmpty)                       // not proven yet
+        _ = store.checkBoot(launch.id, bootID: "boot-1")
+        _ = store.checkWindow(launch.id, windowID: "@4")
+        #expect(spared(store) == [1])
+        // An app restart keeps it.
+        #expect(spared(AgentSessionStore(fileURL: url)) == [1])
+        // Another tmux window at that index isn't it…
+        store.mutate(launch.id) { $0.windowIndex = nil }
+        store.mutate(launch.id) { $0.windowIndex = 1 }
+        _ = store.checkBoot(launch.id, bootID: "boot-1")
+        _ = store.checkWindow(launch.id, windowID: "@9")
+        #expect(spared(store).isEmpty)
+        // …nor the same window id after a reboot (tmux numbers start over).
+        store.mutate(launch.id) { $0.windowIndex = nil; $0.bootID = nil }
+        store.mutate(launch.id) { $0.windowIndex = 1 }
+        _ = store.checkBoot(launch.id, bootID: "boot-2")
+        _ = store.checkWindow(launch.id, windowID: "@4")
+        #expect(spared(store).isEmpty)
     }
 
     @Test("only the launch binding marks a tab as the host's")

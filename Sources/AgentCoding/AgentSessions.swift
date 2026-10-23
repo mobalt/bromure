@@ -259,8 +259,25 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// "Guest-adopted tmux windows are spared from pid-pin eviction, so a
     /// guest can still fill every slot").
     var hostLaunchedWindow: Int?
+    /// That tab for good, once the probe has read it: "<boot id>|<tmux
+    /// window id>". tmux picks the id and never reuses it while its server
+    /// lives, and the boot id pins the server: a rebind onto the same
+    /// window (a guest @display edit unbinds it) or an app restart keeps it
+    /// the host's; any other window, or the same id after a reboot, isn't.
+    var hostLaunchedTab: String?
     /// The session's tab is the one a host launch opened.
-    var isOnHostLaunchedTab: Bool { windowIndex != nil && windowIndex == hostLaunchedWindow }
+    var isOnHostLaunchedTab: Bool {
+        guard windowIndex != nil else { return false }
+        if windowIndex == hostLaunchedWindow { return true }
+        guard let b = bootID, let w = windowID, let tab = hostLaunchedTab else { return false }
+        return tab == b + "|" + w
+    }
+    /// The probe has read the launched tab's window and boot: keep it.
+    mutating func sealHostLaunchedTab() {
+        guard windowIndex != nil, windowIndex == hostLaunchedWindow,
+              let b = bootID, let w = windowID else { return }
+        hostLaunchedTab = b + "|" + w
+    }
     var endedAt: Date?
     var lastSeenAt: Date?
     var lastError: String?
@@ -1025,6 +1042,7 @@ final class AgentSessionStore {
               sessions[i].windowIndex != nil else { return false }
         if sessions[i].bootID == nil {
             sessions[i].bootID = bootID
+            sessions[i].sealHostLaunchedTab()
             save()
             return true
         }
@@ -1051,6 +1069,7 @@ final class AgentSessionStore {
         if sessions[i].windowID == nil {
             if sessions[i].isArchived || sessions[i].isDeleted { return false }
             sessions[i].windowID = windowID
+            sessions[i].sealHostLaunchedTab()
             save()
             return true
         }
@@ -1334,6 +1353,7 @@ final class AgentSessionStore {
                     if let tab = Self.launchTab(for: s, in: candidates, soleLaunch: soleLaunch) {
                         s.windowIndex = tab.index
                         s.hostLaunchedWindow = tab.index
+                        s.hostLaunchedTab = nil   // a new tab: sealed once probed
                         s.bootID = nil   // stamped by the next probe
                         s.launchingSince = nil
                         s.launchBaselineIndex = nil
