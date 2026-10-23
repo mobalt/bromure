@@ -3647,6 +3647,22 @@ public final class ProfileStore {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
     }
 
+    /// `vm run --rm`: a marker in the workspace's own directory, so the
+    /// mark outlives the process -- a quit, a signal or a crash while the
+    /// VM is stopped (a reboot's relaunch waiting on a prompt, a boot that
+    /// gave up) can't turn it into a kept workspace (Finding CWE-459, "vm
+    /// run --rm reboot keeps the workspace only in memory, so quit during
+    /// relaunch retains the disk"). It goes with the directory.
+    static let ephemeralMarker = "ephemeral"
+
+    public func markEphemeral(_ profile: Profile) {
+        try? Data().write(to: profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker))
+    }
+
+    public func isEphemeral(_ profile: Profile) -> Bool {
+        fm.fileExists(atPath: profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker).path)
+    }
+
     public func diskURL(for profile: Profile) -> URL {
         profileDirectory(for: profile).appendingPathComponent("disk.img")
     }

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import bromure_ac
 
 /// Finding (CWE-670): "Ephemeral reboot is cancelled when launch waits on
 /// Kimi or a remote prompt". A reboot tears the session down, then launches
@@ -31,7 +32,7 @@ struct EphemeralRebootTests {
     func teardownKeepsRebooting() throws {
         let src = try String(contentsOf: Self.source, encoding: .utf8)
         let stopped = try body(src, "func handleSessionStopped(profileID: Profile.ID) {")
-        #expect(stopped.contains("if !rebootingProfiles.contains(profileID), ephemeralProfiles.remove(profileID) != nil,"))
+        #expect(stopped.contains("if !rebootingProfiles.contains(profileID),\n           let p = profiles.first(where: { $0.id == profileID }), takeEphemeral(p) {"))
     }
 
     @Test("both detached reboot paths mark the workspace across their teardown, and clear it before the launch")
@@ -58,7 +59,7 @@ struct EphemeralRebootTests {
         let src = try String(contentsOf: Self.source, encoding: .utf8)
         let drop = try body(src, "private func dropAbandonedEphemeral(_ id: Profile.ID) {")
         #expect(drop.contains("guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),"))
-        #expect(drop.contains("ephemeralProfiles.remove(id) != nil") && drop.contains("try? store.delete(p)"))
+        #expect(drop.contains("takeEphemeral(p)") && drop.contains("try? store.delete(p)"))
         // Kimi provisioning stopped, the boot remedy stopped, a wipe
         // cancelled (remote and local), a wipe or an upgrade skipped (remote).
         #expect(src.contains("""
@@ -69,5 +70,47 @@ struct EphemeralRebootTests {
         #expect(src.components(separatedBy: "case .cancelled: dropAbandonedEphemeral(profile.id); return").count == 3)
         let prompts = try body(src, "@MainActor private func resolveRemoteLaunchPrompts(")
         #expect(prompts.components(separatedBy: "dropAbandonedEphemeral(profile.id)").count == 4)
+    }
+
+    /// Finding (CWE-459): "vm run --rm reboot keeps the workspace only in
+    /// memory, so quit during relaunch retains the disk". Between a reboot's
+    /// teardown and its relaunch the mark lived only in `ephemeralProfiles`:
+    /// a quit, a signal or a crash then (a prompt waiting, a boot that gave
+    /// up) left the workspace on disk as an ordinary one.
+    @Test("the --rm mark is on disk, with the workspace, and gone with it")
+    func markIsDurable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("rm-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "scratch", tool: .claude, authMode: .token)
+        try store.save(p)
+        #expect(!store.isEphemeral(p))
+        store.markEphemeral(p)
+        // Another process (the next launch) reads it from disk.
+        let next = ProfileStore(rootDir: root)
+        #expect(next.isEphemeral(p))
+        let kept = Profile(name: "kept", tool: .claude, authMode: .token)
+        try next.save(kept)
+        #expect(!next.isEphemeral(kept))
+        try next.delete(p)
+        #expect(!next.isEphemeral(p))
+        #expect(next.loadAll().map(\.id) == [kept.id])
+    }
+
+    @Test("a quit, a caught signal and the next launch delete every stopped --rm workspace")
+    func sweeps() throws {
+        let src = try String(contentsOf: Self.source, encoding: .utf8)
+        #expect(src.contains("if spec[\"rm\"] as? Bool == true { ephemeralProfiles.insert(saved.id); store.markEphemeral(saved) }"))
+        let sweep = try body(src, "func sweepStoppedEphemeral() {")
+        #expect(sweep.contains("runningSessions[p.id] == nil && !diskInUse(p.id)"))
+        #expect(sweep.contains("ephemeralProfiles.contains(p.id) || store.isEphemeral(p)"))
+        let quit = try body(src, "func applicationWillTerminate(_ notification: Notification) {")
+        #expect(quit.contains("sweepStoppedEphemeral()"))
+        let signals = try body(src, "private func installCleanupSignalHandlers() {")
+        #expect(before("sweepStoppedEphemeral()", "exit(128 + sig)", in: signals))
+        let launched = try body(src, "func applicationDidFinishLaunching(_ notification: Notification) {")
+        #expect(before("profiles = store.loadAll()", "sweepStoppedEphemeral()", in: launched))
+        let take = try body(src, "private func takeEphemeral(_ p: Profile) -> Bool {")
+        #expect(take.contains("store.isEphemeral(p)"))
     }
 }

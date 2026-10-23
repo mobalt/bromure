@@ -3645,6 +3645,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         default: break
         }
         profiles = store.loadAll()
+        // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
+        // a crash): nothing runs yet, so every one is over.
+        sweepStoppedEphemeral()
         // First launch after the model-management redesign: seed the global
         // ModelSettings from what the user already configured per-workspace so
         // the new "Models" pane opens pre-populated. Idempotent once configured.
@@ -7082,7 +7085,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         let saved = profiles.first { $0.id == profile.id } ?? profile
-        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id) }
+        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id); store.markEphemeral(saved) }
 
         // 4. Boot via the shared launch path. A headless `-d` run boots
         //    window-less from the start (no pane is ever hosted) so no window
@@ -7806,6 +7809,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
         SquelchLedger.shared.flush()
+        // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
+        // waiting, a boot that gave up): over with the app.
+        sweepStoppedEphemeral()
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is
@@ -7848,6 +7854,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.mitmEngine?.terminateAllSSHAgents()
                 InferenceService.killIfRunning()
                 CloudflareTunnelSupervisor.killIfRunning()
+                MainActor.assumeIsolated { self?.sweepStoppedEphemeral() }
                 // Exit with a non-zero code so callers can distinguish
                 // signal-driven shutdown from a clean ⌘Q.
                 exit(128 + sig)
@@ -15617,11 +15624,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Not while a boot holds the disk (begun, not registered yet): that
         // boot is the workspace's, and its stop deletes it.
         guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),
-              ephemeralProfiles.remove(id) != nil,
-              let p = profiles.first(where: { $0.id == id }) else { return }
+              let p = profiles.first(where: { $0.id == id }), takeEphemeral(p) else { return }
         try? store.delete(p)
         profiles = store.loadAll()
         refreshSidebar()
+    }
+
+    /// `p` is a `vm run --rm` workspace (in memory, or by its on-disk
+    /// marker); forgets the in-memory mark.
+    private func takeEphemeral(_ p: Profile) -> Bool {
+        let inMemory = ephemeralProfiles.remove(p.id) != nil
+        return inMemory || store.isEphemeral(p)
+    }
+
+    /// Delete every `vm run --rm` workspace that isn't running and whose
+    /// disk no boot holds -- at a quit or a caught signal (a reboot's
+    /// relaunch can't finish then), and at launch (whatever a crash left:
+    /// its VM died with that process). A running one's stop deletes it; a
+    /// boot under way is left to the next launch's sweep.
+    func sweepStoppedEphemeral() {
+        var deleted = false
+        for p in profiles where runningSessions[p.id] == nil && !diskInUse(p.id)
+            && (ephemeralProfiles.contains(p.id) || store.isEphemeral(p)) {
+            ephemeralProfiles.remove(p.id)
+            rebootingProfiles.remove(p.id)
+            try? store.delete(p)
+            deleted = true
+        }
+        if deleted { profiles = store.loadAll() }
     }
 
     func handleSessionStopped(profileID: Profile.ID) {
@@ -15645,8 +15675,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         unregisterPane(profileID)
         // `vm run --rm`: delete the ephemeral profile + its disk now it stopped
         // -- not when it is only rebooting (it stays ephemeral).
-        if !rebootingProfiles.contains(profileID), ephemeralProfiles.remove(profileID) != nil,
-           let p = profiles.first(where: { $0.id == profileID }) {
+        if !rebootingProfiles.contains(profileID),
+           let p = profiles.first(where: { $0.id == profileID }), takeEphemeral(p) {
             try? store.delete(p)
             profiles = store.loadAll()
         }
