@@ -15483,8 +15483,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let slug {
                     // A claim from the guest: a run whose tab is up isn't failed.
                     let live = self.openWorktreeBranches(profileID: pid)
-                    self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
-                    self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live)
+                    let outcomes = [
+                        self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live),
+                        self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live),
+                    ]
+                    // Held for the tab grace, or ignored (its tab is up): no
+                    // failure to tell the user about -- not yet, maybe never.
+                    guard ScheduledAutomationEngine.showsWorktreeFailure(outcomes) else { return }
                 }
                 // NON-BLOCKING. A modal runModal() here froze the main run loop
                 // — and with it the automation server that POST /sessions waits

@@ -2296,24 +2296,40 @@ final class ScheduledAutomationEngine {
     /// its slot, and `settlePendingRefusals` applies it only if the grace
     /// runs out with no tab (Finding CWE-807, "A guest worktree-error before
     /// the tab is listed still fails Codex, Grok, and omp runs for good").
+    /// What a guest refusal did to the run (or task) it named: the host's
+    /// "Worktree action failed" sheet is for `.applied` only -- a held or
+    /// ignored claim isn't a failure yet, and may never be (Finding
+    /// CWE-670, "Worktree failure sheet still fires while the refusal is
+    /// only held").
+    enum RefusalOutcome: Equatable { case noRun, ignored, held, applied }
+
+    @discardableResult
     func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
-                    now: Date = Date()) {
+                    now: Date = Date()) -> RefusalOutcome {
         guard let run = store.runs.first(where: { r in
             r.outcome == .launched && r.completedAt == nil && r.branchSlug == slug
                 && (r.runProfileID ?? store.automation(r.automationID)?.profileID) == profileID
-        }) else { return }
+        }) else { return .noRun }
         if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true {
             BACDebug.log("automation", "run \(slug): refusal ignored, its tab is live")
-            return
+            return .ignored
         }
         if now.timeIntervalSince(run.queuedAt ?? run.firedAt) < Self.tabAppearGrace {
             BACDebug.log("automation", "run \(slug): refusal held until its tab can be listed")
             store.setPendingRefusal(run.id, Self.guestReported(reason))
-            return
+            return .held
         }
-        guard store.markRefused(run.id, reason: Self.guestReported(reason)) else { return }
+        guard store.markRefused(run.id, reason: Self.guestReported(reason)) else { return .ignored }
         BACDebug.log("automation", "run \(slug) refused by the guest: \(reason)")
         repollSoon(run.automationID)
+        return .applied
+    }
+
+    /// Whether the host shows its failure sheet for a guest worktree error:
+    /// one naming no run (an action of the user's own), or a refusal one of
+    /// the engines applied -- not one held for the tab grace, or ignored.
+    nonisolated static func showsWorktreeFailure(_ outcomes: [RefusalOutcome]) -> Bool {
+        outcomes.contains(.applied) || outcomes.allSatisfy { $0 == .noRun }
     }
 
     /// Held refusals: dropped once the run's tab is listed (or the run is

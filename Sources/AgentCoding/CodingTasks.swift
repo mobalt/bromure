@@ -2414,17 +2414,19 @@ final class CodingTaskEngine {
     /// Before the tab could be listed (`tabAppearGrace` from the start), no
     /// tab says nothing: the refusal is held, and `settlePendingRefusals`
     /// puts it on the card only if the grace runs out with no tab.
+    @discardableResult
     func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
-                    now: Date = Date()) {
+                    now: Date = Date()) -> ScheduledAutomationEngine.RefusalOutcome {
         guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
-                                                  && $0.stage == .inProgress }) else { return }
-        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true { return }
+                                                  && $0.stage == .inProgress }) else { return .noRun }
+        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true { return .ignored }
         let text = ScheduledAutomationEngine.guestReported(reason)
         if let started = t.startedAt, now.timeIntervalSince(started) < ScheduledAutomationEngine.tabAppearGrace {
             store.mutate(t.id) { $0.pendingRefusal = text }
-            return
+            return .held
         }
         store.mutate(t.id) { $0.lastError = text }
+        return .applied
     }
 
     /// Held refusals: dropped once the task's tab is listed (or it left In
