@@ -3647,6 +3647,68 @@ public final class ProfileStore {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
     }
 
+    /// `vm run --rm`: a marker in the workspace's own directory, so the
+    /// mark outlives the process -- a quit, a signal or a crash while the
+    /// VM is stopped (a reboot's relaunch waiting on a prompt, a boot that
+    /// gave up) can't turn it into a kept workspace (Finding CWE-459, "vm
+    /// run --rm reboot keeps the workspace only in memory, so quit during
+    /// relaunch retains the disk"). It goes with the directory.
+    /// It holds the pid of the process that owns the workspace (made it, or
+    /// boots it): two processes share this store (the login agent and the
+    /// GUI), and only the owner -- or anyone once the owner is gone -- may
+    /// sweep it.
+    static let ephemeralMarker = "ephemeral"
+
+    private func ephemeralMarkerURL(_ profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker)
+    }
+
+    /// Mark (or re-claim) `profile` as `vm run --rm`, owned by `owner`.
+    public func markEphemeral(_ profile: Profile, owner: pid_t = getpid()) {
+        try? Data(String(owner).utf8).write(to: ephemeralMarkerURL(profile), options: .atomic)
+    }
+
+    public func isEphemeral(_ profile: Profile) -> Bool {
+        fm.fileExists(atPath: ephemeralMarkerURL(profile).path)
+    }
+
+    /// The marker's owning pid; nil with no marker, 0 when unreadable.
+    public func ephemeralOwner(_ profile: Profile) -> pid_t? {
+        guard isEphemeral(profile) else { return nil }
+        let text = (try? String(contentsOf: ephemeralMarkerURL(profile), encoding: .utf8)) ?? ""
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Whether this process may delete a stopped `--rm` workspace: it owns
+    /// it (`mine`), or (`!mine`, a launch) its owner is no longer running.
+    /// A pid that's alive again under another program errs on keeping it.
+    public func ephemeralSweepable(_ profile: Profile, mine: Bool, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        if mine { return owner == getpid() }
+        return owner != getpid() && (owner <= 0 || !isAlive(owner))
+    }
+
+    /// Whether this process may claim or delete `profile`'s `--rm` mark:
+    /// there is one, and it is this process's or its owner is gone. Never a
+    /// live other process's (it may be running that workspace right now).
+    public func mayTakeEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        return owner == getpid() || owner <= 0 || !isAlive(owner)
+    }
+
+    /// `vm run --rm`, or a boot of a marked workspace: mark it this
+    /// process's -- unless a live other process owns it.
+    @discardableResult
+    public func claimEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        if isEphemeral(profile), !mayTakeEphemeral(profile, isAlive: isAlive) { return false }
+        markEphemeral(profile)
+        return true
+    }
+
+    public static func processAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
     public func diskURL(for profile: Profile) -> URL {
         profileDirectory(for: profile).appendingPathComponent("disk.img")
     }

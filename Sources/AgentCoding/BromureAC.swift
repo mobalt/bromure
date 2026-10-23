@@ -3645,6 +3645,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         default: break
         }
         profiles = store.loadAll()
+        // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
+        // a crash) and whose process is gone.
+        sweepStoppedEphemeral(atLaunch: true)
         // First launch after the model-management redesign: seed the global
         // ModelSettings from what the user already configured per-workspace so
         // the new "Models" pane opens pre-populated. Idempotent once configured.
@@ -7082,7 +7085,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         let saved = profiles.first { $0.id == profile.id } ?? profile
-        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id) }
+        if spec["rm"] as? Bool == true {
+            // Another live process's --rm workspace isn't ours to boot.
+            guard store.claimEphemeral(saved) else {
+                FileHandle.standardError.write(Data("[vm run] '\(saved.name)' belongs to another Bromure process\n".utf8))
+                return nil
+            }
+            ephemeralProfiles.insert(saved.id)
+        }
 
         // 4. Boot via the shared launch path. A headless `-d` run boots
         //    window-less from the start (no pane is ever hosted) so no window
@@ -7806,6 +7816,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
         SquelchLedger.shared.flush()
+        // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
+        // waiting, a boot that gave up): over with the app.
+        sweepStoppedEphemeral()
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is
@@ -7848,6 +7861,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.mitmEngine?.terminateAllSSHAgents()
                 InferenceService.killIfRunning()
                 CloudflareTunnelSupervisor.killIfRunning()
+                MainActor.assumeIsolated { self?.sweepStoppedEphemeral() }
                 // Exit with a non-zero code so callers can distinguish
                 // signal-driven shutdown from a clean ⌘Q.
                 exit(128 + sig)
@@ -12449,6 +12463,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // began during a prompt above keeps the disk, and this launch leaves
         // no pane behind.
         guard bootsInFlight.begin(profile.id) else { return }
+        // A `--rm` workspace this process boots is this process's to sweep --
+        // and one a live other process owns (the login agent's, the GUI's:
+        // it may be up there, or in its reboot gap) isn't booted here at all:
+        // its owner would delete the disk out from under this VM.
+        if store.isEphemeral(profile), !store.claimEphemeral(profile) {
+            bootsInFlight.end(profile.id)
+            refreshSidebar()
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' is a vm run --rm workspace another Bromure process owns; not booting it here\n".utf8))
+            return
+        }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -15773,11 +15798,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Not while a boot holds the disk (begun, not registered yet): that
         // boot is the workspace's, and its stop deletes it.
         guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),
-              ephemeralProfiles.remove(id) != nil,
-              let p = profiles.first(where: { $0.id == id }) else { return }
+              let p = profiles.first(where: { $0.id == id }), takeEphemeral(p) else { return }
         try? store.delete(p)
         profiles = store.loadAll()
         refreshSidebar()
+    }
+
+    /// `p` is a `vm run --rm` workspace this process may delete: its
+    /// on-disk mark is ours, or its owner is gone -- never a live other
+    /// process's (the login agent's or the GUI's: it may be running it).
+    /// Forgets the in-memory mark (which alone still counts if the marker
+    /// couldn't be written: then nobody else has one either).
+    private func takeEphemeral(_ p: Profile) -> Bool {
+        let inMemory = ephemeralProfiles.remove(p.id) != nil
+        return store.isEphemeral(p) ? store.mayTakeEphemeral(p) : inMemory
+    }
+
+    /// Delete the `vm run --rm` workspaces that are over: at a quit or a
+    /// caught signal (`atLaunch` false; a reboot's relaunch can't finish
+    /// then), the ones THIS process owns that aren't running and whose disk
+    /// no boot of its holds; at launch, the ones whose owning process is
+    /// gone (it quit uncleanly or crashed: their VM died with it). Another
+    /// live process's -- the login agent's, the GUI's -- are never touched:
+    /// running sessions and disk holds are per process. A running one's
+    /// stop deletes it; a boot under way is left to the next launch's sweep.
+    func sweepStoppedEphemeral(atLaunch: Bool = false) {
+        var deleted = false
+        for p in profiles where runningSessions[p.id] == nil && !diskInUse(p.id)
+            && store.ephemeralSweepable(p, mine: !atLaunch) {
+            ephemeralProfiles.remove(p.id)
+            rebootingProfiles.remove(p.id)
+            try? store.delete(p)
+            deleted = true
+        }
+        if deleted { profiles = store.loadAll() }
     }
 
     func handleSessionStopped(profileID: Profile.ID) {
@@ -15801,8 +15855,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         unregisterPane(profileID)
         // `vm run --rm`: delete the ephemeral profile + its disk now it stopped
         // -- not when it is only rebooting (it stays ephemeral).
-        if !rebootingProfiles.contains(profileID), ephemeralProfiles.remove(profileID) != nil,
-           let p = profiles.first(where: { $0.id == profileID }) {
+        if !rebootingProfiles.contains(profileID),
+           let p = profiles.first(where: { $0.id == profileID }), takeEphemeral(p) {
             try? store.delete(p)
             profiles = store.loadAll()
         }
