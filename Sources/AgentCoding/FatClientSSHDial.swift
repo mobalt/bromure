@@ -966,7 +966,7 @@ private final class TOFUHostKeyDelegate: NIOSSHClientServerAuthenticationDelegat
 /// Bridges one exec child channel to the pump side of a socketpair:
 /// channel bytes → fd, fd bytes → channel, EOF/close in both directions.
 /// Owns (and eventually closes) `fd`.
-private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable {
+final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable {
     typealias InboundIn = SSHChannelData
     typealias OutboundIn = Never
     typealias OutboundOut = SSHChannelData
@@ -978,6 +978,9 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     /// reads are re-armed only after the previous buffer landed on the fd.
     private let writeQueue: DispatchQueue
     private var readSource: DispatchSourceRead?
+    /// The fd reader is suspended until the channel takes its last chunk
+    /// (under stateLock, like every suspend/resume of `readSource`).
+    private var readPaused = false
     private var fdClosed = false
     private var readerStarted = false
     private let stateLock = NSLock()
@@ -1079,8 +1082,14 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
                 let data = SSHChannelData(type: .channel, data: .byteBuffer(bb))
+                // Backpressure: one chunk in flight. Without it a fast app
+                // queued its whole output in the channel (and the loop's task
+                // queue) whenever the far end stopped taking it.
+                self.pauseFDReader()
                 loop.execute {
-                    channel.writeAndFlush(data, promise: nil)
+                    channel.writeAndFlush(data).whenComplete { _ in
+                        if channel.isWritable { self.resumeFDReader() }
+                    }
                 }
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR) {
                 // App closed its end (or hard error): stop reading and send
@@ -1102,8 +1111,27 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
         stateLock.lock()
         let src = readSource
         readSource = nil
+        // A suspended source must be resumed before it's cancelled.
+        if readPaused { readPaused = false; src?.resume() }
         stateLock.unlock()
         src?.cancel()
+    }
+
+    private func pauseFDReader() {
+        stateLock.lock()
+        if !readPaused, let src = readSource { readPaused = true; src.suspend() }
+        stateLock.unlock()
+    }
+
+    private func resumeFDReader() {
+        stateLock.lock()
+        if readPaused, let src = readSource { readPaused = false; src.resume() }
+        stateLock.unlock()
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable { resumeFDReader() }
+        context.fireChannelWritabilityChanged()
     }
 
     private func writeAllToFD(_ bytes: [UInt8]) {
