@@ -87,7 +87,17 @@ public final class PolicySteering: @unchecked Sendable {
 
     /// An agent's PreToolUse hook: the agent process in tmux window `window`.
     /// Updates in place; nothing here walks more than `pinCap` entries.
-    public func noteAgent(profileID: UUID, pid: Int, window: Int) {
+    ///
+    /// `hostWindows`: the windows of the tabs the host itself opened (its
+    /// agent sessions). Any guest process can write lines for any window
+    /// number and refresh them forever, so a full map of such windows froze
+    /// out every agent that came later (Finding CWE-770, "Guest can hold all
+    /// pid-pin slots so the real agent's policy notes are never
+    /// attributed"): a host tab's binding takes the slot of the oldest entry
+    /// whose window the host didn't open -- its pid kept pinned among the
+    /// displaced -- and a host tab's restart may drop the oldest displaced
+    /// pin. Lines for other windows still evict nothing.
+    public func noteAgent(profileID: UUID, pid: Int, window: Int, hostWindows: Set<Int> = []) {
         lock.lock(); defer { lock.unlock() }
         let t = now()
         func pinned(_ v: (window: Int, at: Date)?) -> Bool {
@@ -108,9 +118,19 @@ public final class PolicySteering: @unchecked Sendable {
         // longer speaks for it, but stays bound to that window for the pin.
         let old = agents[profileID]?.first { $0.value.window == window }
         let oldLive = old.map { t.timeIntervalSince($0.value.at) < Self.pinSpan } ?? false
+        let host = hostWindows.contains(window)
         // A pid coming back from `displaced` frees the slot its old one takes.
-        if oldLive, displaced[profileID]?[pid] == nil, !Self.room(&displaced[profileID], t) { return }
-        if old == nil, !Self.room(&agents[profileID], t) { return }
+        if oldLive, displaced[profileID]?[pid] == nil, !Self.room(&displaced[profileID], t) {
+            guard host, let k = Self.oldest(displaced[profileID], sparing: hostWindows) else { return }
+            displaced[profileID]?[k] = nil
+        }
+        if old == nil, !Self.room(&agents[profileID], t) {
+            guard host, let k = Self.oldest(agents[profileID], sparing: hostWindows, only: true),
+                  let v = agents[profileID]?[k] else { return }
+            agents[profileID]?[k] = nil
+            // Still pinned to its window for the span (it may be live).
+            if Self.room(&displaced[profileID], t) { displaced[profileID, default: [:]][k] = v }
+        }
         if let old {
             agents[profileID]?[old.key] = nil
             if oldLive { displaced[profileID, default: [:]][old.key] = old.value }
@@ -126,6 +146,16 @@ public final class PolicySteering: @unchecked Sendable {
         let expired = m?.compactMap { t.timeIntervalSince($0.value.at) >= pinSpan ? $0.key : nil } ?? []
         for k in expired { m?[k] = nil }
         return (m?.count ?? 0) < pinCap
+    }
+
+    /// The oldest entry of `m`, one whose window isn't in `sparing` first;
+    /// `only`: none other.
+    private static func oldest(_ m: [Int: (window: Int, at: Date)]?, sparing: Set<Int>,
+                               only: Bool = false) -> Int? {
+        guard let m else { return nil }
+        let guest = m.filter { !sparing.contains($0.value.window) }
+        let pool = guest.isEmpty && !only ? m : guest
+        return pool.min { $0.value.at < $1.value.at }?.key
     }
 
     /// Entries kept for a workspace (tests).
