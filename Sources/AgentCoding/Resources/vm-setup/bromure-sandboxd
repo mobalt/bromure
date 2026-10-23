@@ -1817,6 +1817,58 @@ def _proc_table():
     return table
 
 
+# apt runs under this: a child subreaper of its own, so a process apt starts
+# that then daemonizes (setsid, a double fork, start-stop-daemon) is
+# reparented here, not to init, when its parent exits -- however it moved
+# between scans. It exits with apt's status when apt exits -- a daemon a
+# completed install started is left running, as it always was -- unless a
+# stop said so first (one byte on its control pipe, argv[1], which only it
+# holds): then it waits for every child it has, apt and
+# whatever was reparented to it, and its exit is the "all of it is gone"
+# `_apt_stop` waits for. It ignores the stop's signals (apt runs in a group of
+# its own, so they don't reach it); apt gets the default dispositions back.
+# Without PR_SET_CHILD_SUBREAPER (not Linux) it is a plain parent, and the
+# group tracking below is all there is.
+_APT_REAPER = r"""
+import ctypes, os, signal, sys
+try:
+    ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)   # PR_SET_CHILD_SUBREAPER
+except (AttributeError, OSError):
+    pass
+ctl, argv = int(sys.argv[1]), sys.argv[2:]
+for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(s, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, signal.SIG_DFL)
+    os.close(ctl)
+    os.setpgid(0, 0)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as exc:
+        sys.stderr.write("%s: %s\n" % (argv[0], exc))
+        os._exit(127)
+os.set_blocking(ctl, False)
+code, stopping = 1, False
+while True:
+    try:
+        p, status = os.wait()
+    except ChildProcessError:
+        break
+    if p == pid:
+        code = os.waitstatus_to_exitcode(status)
+        code = 128 - code if code < 0 else code
+        try:
+            stopping = os.read(ctl, 1) == b"s"
+        except BlockingIOError:
+            stopping = False
+        if not stopping:
+            break
+sys.exit(code)
+"""
+
+
 def _apt_tree(root, known, groups=None):
     """Update `known` ({pid: start}): drop the members that have exited, add
     every live descendant of `root` (None once apt itself is reaped: its pid
@@ -1831,7 +1883,8 @@ def _apt_tree(root, known, groups=None):
     CWE-670, "apt stop misses root children reparented to init between
     process-tree scans"). An id no live process carries any more is dropped
     for good: only then could the kernel hand it out again. (A process that
-    calls setsid itself between two scans still gets away.)"""
+    calls setsid itself between two scans and whose parent then exits is
+    reparented to `_APT_REAPER`, apt's parent, and so to `root` again.)"""
     table = _proc_table()
     for pid, start in list(known.items()):
         row = table.get(pid)
@@ -1840,7 +1893,9 @@ def _apt_tree(root, known, groups=None):
     if groups is not None:
         carried = {i for row in table.values() if row[2] != "Z" for i in row[3:5]}
         groups.intersection_update(carried)
-    mine = {os.getpgrp(), os.getsid(0), 0, 1, None}
+    # Never our own group or session -- nor the reaper's (`root`, its own
+    # group and session leader): signalling it would hand its children to init.
+    mine = {os.getpgrp(), os.getsid(0), 0, 1, None, root}
     grew = True
     while grew:
         grew = False
@@ -1871,8 +1926,19 @@ def _apt_stop(proc):
     beside it. (Finding CWE-670, "apt stop signals only apt-get's process
     group, so dpkg and maintainer scripts keep running".) So the whole tree
     is tracked by pid, through the reparenting, and SIGTERMed; whatever is
-    left after APT_STOP_GRACE_S is SIGKILLed."""
-    groups = {proc.pid}                   # apt's own group and session
+    left after APT_STOP_GRACE_S is SIGKILLed.
+
+    `proc` is `_APT_REAPER`: everything below it is the tree (a daemonized
+    grandchild included, reparented to it), and its exit is the end -- it
+    leaves only once it has no child left (Finding CWE-670, "apt stop still
+    returns while a setsid child reparented to init keeps running")."""
+    stop_fd = getattr(proc, "bromure_stop_fd", None)
+    if stop_fd is not None:
+        try:
+            os.write(stop_fd, b"s")           # the reaper: wait for all of it
+        except OSError:
+            pass
+    groups = set()
     tree = _apt_tree(proc.pid, {}, groups)
     signalled = set()
 
@@ -1913,8 +1979,8 @@ def _apt_stop(proc):
             send(signal.SIGTERM)          # anything started since the last look
         elif time.time() - killed_at > 30:
             # Unkillable (D state): leave it rather than hang the caller.
+            # The reaper waits for it, so it isn't waited for here.
             log("apt: still running after SIGKILL: %s" % sorted(tree))
-            proc.wait()
             return
         else:
             send(signal.SIGKILL)
@@ -1923,11 +1989,17 @@ def _apt_stop(proc):
 
 def _apt_step(argv, env, deadline, cancelled):
     """Run one apt command. (exit code, output, stopped-why or None)."""
+    ctl_r, ctl_w = os.pipe()
     try:
-        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen([sys.executable, "-I", "-c", _APT_REAPER, str(ctl_r)] + list(argv), env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+                                pass_fds=(ctl_r,))
     except OSError as exc:
+        os.close(ctl_w)
         return 1, "%s: %s" % (argv[0], exc), None
+    finally:
+        os.close(ctl_r)
+    proc.bromure_stop_fd = ctl_w
     chunks = []
     reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
     reader.start()
@@ -1946,11 +2018,13 @@ def _apt_step(argv, env, deadline, cancelled):
             log("apt: stopping %s: %s" % (" ".join(argv[:2]), why))
             _apt_stop(proc)
             break
+    os.close(ctl_w)
     reader.join(timeout=5)
     out = b"".join(c for c in chunks if c).decode("utf-8", "replace")
     if why:
         out += "\n%s stopped: %s" % (argv[0], why)
-    return proc.returncode, out, why
+    # None: a process past SIGKILL (D state) still holds the reaper.
+    return 1 if proc.returncode is None else proc.returncode, out, why
 
 
 def _apt_package(spec):
