@@ -11718,6 +11718,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             engine.swapper.setMap(TokenMap.liveMerge(fresh: fresh.entries,
                                                      current: engine.swapper.entries(for: profile.id)),
                                   for: profile.id)
+            // The 1Password loop follows the new references: one that
+            // changed is resolved now; one already resolved keeps its secret.
+            engine.opRefresher.start(
+                profileID: profile.id, refs: OnePasswordRefresher.refs(in: fresh.entries),
+                swapper: engine.swapper,
+                onFirstError: { [weak self] err in
+                    self?.presentOnePasswordError(err, profileName: profile.name)
+                })
             // …and the rest of what the kubeconfigs need, as at launch: a
             // kubeconfig imported while the VM runs must be trusted (its
             // cluster CA) and authenticated (its client certificate) now.
@@ -12323,24 +12331,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // macOS roots), and the exec-credential pollers.
             engine.applyKubeMaterial(kubeMat, profileID: profile.id)
 
-            // 1Password: manual tokens whose value is an `op://` reference are
-            // resolved host-side. The plan already minted a stable fake from the
-            // reference string; the refresher resolves the real secret now (and
-            // every 120s), so the guest only ever holds the fake and only the
-            // op:// path is on disk. First-resolution failures surface here.
-            let opRefs: [OnePasswordRefresher.Ref] = profile.manualTokens.compactMap { tok in
-                guard tok.isUsable, let opRef = OnePasswordCLI.reference(in: tok.realValue)
-                else { return nil }
-                let fake = SessionTokenPlan.deriveFake(
-                    prefix: "brm_",
-                    real: tok.realValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                    salt: salt)
-                let hosts: [String?] = tok.effectiveHostScopes.map { $0.isEmpty ? nil : $0 }
-                return .init(
-                    opRef: opRef, fake: fake, hosts: hosts,
-                    consentID: tok.requireApproval ? ConsentCredentialID.manualToken(tok.id) : nil,
-                    consentName: tok.name.isEmpty ? "manual token" : "“\(tok.name)” token")
-            }
+            // 1Password: credentials whose value is an `op://` reference are
+            // resolved host-side. The plan already gave each a stable fake (from
+            // the reference string, or an OpenShell placeholder); the refresher
+            // resolves the real secret at that fake now (and every 120s), so the
+            // guest only ever holds the fake and only the op:// path is on disk.
+            // First-resolution failures surface here.
+            let opRefs = OnePasswordRefresher.refs(in: tokenMap.entries)
             engine.opRefresher.start(
                 profileID: profile.id, refs: opRefs, swapper: engine.swapper,
                 onFirstError: { [weak self] err in

@@ -30,8 +30,33 @@ public final class OnePasswordRefresher {
 
     public static let refreshSeconds: Double = 120
 
+    /// The 1Password references to resolve in a swap map: every entry whose
+    /// real value is still an `op://` reference, with the fake and hosts the
+    /// map gave it -- whatever the credential kind, and whether the fake was
+    /// derived from the reference or is an OpenShell placeholder.
+    public static func refs(in entries: [TokenMap.Entry]) -> [Ref] {
+        var out: [Ref] = []
+        for e in entries {
+            guard let opRef = OnePasswordCLI.reference(in: e.real) else { continue }
+            if let i = out.firstIndex(where: { $0.fake == e.fake && $0.opRef == opRef }) {
+                if !out[i].hosts.contains(e.host) {
+                    out[i] = Ref(opRef: opRef, fake: e.fake, hosts: out[i].hosts + [e.host],
+                                 consentID: out[i].consentID, consentName: out[i].consentName)
+                }
+            } else {
+                out.append(Ref(opRef: opRef, fake: e.fake, hosts: [e.host],
+                               consentID: e.consentCredentialID, consentName: e.consentDisplayName))
+            }
+        }
+        return out
+    }
+
     private var tasks: [UUID: Task<Void, Never>] = [:]
-    public init() {}
+    /// Resolves a reference (`op read`; tests stand one in).
+    private let read: @Sendable (String) async throws -> String
+    public init(read: @escaping @Sendable (String) async throws -> String = { try await OnePasswordCLI.read($0) }) {
+        self.read = read
+    }
 
     /// (Re)start the refresh loop for a profile's op-sourced credentials. The
     /// token plan minted the fake from the `op://` *reference string* (a stable
@@ -46,8 +71,17 @@ public final class OnePasswordRefresher {
         stop(profileID: profileID)
         guard !refs.isEmpty else { return }
         // Replace the plan's fake→"op://…" placeholder with fake→"" until the
-        // real secret resolves; the guest already holds the fake.
-        for r in refs { Self.updateSwap(swapper: swapper, profileID: profileID, ref: r, real: "") }
+        // real secret resolves; the guest already holds the fake. A secret
+        // already resolved from this reference (kept by a live refresh) stays.
+        for r in refs {
+            let entries = swapper.entries(for: profileID)
+            for host in r.hosts where !entries.contains(where: {
+                $0.fake == r.fake && $0.host == host && $0.resolvedFrom == r.opRef && !$0.isPlaceholder
+            }) {
+                Self.updateSwap(swapper: swapper, profileID: profileID, ref: r, real: "", hosts: [host])
+            }
+        }
+        let read = self.read
         let task = Task { [weak swapper] in
             var reported = false
             var first = true
@@ -60,10 +94,16 @@ public final class OnePasswordRefresher {
                 for r in refs {
                     guard let swapper else { return }
                     do {
-                        let real = try await OnePasswordCLI.read(r.opRef)
+                        let real = try await read(r.opRef)
+                        // Replaced while `op` ran (a live save restarted the
+                        // loop): this reference may be the old one -- writing
+                        // it would put the previous secret back.
+                        if Task.isCancelled { return }
                         Self.updateSwap(swapper: swapper, profileID: profileID, ref: r,
-                                        real: real.trimmingCharacters(in: .whitespacesAndNewlines))
+                                        real: real.trimmingCharacters(in: .whitespacesAndNewlines),
+                                        resolved: true)
                     } catch let e as OnePasswordCLI.OpError {
+                        if Task.isCancelled { return }
                         if !reported {
                             reported = true
                             onFirstError?(e)
@@ -89,18 +129,21 @@ public final class OnePasswordRefresher {
     }
 
     /// Replace this ref's entries (same fake + host) with the new real value,
-    /// preserving any consent metadata — keying by `fake` keeps the guest's
-    /// exported fake valid across the swap.
+    /// keeping everything else the entry had (header, paths, body, consent):
+    /// keying by `fake` keeps the guest's exported fake valid across the
+    /// swap. `resolved`: `real` came from the reference (not a blank).
     private static func updateSwap(swapper: TokenSwapper, profileID: UUID,
-                                   ref: Ref, real: String) {
+                                   ref: Ref, real: String, resolved: Bool = false,
+                                   hosts: [String?]? = nil) {
         var entries = swapper.entries(for: profileID)
-        for host in ref.hosts {
+        for host in hosts ?? ref.hosts {
             let prior = entries.first(where: { $0.fake == ref.fake && $0.host == host })
             entries.removeAll { $0.fake == ref.fake && $0.host == host }
-            entries.append(TokenMap.Entry(
+            let from = resolved ? ref.opRef : nil
+            entries.append(prior?.withReal(real, resolvedFrom: from) ?? TokenMap.Entry(
                 fake: ref.fake, real: real, host: host,
-                consentCredentialID: prior?.consentCredentialID ?? ref.consentID,
-                consentDisplayName: prior?.consentDisplayName ?? ref.consentName))
+                consentCredentialID: ref.consentID, consentDisplayName: ref.consentName,
+                resolvedFrom: from))
         }
         swapper.setMap(TokenMap(entries: entries), for: profileID)
     }
