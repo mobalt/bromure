@@ -2388,6 +2388,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()
                 $0.startingAt = nil
                 $0.lastError = nil
+                $0.pendingRefusal = nil   // an earlier run's
             }
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "run", args: args) else {
@@ -2418,17 +2419,26 @@ final class CodingTaskEngine {
                     now: Date = Date()) {
         guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
                                                   && $0.stage == .inProgress }) else { return }
-        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true { return }
+        // Its tab is up: the claim is ignored, and so is one held before.
+        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true {
+            if t.pendingRefusal != nil { store.mutate(t.id) { $0.pendingRefusal = nil } }
+            return
+        }
         let text = ScheduledAutomationEngine.guestReported(reason)
         if let started = t.startedAt, now.timeIntervalSince(started) < ScheduledAutomationEngine.tabAppearGrace {
             store.mutate(t.id) { $0.pendingRefusal = text }
             return
         }
-        store.mutate(t.id) { $0.lastError = text }
+        // Shown now: an older held one must not come back over it.
+        store.mutate(t.id) { $0.lastError = text; $0.pendingRefusal = nil }
     }
 
     /// Held refusals: dropped once the task's tab is listed (or it left In
-    /// Progress), put on the card once the grace ran out with no tab.
+    /// Progress), put on the card once the grace ran out with no tab --
+    /// unless the card already says why since (a later report, the launch
+    /// watch's own diagnosis): a held refusal is older than that, and never
+    /// written over it (Finding CWE-670, "Held task refusal overwrites a
+    /// later error on the card").
     func settlePendingRefusals(now: Date = Date(), liveBranches: (UUID) -> [String]) {
         for t in store.tasks where t.pendingRefusal != nil {
             guard let reason = t.pendingRefusal else { continue }
@@ -2439,7 +2449,7 @@ final class CodingTaskEngine {
             if liveBranches(t.profileID).contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) {
                 store.mutate(t.id) { $0.pendingRefusal = nil }
             } else if now.timeIntervalSince(t.startedAt ?? .distantPast) >= ScheduledAutomationEngine.tabAppearGrace {
-                store.mutate(t.id) { $0.pendingRefusal = nil; $0.lastError = reason }
+                store.mutate(t.id) { $0.pendingRefusal = nil; if $0.lastError == nil { $0.lastError = reason } }
             }
         }
     }
@@ -2454,7 +2464,7 @@ final class CodingTaskEngine {
             guard case .died = outcome, let t = self.store.task(taskID), t.stage == .inProgress,
                   t.branchSlug.map({ "wt/" + $0 }) == branch || t.branch == branch else { return }
             let why = Self.launchFailure(worker: worker, outcome)
-            self.store.mutate(taskID) { $0.lastError = why }
+            self.store.mutate(taskID) { $0.lastError = why; $0.pendingRefusal = nil }
             self.noteSessionLaunchFailed(taskID, branch: branch, reason: why)
         }
     }
@@ -2499,7 +2509,7 @@ final class CodingTaskEngine {
             }
             BACDebug.log("tasks", "opening brief NOT delivered to \(branch)")
             let why = Self.onceUpFailure(worker: worker, failure)
-            self.store.mutate(taskID) { $0.lastError = why }
+            self.store.mutate(taskID) { $0.lastError = why; $0.pendingRefusal = nil }
             if case .launch = failure { self.noteSessionLaunchFailed(taskID, branch: branch, reason: why) }
         }
     }
@@ -2548,6 +2558,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()
                 $0.startingAt = nil
                 $0.lastError = nil
+                $0.pendingRefusal = nil   // an earlier run's
             }
             BACDebug.log("tasks", "“\(task.title)”: resuming on its kept branch \(branch)")
             let prompt = self.store.task(taskID).map(Self.resumePrompt(for:)) ?? Self.resumePrompt(for: task)
@@ -3098,6 +3109,7 @@ final class CodingTaskEngine {
             $0.approvedTarget = nil
             $0.sessionParkedAt = nil
             $0.startedAt = Date()   // restart the session-gone clock
+            $0.pendingRefusal = nil   // a fresh grace: an earlier run's hold isn't this one's
         }
         if await deliverToConversation(taskID, branch: branch, text: feedback) {
             markCommentsSent(taskID, ids)
@@ -3592,6 +3604,7 @@ final class CodingTaskEngine {
             self.store.mutate(taskID) {
                 $0.stage = .inProgress
                 $0.startedAt = Date()   // restart the session-gone clock
+                $0.pendingRefusal = nil   // a fresh grace: an earlier run's hold isn't this one's
                 // A finished task picked back up is active again.
                 $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.landing = nil
                 $0.approvedTarget = nil
