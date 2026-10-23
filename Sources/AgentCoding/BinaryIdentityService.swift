@@ -99,6 +99,10 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// connection never touches this; a later blocked one is the row's
     /// latest block, so it is its program.
     private var deniedExes: [String: (exe: String, at: Date)] = [:]
+    /// As long as the Sandbox drawer lists a block (`PolicyDrawer`'s two
+    /// hours): past `recentExes`' hour, Allow would follow the newest
+    /// connection again.
+    static let deniedSpan: TimeInterval = 2 * 3600
 
     /// A connection to `destinations` (the names it was decided for, then
     /// its IP) on `port` was denied for the program `exe`.
@@ -110,16 +114,16 @@ public final class BinaryIdentityService: @unchecked Sendable {
             deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, now)
         }
         if deniedExes.count > 2048 {
-            let cutoff = now.addingTimeInterval(-3600)
+            let cutoff = now.addingTimeInterval(-Self.deniedSpan)
             deniedExes = deniedExes.filter { $0.value.at > cutoff }
         }
     }
 
     /// The program the latest deny to `destinations` on `port` was for, within
-    /// the hour -- the first destination that has one, in the order given.
+    /// `deniedSpan` -- the first destination that has one, in the order given.
     public func deniedExe(profileID: UUID, destinations: [String], port: Int) -> String? {
         lock.lock(); defer { lock.unlock() }
-        let cutoff = Date().addingTimeInterval(-3600)
+        let cutoff = Date().addingTimeInterval(-Self.deniedSpan)
         for d in destinations {
             if let r = deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
         }
