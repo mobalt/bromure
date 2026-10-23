@@ -61,7 +61,8 @@ struct EphemeralRebootTests {
         #expect(drop.contains("guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),"))
         #expect(drop.contains("takeEphemeral(p)") && drop.contains("try? store.delete(p)"))
         // Kimi provisioning stopped, the boot remedy stopped, a wipe
-        // cancelled (remote and local), a wipe or an upgrade skipped (remote).
+        // cancelled (remote and local), a wipe skipped, failed or undone by
+        // a clear, or an upgrade skipped (remote).
         #expect(src.contains("""
             guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else {
                                 self.dropAbandonedEphemeral(profile.id); return
@@ -69,7 +70,7 @@ struct EphemeralRebootTests {
         #expect(src.contains("guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }"))
         #expect(src.components(separatedBy: "case .cancelled: dropAbandonedEphemeral(profile.id); return").count == 3)
         let prompts = try body(src, "@MainActor private func resolveRemoteLaunchPrompts(")
-        #expect(prompts.components(separatedBy: "dropAbandonedEphemeral(profile.id)").count == 4)
+        #expect(prompts.components(separatedBy: "dropAbandonedEphemeral(profile.id)").count == 6)
     }
 
     /// Finding (CWE-459): "vm run --rm reboot keeps the workspace only in
