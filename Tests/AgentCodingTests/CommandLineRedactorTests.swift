@@ -128,7 +128,7 @@ struct CommandLineRedactorTests {
             ("curl -sbsession=SECRET x", "curl -sb*** x"),
             ("curl -bsession=SECRET x", "curl -b*** x"),
             ("curl -sb session=SECRET; csrf=OTHER https://x", "curl -sb *** https://x"),   // the sentry's argv
-            ("/usr/bin/curl -SB 'session=SECRET' x", "/usr/bin/curl -SB '***' x"),
+            ("/usr/bin/curl -Sb 'session=SECRET' x", "/usr/bin/curl -Sb '***' x"),
             // A `b` in the cookie's own name: curl's argument starts at the first one.
             ("curl -sbab=SECRET x", "curl -sb*** x"),
             ("curl -bAWSALB=SECRET x", "curl -b*** x"),
@@ -137,7 +137,21 @@ struct CommandLineRedactorTests {
         ] {
             #expect(r(cmd) == out, "\(cmd)")
         }
+        // Finding (CWE-532): "A curl -B cluster is read as -b, so the real
+        // cookie is uploaded" — -B is --use-ascii and takes no argument, so
+        // the real -b after it is the cookie, and the token after -B alone
+        // is a URL, not a cookie.
+        for (cmd, out) in [
+            ("curl -fsSLB -b session=SECRET https://x", "curl -fsSLB -b *** https://x"),
+            ("curl -SB -b session=SECRET https://x", "curl -SB -b *** https://x"),
+            ("curl -sB -b 'session=SECRET' https://x", "curl -sB -b '***' https://x"),
+            ("curl -LB -sb session=SECRET https://x", "curl -LB -sb *** https://x"),
+        ] {
+            #expect(r(cmd) == out, "\(cmd)")
+        }
         for kept in ["curl -sb cookies.txt x",                               // a cookie file
+                     "curl -fsSLB https://example.com/file?q=1",             // -B takes no argument
+                     "/usr/bin/curl -SB 'session=1' x",                      // a URL to curl, never sent as a cookie
                      "git checkout -qb fix-login && git push",               // not curl
                      "tar -czvfb x=1 dir", "ls -lb a=b"] {
             #expect(r(kept) == kept, "\(kept)")
