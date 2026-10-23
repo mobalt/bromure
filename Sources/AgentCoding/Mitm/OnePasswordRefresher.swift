@@ -52,7 +52,11 @@ public final class OnePasswordRefresher {
     }
 
     private var tasks: [UUID: Task<Void, Never>] = [:]
-    public init() {}
+    /// Resolves a reference (`op read`; tests stand one in).
+    private let read: @Sendable (String) async throws -> String
+    public init(read: @escaping @Sendable (String) async throws -> String = { try await OnePasswordCLI.read($0) }) {
+        self.read = read
+    }
 
     /// (Re)start the refresh loop for a profile's op-sourced credentials. The
     /// token plan minted the fake from the `op://` *reference string* (a stable
@@ -77,6 +81,7 @@ public final class OnePasswordRefresher {
                 Self.updateSwap(swapper: swapper, profileID: profileID, ref: r, real: "", hosts: [host])
             }
         }
+        let read = self.read
         let task = Task { [weak swapper] in
             var reported = false
             var first = true
@@ -89,11 +94,16 @@ public final class OnePasswordRefresher {
                 for r in refs {
                     guard let swapper else { return }
                     do {
-                        let real = try await OnePasswordCLI.read(r.opRef)
+                        let real = try await read(r.opRef)
+                        // Replaced while `op` ran (a live save restarted the
+                        // loop): this reference may be the old one -- writing
+                        // it would put the previous secret back.
+                        if Task.isCancelled { return }
                         Self.updateSwap(swapper: swapper, profileID: profileID, ref: r,
                                         real: real.trimmingCharacters(in: .whitespacesAndNewlines),
                                         resolved: true)
                     } catch let e as OnePasswordCLI.OpError {
+                        if Task.isCancelled { return }
                         if !reported {
                             reported = true
                             onFirstError?(e)

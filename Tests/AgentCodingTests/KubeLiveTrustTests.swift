@@ -228,6 +228,47 @@ struct LiveRefreshPlaceholderTests {
         #expect(after.first { $0.host == "api.github.com" }?.real == "ghp_new")
     }
 
+    /// Review of the fix above: a live save restarts the loop, but an `op`
+    /// read already running for the old reference finished after it and
+    /// wrote the previous secret back over the new reference's.
+    @Test("a 1Password read that outlives its loop writes nothing")
+    @MainActor func cancelledReadWritesNothing() async throws {
+        final class Held: @unchecked Sendable {
+            let lock = NSLock()
+            var waiting: CheckedContinuation<String, Never>?
+            func park(_ c: CheckedContinuation<String, Never>) { lock.lock(); waiting = c; lock.unlock() }
+            func release(_ v: String) { lock.lock(); let c = waiting; waiting = nil; lock.unlock(); c?.resume(returning: v) }
+            var isWaiting: Bool { lock.lock(); defer { lock.unlock() }; return waiting != nil }
+        }
+        let held = Held()
+        let loop = OnePasswordRefresher(read: { ref in
+            if ref == "op://vault/a/token" { return await withCheckedContinuation { held.park($0) } }
+            return "secret-b"
+        })
+        let fake = "openshell:resolve:env:GITHUB_TOKEN"
+        let swapper = TokenSwapper(consent: ConsentBroker())
+        let pid = UUID()
+        func entry() -> TokenMap.Entry? { swapper.entries(for: pid).first { $0.fake == fake } }
+        func until(_ ok: () -> Bool) async throws {
+            for _ in 0..<200 where !ok() { try await Task.sleep(nanoseconds: 5_000_000) }
+        }
+        for (next, expected) in [("op://vault/b/token", "secret-b"), ("ghp_literal", "ghp_literal")] {
+            swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "op://vault/a/token", host: "github.com")]), for: pid)
+            loop.start(profileID: pid, refs: OnePasswordRefresher.refs(in: swapper.entries(for: pid)), swapper: swapper)
+            try await until { held.isWaiting }
+            #expect(held.isWaiting)
+            // The live save: the credential is now `next`.
+            swapper.setMap(TokenMap.liveMerge(fresh: [TokenMap.Entry(fake: fake, real: next, host: "github.com")],
+                                              current: swapper.entries(for: pid)), for: pid)
+            loop.start(profileID: pid, refs: OnePasswordRefresher.refs(in: swapper.entries(for: pid)), swapper: swapper)
+            try await until { entry()?.real == expected }
+            held.release("secret-a")          // the old read comes back late
+            try await Task.sleep(nanoseconds: 50_000_000)
+            #expect(entry()?.real == expected, "\(next)")
+        }
+        loop.stop(profileID: pid)
+    }
+
     @Test("the live push re-materializes with the poller's contexts and merges, not replaces")
     func livePushWiring() throws {
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
