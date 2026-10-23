@@ -4950,13 +4950,18 @@ public final class ProfileStore {
             except (OSError, ValueError, IndexError):
                 dev = None
             if dev is None:
-                sys.exit(0)
+                # Notes are here (the shell saw them) but the share cannot be
+                # vouched for: owed, not drained (Finding CWE-670, "A mount
+                # check that cannot validate the share reports done and drops
+                # the owed-note hold").
+                owed()
             claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
             try:
                 os.makedirs(claims, mode=0o700, exist_ok=True)
             except OSError:
                 owed()
             notes = []
+            stuck = False
             for f in sorted(sys.argv[1:]):
                 # Checked and read through one descriptor, so nothing can swap
                 # the file in between.
@@ -4971,7 +4976,10 @@ public final class ProfileStore {
                     try:
                         cfd = os.open(os.path.join(claims, os.path.basename(f)),
                                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except FileExistsError:
+                        continue            # handed over already
                     except OSError:
+                        stuck = True        # cannot claim it: still owed
                         continue
                     os.close(cfd)
                     try:
@@ -4986,6 +4994,8 @@ public final class ProfileStore {
                         os.unlink(os.path.join(claims, n))
             except OSError:
                 pass
+            if stuck and not notes:
+                owed()
             if notes and event == "Stop":
                 # The turn ended on the blocked action, before the note was
                 # written: keep the turn going with the note, rather than

@@ -773,6 +773,38 @@ struct PolicyNoteDeliveryTests {
         #expect(try stop().isEmpty)
         #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
 
+        // Finding (CWE-670): "A mount check that cannot validate the share
+        // reports done and drops the owed-note hold". The table opens but
+        // shows the share as something else (a bind mount over it, as sudo
+        // can stack outside the strict sandbox): the note is owed, not done.
+        try (installed.shareLine.replacingOccurrences(of: "virtiofs bromure-meta", with: "ext4 /dev/vdb"))
+            .write(to: installed.mountinfo, atomically: true, encoding: .utf8)
+        let unvouched = try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        #expect(fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
+        #expect(!fm.fileExists(atPath: claims.appendingPathComponent(unvouched.lastPathComponent).path))
+        #expect(try stop().isEmpty)   // and stays so on the next Stop
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        try hook("working", #"{"hook_event_name":"UserPromptSubmit","session_id":"abc-1"}"#)
+        try installed.shareLine.write(to: installed.mountinfo, atomically: true, encoding: .utf8)
+        #expect((try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])?["decision"] as? String == "block")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
+        // A note that can't be claimed (the claims folder isn't writable) is
+        // owed too, not skipped as if handed over already.
+        chmod(claims.path, 0o555)
+        let unclaimed = try ACAppDelegate.dropPolicyNote(in: meta, window: 3, text: "curl to evil.example was blocked")
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "needsInput\nabc-1")
+        chmod(claims.path, 0o755)
+        try hook("working", #"{"hook_event_name":"UserPromptSubmit","session_id":"abc-1"}"#)
+        #expect((try JSONSerialization.jsonObject(with: Data(try stop().utf8)) as? [String: Any])?["decision"] as? String == "block")
+        #expect(fm.fileExists(atPath: claims.appendingPathComponent(unclaimed.lastPathComponent).path))
+        #expect(try stop().isEmpty)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nabc-1")
+
         // The other way a note can't be handed over: the home can't be
         // written (no claims folder). The mark lives in the outbox, so the
         // idle_prompt after it still doesn't report done.
