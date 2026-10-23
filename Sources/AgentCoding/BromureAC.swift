@@ -7085,7 +7085,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         let saved = profiles.first { $0.id == profile.id } ?? profile
-        if spec["rm"] as? Bool == true, store.claimEphemeral(saved) { ephemeralProfiles.insert(saved.id) }
+        if spec["rm"] as? Bool == true {
+            // Another live process's --rm workspace isn't ours to boot.
+            guard store.claimEphemeral(saved) else {
+                FileHandle.standardError.write(Data("[vm run] '\(saved.name)' belongs to another Bromure process\n".utf8))
+                return nil
+            }
+            ephemeralProfiles.insert(saved.id)
+        }
 
         // 4. Boot via the shared launch path. A headless `-d` run boots
         //    window-less from the start (no pane is ever hosted) so no window
@@ -12444,8 +12451,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // began during a prompt above keeps the disk, and this launch leaves
         // no pane behind.
         guard bootsInFlight.begin(profile.id) else { return }
-        // A `--rm` workspace this process boots is this process's to sweep.
-        if store.isEphemeral(profile) { store.claimEphemeral(profile) }
+        // A `--rm` workspace this process boots is this process's to sweep --
+        // and one a live other process owns (the login agent's, the GUI's:
+        // it may be up there, or in its reboot gap) isn't booted here at all:
+        // its owner would delete the disk out from under this VM.
+        if store.isEphemeral(profile), !store.claimEphemeral(profile) {
+            bootsInFlight.end(profile.id)
+            refreshSidebar()
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' is a vm run --rm workspace another Bromure process owns; not booting it here\n".utf8))
+            return
+        }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then

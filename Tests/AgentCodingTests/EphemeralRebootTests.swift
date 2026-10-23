@@ -141,11 +141,14 @@ struct EphemeralRebootTests {
     @Test("a quit, a caught signal and the next launch delete every stopped --rm workspace")
     func sweeps() throws {
         let src = try String(contentsOf: Self.source, encoding: .utf8)
-        #expect(src.contains("if spec[\"rm\"] as? Bool == true, store.claimEphemeral(saved) { ephemeralProfiles.insert(saved.id) }"))
+        // A refused claim keeps this process from booting it at all.
+        #expect(src.contains("guard store.claimEphemeral(saved) else {"))
         let sweep = try body(src, "func sweepStoppedEphemeral(atLaunch: Bool = false) {")
         #expect(sweep.contains("runningSessions[p.id] == nil && !diskInUse(p.id)"))
         #expect(sweep.contains("store.ephemeralSweepable(p, mine: !atLaunch)"))
-        #expect(src.contains("if store.isEphemeral(profile) { store.claimEphemeral(profile) }"))
+        #expect(src.contains("if store.isEphemeral(profile), !store.claimEphemeral(profile) {\n            bootsInFlight.end(profile.id)"))
+        let launchBody = try body(src, "func launch(_ profile: Profile")
+        #expect(before("!store.claimEphemeral(profile)", "let win = SessionPane(profile: profile", in: launchBody))
         #expect(!src.contains("store.markEphemeral("))
         let quit = try body(src, "func applicationWillTerminate(_ notification: Notification) {")
         #expect(quit.contains("sweepStoppedEphemeral()"))
