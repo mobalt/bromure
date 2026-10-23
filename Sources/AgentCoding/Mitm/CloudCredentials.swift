@@ -283,7 +283,7 @@ public final class KubeconfigMaterializer {
         public let consentDisplayName: String?
     }
 
-    public struct ExecContext: Sendable {
+    public struct ExecContext: Sendable, Equatable {
         public let entryID: UUID
         public let host: String
         public let fakeToken: String
@@ -586,53 +586,91 @@ public final class ExecCredentialPoller {
     /// CWE-362, "A live kubeconfig refresh cancels another workspace's
     /// exec poller when entry ids match").
     private struct Key: Hashable { let profileID: UUID; let entryID: UUID }
-    private var tasks: [Key: Task<Void, Never>] = [:]
+    /// A poller: its context, its generation, its task. Only the current
+    /// generation writes a token: a run whose plugin outlived its poller
+    /// (stopped or replaced while it ran) wrote its older token over the
+    /// newer one on the same reused fake (Finding CWE-362, "A cancelled kube
+    /// exec poll writes an older token onto the reused fake").
+    private struct Running { let ctx: KubeconfigMaterializer.ExecContext; let generation: Int; let task: Task<Void, Never> }
+    private let lock = NSLock()
+    private var tasks: [Key: Running] = [:]
+    private var generation = 0
 
     public init() {}
+
+    /// Make `profileID`'s pollers `contexts`: one whose context is unchanged
+    /// keeps running (a live push no longer overlaps two runs of its
+    /// plugin), a changed one restarts, one no longer listed stops.
+    public func sync(_ contexts: [KubeconfigMaterializer.ExecContext],
+                     profileID: UUID,
+                     swapper: TokenSwapper) {
+        let keep = Set(contexts.map(\.entryID))
+        lock.lock()
+        for key in tasks.keys where key.profileID == profileID && !keep.contains(key.entryID) {
+            tasks.removeValue(forKey: key)?.task.cancel()
+        }
+        lock.unlock()
+        start(contexts, profileID: profileID, swapper: swapper)
+    }
 
     public func start(_ contexts: [KubeconfigMaterializer.ExecContext],
                       profileID: UUID,
                       swapper: TokenSwapper) {
+        lock.lock(); defer { lock.unlock() }
         for ctx in contexts {
             let key = Key(profileID: profileID, entryID: ctx.entryID)
-            tasks[key]?.cancel()
+            if let running = tasks[key], running.ctx == ctx { continue }
+            tasks[key]?.task.cancel()
+            generation += 1
+            let gen = generation
             let task = Task { [weak self, weak swapper] in
                 guard self != nil else { return }
                 while !Task.isCancelled {
                     let token = await Self.runExec(command: ctx.command, args: ctx.args)
-                    // A run that outlived its poller (stopped or replaced
-                    // while the plugin ran) doesn't write its token.
-                    if let token, let swapper, !Task.isCancelled {
-                        Self.updateSwap(swapper: swapper,
-                                        profileID: profileID,
-                                        host: ctx.host,
-                                        fake: ctx.fakeToken,
-                                        real: token)
-                        FileHandle.standardError.write(Data(
-                            "[k8s-exec] refreshed token for \(ctx.host) (\(ctx.command))\n".utf8))
+                    if let token, let swapper, let self {
+                        // Checked and written under one lock: a run that
+                        // outlived its poller writes nothing.
+                        self.ifCurrent(key, gen) {
+                            Self.updateSwap(swapper: swapper,
+                                            profileID: profileID,
+                                            host: ctx.host,
+                                            fake: ctx.fakeToken,
+                                            real: token)
+                            FileHandle.standardError.write(Data(
+                                "[k8s-exec] refreshed token for \(ctx.host) (\(ctx.command))\n".utf8))
+                        }
                     }
                     try? await Task.sleep(for: .seconds(Double(ctx.refreshSeconds)))
                 }
             }
-            tasks[key] = task
+            tasks[key] = Running(ctx: ctx, generation: gen, task: task)
         }
+    }
+
+    private func ifCurrent(_ key: Key, _ gen: Int, _ write: () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        guard tasks[key]?.generation == gen, !Task.isCancelled else { return }
+        write()
     }
 
     /// Stop one workspace's pollers, and only its: a workspace closing
     /// used to stop every running workspace's exec-credential refresh.
     public func stopAll(profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
         for key in tasks.keys where key.profileID == profileID {
-            tasks.removeValue(forKey: key)?.cancel()
+            tasks.removeValue(forKey: key)?.task.cancel()
         }
     }
 
     /// The kubeconfig entries being refreshed for `profileID`.
     public func entries(for profileID: UUID) -> Set<UUID> {
-        Set(tasks.keys.filter { $0.profileID == profileID }.map(\.entryID))
+        lock.lock(); defer { lock.unlock() }
+        return Set(tasks.keys.filter { $0.profileID == profileID }.map(\.entryID))
     }
 
     public func stopAll() {
-        for (_, t) in tasks { t.cancel() }
+        lock.lock(); defer { lock.unlock() }
+        for (_, r) in tasks { r.task.cancel() }
         tasks.removeAll()
     }
 
@@ -681,15 +719,12 @@ public final class ExecCredentialPoller {
         // by appending; old entries with the same fake get
         // overwritten by the lookup-by-fake nature of the swap.
         var entries = swapper.entries(for: profileID)
-        // Preserve any consent metadata the original entry carried —
-        // otherwise an exec-plugin refresh would silently strip the
-        // gate flag for that kubeconfig context.
-        let prior = entries.first(where: { $0.fake == fake })
-        entries.removeAll { $0.fake == fake }
-        entries.append(TokenMap.Entry(
-            fake: fake, real: real, host: host,
-            consentCredentialID: prior?.consentCredentialID,
-            consentDisplayName: prior?.consentDisplayName))
+        // The entry as the map has it (consent gate, header, paths), with the
+        // new token. One the map no longer has (the kubeconfig was removed)
+        // isn't put back.
+        guard let prior = entries.first(where: { $0.fake == fake && $0.host == host }) else { return }
+        entries.removeAll { $0.fake == fake && $0.host == host }
+        entries.append(prior.withReal(real))
         swapper.setMap(TokenMap(entries: entries), for: profileID)
     }
 }
