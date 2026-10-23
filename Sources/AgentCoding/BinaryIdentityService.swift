@@ -26,7 +26,7 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// Per profile: exe path → first-seen sha256 (OpenShell's TOFU rules).
     private var pinnedHashes: [UUID: OpenShellPolicy.BinaryPinStore] = [:]
     /// L4 decisions in flight / made, keyed by flow, for the switch gate.
-    private var gateResults: [GateKey: (EgressPolicy.Verdict?, Date)] = [:]
+    private var gateResults: [GateKey: (verdict: EgressPolicy.Verdict?, exe: String?, at: Date)] = [:]
 
     struct GateKey: Hashable { let pid: UUID; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
 
@@ -88,53 +88,6 @@ public final class BinaryIdentityService: @unchecked Sendable {
             let cutoff = Date().addingTimeInterval(-3600)
             recentExes = recentExes.filter { $0.value.at > cutoff }
         }
-    }
-
-    /// The program attested for the latest connection DENIED to each
-    /// destination ("pid|host-or-ip|port"), filed when the deny is decided.
-    /// A lookup in `recentExes` at Allow's click follows whatever connected
-    /// there since -- any guest program can dial the address after the deny
-    /// and so be the one the rule names (Finding CWE-284, "Drawer Allow on an
-    /// L4 port names whoever last dialed the destination IP"). An allowed
-    /// connection never touches this; a later blocked one is the row's
-    /// latest block, so it is its program.
-    private var deniedExes: [String: (exe: String, at: Date)] = [:]
-    /// As long as the Sandbox drawer lists a block (`PolicyDrawer`'s two
-    /// hours): past `recentExes`' hour, Allow would follow the newest
-    /// connection again.
-    static let deniedSpan: TimeInterval = 2 * 3600
-
-    /// A connection to `destinations` (the names it was decided for, then
-    /// its IP) on `port` was denied for the program `exe`.
-    public func noteDenied(_ exe: String?, profileID: UUID, destinations: [String], port: Int) {
-        guard let exe, !exe.isEmpty else { return }
-        lock.lock(); defer { lock.unlock() }
-        let now = Date()
-        for d in destinations where !d.isEmpty {
-            deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"] = (exe, now)
-        }
-        if deniedExes.count > 2048 {
-            let cutoff = now.addingTimeInterval(-Self.deniedSpan)
-            deniedExes = deniedExes.filter { $0.value.at > cutoff }
-        }
-    }
-
-    /// The program the latest deny to `destinations` on `port` was for, within
-    /// `deniedSpan` -- the first destination that has one, in the order given.
-    public func deniedExe(profileID: UUID, destinations: [String], port: Int) -> String? {
-        lock.lock(); defer { lock.unlock() }
-        let cutoff = Date().addingTimeInterval(-Self.deniedSpan)
-        for d in destinations {
-            if let r = deniedExes["\(profileID.uuidString)|\(d.lowercased())|\(port)"], r.at > cutoff { return r.exe }
-        }
-        return nil
-    }
-
-    /// The program a blocked row's Allow names: its deny's, else (a row from
-    /// before the deny was filed) the one that last connected there.
-    public func blockedExe(profileID: UUID, destinations: [String], port: Int) -> String? {
-        deniedExe(profileID: profileID, destinations: destinations, port: port)
-            ?? recentExe(profileID: profileID, destinations: destinations, port: port)
     }
 
     /// The MiTM learned the flow's name (SNI or Host header) after asking
@@ -222,17 +175,17 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// its attested binary. Returns nil (hold the SYN) while the attestor is
     /// being asked; the retransmitted SYN picks up the decision.
     public func gate(profileID: UUID, sport: UInt16, dstIP: UInt32, dport: UInt16,
-                     hostnames: [String], policy: EgressPolicy) -> EgressPolicy.Verdict? {
+                     hostnames: [String], policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)? {
         let key = GateKey(pid: profileID, sport: sport, dstIP: dstIP, dport: dport)
         lock.lock()
-        if let (v, at) = gateResults[key] {
-            if let v { gateResults[key] = nil; lock.unlock(); return v }
+        if let (v, exe, at) = gateResults[key] {
+            if let v { gateResults[key] = nil; lock.unlock(); return (v, exe) }
             if Date().timeIntervalSince(at) < 5 { lock.unlock(); return nil }   // still asking
         }
-        gateResults[key] = (nil, Date())
+        gateResults[key] = (nil, nil, Date())
         if gateResults.count > 4096 {
             let cutoff = Date().addingTimeInterval(-30)
-            gateResults = gateResults.filter { $0.value.1 > cutoff }
+            gateResults = gateResults.filter { $0.value.at > cutoff }
         }
         lock.unlock()
         let dst = EgressPolicy.ipv4String(dstIP)
@@ -243,8 +196,9 @@ public final class BinaryIdentityService: @unchecked Sendable {
             // don't replace the program attested for any of them.
             if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport), replace: false) }
             let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
-            if v == .deny { self.noteDenied(id?.exe, profileID: profileID, destinations: hostnames + [dst], port: Int(dport)) }
-            self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, Date()); self.lock.unlock()
+            // The deny reports the program on its own event (the switch's
+            // `EgressEvent.exe`): that event is the drawer row Allow acts on.
+            self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, id?.exe, Date()); self.lock.unlock()
         }
         return nil
     }

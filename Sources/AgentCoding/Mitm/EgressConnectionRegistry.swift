@@ -222,15 +222,17 @@ final class EgressReportDeduper: @unchecked Sendable {
     static let shared = EgressReportDeduper()
     static let window: TimeInterval = 60
 
-    private struct Key: Hashable { let pid: UUID; let host: String; let port: Int; let denied: Bool }
+    /// `exe`: a deny for another program is its own row (its Allow names it).
+    private struct Key: Hashable { let pid: UUID; let host: String; let port: Int; let denied: Bool; let exe: String? }
     private let lock = NSLock()
     private var seen: [Key: Date] = [:]
 
     init() {}
 
     /// True when this verdict should be reported now (and records it).
-    func shouldReport(profileID: UUID, host: String, port: Int, denied: Bool, now: Date = Date()) -> Bool {
-        let k = Key(pid: profileID, host: host.lowercased(), port: port, denied: denied)
+    func shouldReport(profileID: UUID, host: String, port: Int, denied: Bool, exe: String? = nil,
+                      now: Date = Date()) -> Bool {
+        let k = Key(pid: profileID, host: host.lowercased(), port: port, denied: denied, exe: denied ? exe : nil)
         lock.lock(); defer { lock.unlock() }
         if let last = seen[k], now.timeIntervalSince(last) < Self.window { return false }
         if seen.count > 8192 { seen = seen.filter { now.timeIntervalSince($0.value) < Self.window } }

@@ -176,12 +176,19 @@ struct PolicyDrawer: View {
     /// The workspace's distinct blocked destinations from the last two
     /// hours, newest first.
     private func blocked(_ profile: Profile) -> [Blocked] {
-        let cutoff = now.addingTimeInterval(-2 * 3600)
+        Self.blockedRows(timeline.allEvents, profileID: profile.id, since: now.addingTimeInterval(-2 * 3600))
+            .filter { !dismissed.contains($0.key) }
+    }
+
+    static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date) -> [Blocked] {
         var byKey: [String: Blocked] = [:]
-        for e in timeline.allEvents where e.profileID == profile.id && e.machine == nil && e.time > cutoff {
+        for e in events where e.profileID == profileID && e.machine == nil && e.time > cutoff {
             guard let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port, port > 0 else { continue }
-            let key = "\(host.lowercased()):\(port)"
+            // One row per program, too: a deny for another program (the
+            // event names it) never takes over a row, and so never what its
+            // Allow grants.
+            let key = "\(host.lowercased()):\(port)" + (fw.exe.map { "|" + $0 } ?? "")
             let n = (byKey[key]?.count ?? 0) + (e.count ?? 1)
             if let old = byKey[key], old.last > e.time {
                 byKey[key] = Blocked(key: key, host: old.host, port: port, fw: old.fw, last: old.last, count: n)
@@ -189,7 +196,7 @@ struct PolicyDrawer: View {
                 byKey[key] = Blocked(key: key, host: host.lowercased(), port: port, fw: fw, last: e.time, count: n)
             }
         }
-        return byKey.values.filter { !dismissed.contains($0.key) }.sorted { $0.last > $1.last }
+        return byKey.values.sorted { $0.last > $1.last }
     }
 
     @ViewBuilder private func blockedList(_ profile: Profile) -> some View {
@@ -234,19 +241,18 @@ struct PolicyDrawer: View {
 
     private func subtitle(_ item: Blocked, _ profile: Profile) -> String {
         var parts: [String] = []
-        if let exe = program(item, profile) { parts.append((exe as NSString).lastPathComponent) }
+        // The full path: /tmp/curl and /usr/bin/curl are different grants.
+        if let exe = program(item, profile) { parts.append(exe) }
         if item.count > 1 { parts.append("\(item.count)×") }
         parts.append(RelativeDateTimeFormatter().localizedString(for: item.last, relativeTo: now))
         return parts.joined(separator: " · ")
     }
 
-    /// The program that tried: the attestor's answer, else the kernel
-    /// sentry's flow report (the leaf of its process chain).
+    /// The program that tried: the attestor's answer on the block's own
+    /// event (what Allow grants), else the kernel sentry's flow report (the
+    /// leaf of its process chain).
     private func program(_ item: Blocked, _ profile: Profile) -> String? {
-        if let exe = BinaryIdentityService.shared.blockedExe(
-            profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) {
-            return exe
-        }
+        if let exe = item.fw.exe { return exe }
         for e in timeline.allEvents.reversed() where e.profileID == profile.id && e.eventType == "net.flow" {
             guard let d = e.detail, case .int(let port)? = d["dport"], port == item.port else { continue }
             var host: String? = nil
@@ -264,7 +270,7 @@ struct PolicyDrawer: View {
         if isOpenShell {
             Button("Allow") { allowOpenShell(item, profile) }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-                .help(Text(BinaryIdentityService.shared.blockedExe(profileID: profile.id, destinations: [item.host] + (item.fw.ip.map { [$0] } ?? []), port: item.port) != nil
+                .help(Text(item.fw.exe != nil
                            ? "Add a rule for this host and port, for the program that tried"
                            : "Add a rule for this host and port"))
         } else if let target = FirewallRuleActions.targets(for: item.fw).first,
@@ -301,9 +307,9 @@ struct PolicyDrawer: View {
 
     private func allowOpenShell(_ item: Blocked, _ profile: Profile) {
         busy.insert(item.key)
-        let pid = profile.id, host = item.host, port = item.port, key = item.key, ip = item.fw.ip
+        let pid = profile.id, host = item.host, port = item.port, key = item.key, exe = item.fw.exe
         Task { @MainActor in
-            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, ip: ip)
+            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
             busy.remove(key)
             if let error { errors[key] = error } else { allowed.insert(key); errors[key] = nil }
         }
