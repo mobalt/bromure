@@ -850,6 +850,58 @@ struct PolicySteeringPinBoundTests {
         #expect(s.retainedPids(profileID: ws) == (0, 0))
     }
 
+    /// Finding (CWE-770): "Guest can hold all pid-pin slots so the real
+    /// agent's policy notes are never attributed". Any guest process can
+    /// write hook lines for 64 made-up windows and refresh them forever; the
+    /// full map then ignored the real agent, and a pid rotation on one window
+    /// filled `displaced` so no other tab's restart was taken either.
+    @Test("windows the guest made up can't keep a host tab's agent, or its restart, out of the pins")
+    func squattedSlots() {
+        let clock = SteeringClock(Date()), ws = UUID()
+        func told(_ s: PolicySteering, _ pids: [Int]) -> Int? {
+            let sink = SteeringSink()
+            s.deliver = { _, window, text, sole, done in sink.add(.init(window: window, text: text, soleOnly: sole)); done(true) }
+            s.noteFlow(profileID: ws, dst: "203.0.113.9", dport: 443, pids: pids)
+            s.observe(profileID: ws, eventType: "egress.firewall", eventData: [
+                "action": .string("deny"), "layer": .string("l4"), "proto": .string("tcp"),
+                "host": .string("evil.example"), "ip": .string("203.0.113.9"), "port": .int(443)])
+            clock.now += PolicySteering.repeatWindow + 1
+            return sink.notes.first?.window
+        }
+        func squat(_ s: PolicySteering) {
+            for round in 0..<3 {
+                for i in 0..<PolicySteering.pinCap { s.noteAgent(profileID: ws, pid: 9_000 + i, window: 200 + i) }
+                if round < 2 { clock.now += PolicySteering.pinSpan - 60 }   // refreshed before they expire
+            }
+        }
+        let s = steering(clock)
+        squat(s)
+        // A tab the host opened, its agent's first hook: it gets a slot.
+        s.noteAgent(profileID: ws, pid: 500, window: 1, hostWindows: [1])
+        #expect(s.agentWindows(profileID: ws).contains(1))
+        #expect(told(s, [900, 500]) == 1)
+        #expect(s.retainedPids(profileID: ws).agents <= PolicySteering.pinCap)
+        // The squatter it displaced is still pinned to its own window.
+        s.noteAgent(profileID: ws, pid: 9_000, window: 999)
+        #expect(!s.agentWindows(profileID: ws).contains(999))
+        // Without the host's word the same line is still refused.
+        let other = steering(clock)
+        squat(other)
+        other.noteAgent(profileID: ws, pid: 500, window: 1)
+        #expect(!other.agentWindows(profileID: ws).contains(1))
+
+        // A pid rotation on one made-up window fills `displaced`; the host
+        // tab's agent restarting still takes its window.
+        for i in 0..<(PolicySteering.pinCap * 2) { s.noteAgent(profileID: ws, pid: 20_000 + i, window: 200) }
+        #expect(s.retainedPids(profileID: ws).displaced <= PolicySteering.pinCap)
+        s.noteAgent(profileID: ws, pid: 501, window: 1, hostWindows: [1])
+        #expect(told(s, [900, 501]) == 1)
+        // A made-up window's own restart (its pin live) doesn't get that pass.
+        s.noteAgent(profileID: ws, pid: 9_002, window: 202)
+        s.noteAgent(profileID: ws, pid: 30_000, window: 202)
+        #expect(told(s, [900, 30_000]) != 202)
+    }
+
     @Test("the session's teardown resets the workspace's steering state")
     func teardownResets() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

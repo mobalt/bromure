@@ -35,6 +35,16 @@ extension ACAppDelegate {
         }
     }
 
+    /// The windows of the agent tabs the host itself opened in a workspace
+    /// (its live sessions): the ones `PolicySteering.noteAgent` keeps a
+    /// slot for, whatever the guest wrote.
+    @MainActor
+    func hostAgentWindows(profileID: UUID) -> Set<Int> {
+        Set(agentSessionStore.sessions.compactMap { s in
+            s.profileID == profileID && !s.isDeleted && !s.isArchived && !s.hasEnded ? s.windowIndex : nil
+        })
+    }
+
     /// True once the note reached a tab: a Claude note file is in place (its
     /// hook reads it), or a typed note is queued.
     @MainActor @discardableResult

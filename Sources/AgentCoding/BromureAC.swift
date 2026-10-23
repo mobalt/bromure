@@ -15328,13 +15328,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         // Agents' PreToolUse hooks: each tool call before it runs, with its
         // provider id and the agent's pid (network lineage).
-        sandbox.onAgentToolCall = { line, window in
+        sandbox.onAgentToolCall = { [weak self] line, window in
             guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let id = o["tool_use_id"] as? String, !id.isEmpty else { return }
             // Which tab this agent is: a policy note about a process in its
-            // tree goes to it.
+            // tree goes to it. The host's own agent tabs come first when the
+            // guest-writable lines have filled every slot.
             if let window, let agentPid = o["pid"] as? Int {
-                PolicySteering.shared.noteAgent(profileID: pid, pid: agentPid, window: window)
+                let host = MainActor.assumeIsolated { self?.hostAgentWindows(profileID: pid) ?? [] }
+                PolicySteering.shared.noteAgent(profileID: pid, pid: agentPid, window: window, hostWindows: host)
             }
             NetworkLineage.shared.noteToolCall(
                 profileID: pid, id: String(id.prefix(128)), tool: o["tool"] as? String ?? "tool",
