@@ -59,13 +59,21 @@ public struct TokenMap: Sendable {
         /// exactly like an OpenShell placeholder outside its endpoint binding.
         public let paths: [String]
 
+        /// The 1Password reference `real` was resolved from (the refresher
+        /// sets it), nil for a value given as is. A live refresh carries a
+        /// resolved secret only to the same reference: a placeholder fake
+        /// (`openshell:resolve:env:VAR`) stays the same whatever the secret.
+        public let resolvedFrom: String?
+
         public init(fake: String, real: String, host: String? = nil,
                     header: Header = .authorization,
                     body: Bool = false,
                     acceptSiblings: Bool = false,
                     consentCredentialID: String? = nil,
                     consentDisplayName: String? = nil,
-                    paths: [String] = []) {
+                    paths: [String] = [],
+                    resolvedFrom: String? = nil) {
+            self.resolvedFrom = resolvedFrom
             self.paths = paths
             self.fake = fake
             self.real = real
@@ -77,11 +85,12 @@ public struct TokenMap: Sendable {
             self.consentDisplayName = consentDisplayName
         }
 
-        /// This entry with another real value, everything else kept.
-        public func withReal(_ real: String) -> Entry {
+        /// This entry with another real value (resolved from `resolvedFrom`,
+        /// if a 1Password reference), everything else kept.
+        public func withReal(_ real: String, resolvedFrom: String? = nil) -> Entry {
             Entry(fake: fake, real: real, host: host, header: header, body: body,
                   acceptSiblings: acceptSiblings, consentCredentialID: consentCredentialID,
-                  consentDisplayName: consentDisplayName, paths: paths)
+                  consentDisplayName: consentDisplayName, paths: paths, resolvedFrom: resolvedFrom)
         }
 
         /// A real value a refresher fills in later: an exec plugin's
@@ -101,13 +110,22 @@ public struct TokenMap: Sendable {
     /// token before the plugin runs"). Its consent metadata is the fresh
     /// one's. Entries whose fakes weren't reissued stay, so a process still
     /// holding an old fake finishes its work.
+    /// A 1Password reference takes only the secret resolved from that same
+    /// reference: a fake that doesn't change with the secret (an OpenShell
+    /// placeholder) kept the old secret when the credential became a new
+    /// `op://` value (Finding CWE-670, "Live merge keeps the previous secret
+    /// when a credential becomes an op:// reference"). An exec placeholder's
+    /// fake is reused only for the same plugin and host, so it carries.
     public static func liveMerge(fresh: [Entry], current: [Entry]) -> TokenMap {
         let freshFakes = Set(fresh.map(\.fake))
         let carried = fresh.map { e -> Entry in
             guard e.isPlaceholder,
                   let held = current.first(where: { $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder })
             else { return e }
-            return e.withReal(held.real)
+            if let ref = OnePasswordCLI.reference(in: e.real) {
+                return held.resolvedFrom == ref ? e.withReal(held.real, resolvedFrom: ref) : e
+            }
+            return e.withReal(held.real, resolvedFrom: held.resolvedFrom)
         }
         return TokenMap(entries: carried + current.filter { !freshFakes.contains($0.fake) })
     }

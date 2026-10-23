@@ -153,7 +153,8 @@ struct LiveRefreshPlaceholderTests {
     func mergeCarriesResolved() {
         let current = [
             TokenMap.Entry(fake: "brm-k8s-a", real: "resolved-exec", host: "k8s.example.com"),
-            TokenMap.Entry(fake: "brm-op-b", real: "resolved-op", host: "api.example.com"),
+            TokenMap.Entry(fake: "brm-op-b", real: "resolved-op", host: "api.example.com",
+                           resolvedFrom: "op://vault/item/field"),
             TokenMap.Entry(fake: "brm-old", real: "old-real", host: "api.example.com"),
         ]
         let fresh = [
@@ -176,6 +177,57 @@ struct LiveRefreshPlaceholderTests {
         #expect(merged.count == 6)
     }
 
+    /// Finding (CWE-670): "Live merge keeps the previous secret when a
+    /// credential becomes an op:// reference". With OpenShell credential
+    /// placeholders the fake is `openshell:resolve:env:VAR` whatever the
+    /// secret: a literal token saved as a new `op://` value kept the old
+    /// secret for the rest of the session, and the 1Password loop -- started
+    /// at launch for a fake it re-derived itself -- never resolved it.
+    @Test("a 1Password value takes only the secret resolved from that same reference; the loop follows the map's fakes")
+    @MainActor func opReferenceCarriesOnlyItsOwnSecret() {
+        let fake = "openshell:resolve:env:GITHUB_TOKEN"
+        let fresh = [TokenMap.Entry(fake: fake, real: "op://vault/item/token", host: "github.com",
+                                    paths: ["/repos/**"])]
+        func merged(_ held: TokenMap.Entry) -> TokenMap.Entry? {
+            TokenMap.liveMerge(fresh: fresh, current: [held]).entries.first { $0.fake == fake && $0.host == "github.com" }
+        }
+        // The old literal secret: not this reference's, so not carried.
+        #expect(merged(TokenMap.Entry(fake: fake, real: "ghp_old", host: "github.com"))?.real == "op://vault/item/token")
+        // Resolved from another reference: not carried either.
+        #expect(merged(TokenMap.Entry(fake: fake, real: "ghp_other", host: "github.com",
+                                      resolvedFrom: "op://vault/other/token"))?.real == "op://vault/item/token")
+        // Resolved from this very reference: kept (no blank between pushes).
+        let same = merged(TokenMap.Entry(fake: fake, real: "ghp_new", host: "github.com",
+                                         resolvedFrom: "op://vault/item/token"))
+        #expect(same?.real == "ghp_new" && same?.resolvedFrom == "op://vault/item/token" && same?.paths == ["/repos/**"])
+
+        // The loop resolves every op:// value at the fake the map holds, a
+        // placeholder included, one Ref per fake and reference with its hosts.
+        let entries = fresh + [
+            TokenMap.Entry(fake: fake, real: "op://vault/item/token", host: "api.github.com"),
+            TokenMap.Entry(fake: "brm_x", real: "literal", host: "example.com"),
+        ]
+        let refs = OnePasswordRefresher.refs(in: entries)
+        #expect(refs.count == 1 && refs.first?.fake == fake && refs.first?.opRef == "op://vault/item/token")
+        #expect(refs.first?.hosts == ["github.com", "api.github.com"])
+
+        // Starting it blanks a still-unresolved value (keeping the entry's
+        // path binding), and leaves one already resolved from the reference.
+        let swapper = TokenSwapper(consent: ConsentBroker())
+        let pid = UUID()
+        swapper.setMap(TokenMap(entries: [
+            TokenMap.Entry(fake: fake, real: "op://vault/item/token", host: "github.com", paths: ["/repos/**"]),
+            TokenMap.Entry(fake: fake, real: "ghp_new", host: "api.github.com", resolvedFrom: "op://vault/item/token"),
+        ]), for: pid)
+        let loop = OnePasswordRefresher()
+        loop.start(profileID: pid, refs: refs, swapper: swapper)
+        loop.stop(profileID: pid)   // before its task runs: no `op` call from a test
+        let after = swapper.entries(for: pid)
+        let blanked = after.first { $0.host == "github.com" }
+        #expect(blanked?.real == "" && blanked?.paths == ["/repos/**"])
+        #expect(after.first { $0.host == "api.github.com" }?.real == "ghp_new")
+    }
+
     @Test("the live push re-materializes with the poller's contexts and merges, not replaces")
     func livePushWiring() throws {
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -185,5 +237,6 @@ struct LiveRefreshPlaceholderTests {
         let body = src[live.upperBound...].prefix(6000)
         #expect(body.contains("reusingExec: engine.kubeExecContexts(for: profile.id)"))
         #expect(body.contains("TokenMap.liveMerge(fresh: fresh.entries"))
+        #expect(body.contains("refs: OnePasswordRefresher.refs(in: fresh.entries)"))
     }
 }
