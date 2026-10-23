@@ -5046,6 +5046,18 @@ public final class ProfileStore {
             elif [ -n "${drained:-}" ] || [ "$signal" = "working" ]; then
               rm -f "$owed" 2>/dev/null
             fi
+            # The mark holds for a note not handed over yet: with none left for
+            # this window (handed over, or pruned by the host), it goes. Window
+            # indexes are reused -- a new tab numbered like a closed one isn't
+            # owed that tab's note (Finding CWE-670, "Owed-note mark follows a
+            # reused tmux window after the note is gone").
+            if [ -e "$owed" ]; then
+              left=""
+              for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
+                if [ -e "$n" ] && [ ! -e "$HOME/.bromure/policy-claims/${n##*/}" ]; then left=1; break; fi
+              done
+              [ -n "$left" ] || rm -f "$owed" 2>/dev/null
+            fi
             if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
             # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
             # agent-tool-<idx>.jsonl — the call's id, tool, command and the
