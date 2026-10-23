@@ -7,7 +7,8 @@ import Testing
 /// agent may evict a pin for were every live session's -- and the store
 /// adopts any guest tmux window labelled as an agent, @display and
 /// @worktree included. 64 such windows held every slot for good. Only a tab
-/// a launch of the host's own bound is spared now.
+/// a launch of the host's own opened is spared now, kept on the tab itself
+/// (reconcile moves tabs between sessions on guest-settable options).
 @Suite("Policy steering: only host-launched tabs are spared")
 @MainActor
 struct HostLaunchedPinTests {
@@ -17,17 +18,21 @@ struct HostLaunchedPinTests {
         model.rosterLive = true
         return SessionListModel.VMEntry(id: id, name: "ws", accentHex: "#000000", model: model)
     }
+    private func launch(_ store: AgentSessionStore, _ ws: UUID) -> AgentSession {
+        var s = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
+        s.launchingSince = Date(); s.launchBaselineIndex = 0; s.launchDisplay = "Fix login"
+        store.upsert(s)
+        return s
+    }
+    private let shell = TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")
+    private let mine = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/app", display: "Fix login")
 
     @Test("adopted guest tabs aren't host windows, whatever their options say; the launched one is")
     func adoptedArentSpared() {
         let store = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("sessions-\(UUID().uuidString).json"))
         let ws = UUID()
-        var launch = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
-        launch.launchingSince = Date(); launch.launchBaselineIndex = 0; launch.launchDisplay = "Fix login"
-        store.upsert(launch)
-        let shell = TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")
-        let mine = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/app", display: "Fix login")
+        let l = launch(store, ws)
         // Guest-made windows: an agent @label, a @display, a wt/ @worktree.
         let squatters = (2..<70).map { i in
             TabsModel.Tab(label: "claude", index: i, cwd: "/home/ubuntu/w\(i)",
@@ -35,9 +40,9 @@ struct HostLaunchedPinTests {
                           display: i.isMultiple(of: 3) ? "Squat \(i)" : nil)
         }
         store.reconcile(entries: [roster(ws, [shell, mine] + squatters)])
-        #expect(store.session(launch.id)?.windowIndex == 1)
+        #expect(store.session(l.id)?.windowIndex == 1)
         #expect(store.sessions.filter { $0.profileID == ws && $0.windowIndex != nil }.count > PolicySteering.pinCap)
-        let host = ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws)
+        let host = store.hostLaunchedWindows(profileID: ws)
         #expect(host == [1])
 
         // The guest's windows fill every slot; the host tab's agent still gets one.
@@ -47,84 +52,66 @@ struct HostLaunchedPinTests {
         }
         s.noteAgent(profileID: ws, pid: 500, window: 1, hostWindows: host)
         #expect(s.agentWindows(profileID: ws).contains(1))
-
-        // Unbound before the probe read it (a guest @display edit makes
-        // reconcile do that) and bound back to its index: still the launch's.
-        store.mutate(launch.id) { $0.windowIndex = nil }
-        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws) == [1])
-        // Bound to another index: not.
-        store.mutate(launch.id) { $0.windowIndex = 7 }
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
     }
 
-    /// Review of the above: the mark was the index only, so a guest @display
-    /// edit (reconcile unbinds the tab, then binds it back) or anything else
-    /// that rebinds it dropped the host's reservation.
-    @Test("once probed, the launched tab stays the host's across a rebind and a restart; another window or boot doesn't")
+    /// Review: a guest @display edit makes reconcile unbind the launched tab
+    /// and adopt it as a new session; a mark kept on the session went with it.
+    @Test("the launched tab stays the host's when the guest renames it and reconcile adopts it anew")
+    func survivesGuestRename() {
+        let store = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("sessions-\(UUID().uuidString).json"))
+        let ws = UUID()
+        let l = launch(store, ws)
+        store.reconcile(entries: [roster(ws, [shell, mine])])
+        // Before the first probe: @display and the name rewritten.
+        let renamed = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/app", display: "Not yours")
+        store.reconcile(entries: [roster(ws, [shell, renamed])])
+        #expect(store.session(l.id)?.windowIndex != 1)
+        #expect(store.hostLaunchedWindows(profileID: ws) == [1])
+    }
+
+    @Test("sealed by the probe: kept across a restart; another window, a closed tab, or a reboot drop it")
     func sealedByWindowID() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("sessions-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
         let store = AgentSessionStore(fileURL: url)
         let ws = UUID()
-        var launch = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
-        launch.launchingSince = Date(); launch.launchBaselineIndex = 0; launch.launchDisplay = "Fix login"
-        store.upsert(launch)
-        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0),
-                                              TabsModel.Tab(label: "claude", index: 1, display: "Fix login")])])
-        #expect(store.checkBoot(launch.id, bootID: "boot-1"))
-        #expect(store.checkWindow(launch.id, windowID: "@4"))
-        func spared(_ st: AgentSessionStore) -> Set<Int> { ACAppDelegate.hostAgentWindows(st.sessions, profileID: ws) }
-        #expect(spared(store) == [1])
+        let l = launch(store, ws)
+        store.reconcile(entries: [roster(ws, [shell, mine])])
+        _ = store.checkBoot(l.id, bootID: "boot-1")
+        _ = store.checkWindow(l.id, windowID: "@4")
+        #expect(store.hostLaunchedTabs[ws]?[1] == .some("boot-1|@4"))
+        // An app restart keeps a sealed tab.
+        let restarted = AgentSessionStore(fileURL: url)
+        #expect(restarted.hostLaunchedWindows(profileID: ws) == [1])
+        // Any session probed there seeing another window: not the host's.
+        var other = AgentSession(profileID: ws, tool: .claude, title: "x", cwd: "~", windowIndex: 1)
+        other.bootID = "boot-1"
+        restarted.upsert(other)
+        _ = restarted.checkWindow(other.id, windowID: "@9")
+        #expect(restarted.hostLaunchedWindows(profileID: ws).isEmpty)
 
-        // Bound elsewhere then back (the index mark is gone), then probed:
-        // the same window, so still the host's.
-        store.mutate(launch.id) { $0.windowIndex = 3; $0.bootID = nil }
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        #expect(spared(store).isEmpty)                       // not proven yet
-        _ = store.checkBoot(launch.id, bootID: "boot-1")
-        _ = store.checkWindow(launch.id, windowID: "@4")
-        #expect(spared(store) == [1])
-        // An app restart keeps it.
-        #expect(spared(AgentSessionStore(fileURL: url)) == [1])
-        // Another tmux window at that index isn't it…
-        store.mutate(launch.id) { $0.windowIndex = nil }
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        _ = store.checkBoot(launch.id, bootID: "boot-1")
-        _ = store.checkWindow(launch.id, windowID: "@9")
-        #expect(spared(store).isEmpty)
-        // …nor the same window id after a reboot (tmux numbers start over).
-        store.mutate(launch.id) { $0.windowIndex = 3; $0.bootID = nil }
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        _ = store.checkBoot(launch.id, bootID: "boot-2")
-        _ = store.checkWindow(launch.id, windowID: "@4")
-        #expect(spared(store).isEmpty)
-    }
+        // The tab closes (its index leaves the live roster): dropped.
+        store.reconcile(entries: [roster(ws, [shell])])
+        #expect(store.hostLaunchedWindows(profileID: ws).isEmpty)
 
-    @Test("only the launch binding marks a tab as the host's")
-    func onlyStep2Marks() throws {
-        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/AgentCoding/AgentSessions.swift"), encoding: .utf8)
-        #expect(src.components(separatedBy: "hostLaunchedWindow = tab.index").count == 2)
-        #expect(src.contains("s.windowIndex = tab.index\n                        s.hostLaunchedWindow = tab.index"))
-    }
-
-    @Test("a reboot drops an unsealed launch mark: the index is someone else's now")
-    func rebootDropsIndexMark() {
-        let store = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+        // A reboot drops every one in the workspace.
+        let again = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("sessions-\(UUID().uuidString).json"))
-        let ws = UUID()
-        var launch = AgentSession(profileID: ws, tool: .claude, title: "Fix login", cwd: "~/app")
-        launch.launchingSince = Date(); launch.launchBaselineIndex = 0; launch.launchDisplay = "Fix login"
-        store.upsert(launch)
-        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0),
-                                              TabsModel.Tab(label: "claude", index: 1, display: "Fix login")])])
-        _ = store.checkBoot(launch.id, bootID: "boot-1")
-        #expect(!store.checkBoot(launch.id, bootID: "boot-2"))   // rebooted: unbound
-        store.mutate(launch.id) { $0.windowIndex = 1 }
-        #expect(ACAppDelegate.hostAgentWindows(store.sessions, profileID: ws).isEmpty)
+        let l2 = launch(again, ws)
+        again.reconcile(entries: [roster(ws, [shell, mine])])
+        _ = again.checkBoot(l2.id, bootID: "boot-1")
+        #expect(again.hostLaunchedWindows(profileID: ws) == [1])
+        _ = again.checkBoot(l2.id, bootID: "boot-2")
+        #expect(again.hostLaunchedWindows(profileID: ws).isEmpty)
+    }
+
+    @Test("only the launch binding reserves a tab; the delegate reads the store's set")
+    func wiring() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/AgentSessions.swift"), encoding: .utf8)
+        #expect(src.components(separatedBy: "[tab.index] = .some(nil)").count == 2)
+        let delivery = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/PolicySteeringDelivery.swift"), encoding: .utf8)
+        #expect(delivery.contains("agentSessionStore.hostLaunchedWindows(profileID: profileID)"))
     }
 }

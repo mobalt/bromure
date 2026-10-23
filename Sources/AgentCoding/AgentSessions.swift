@@ -217,10 +217,6 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         didSet {
             if oldValue != windowIndex {
                 windowID = nil; agentProcessStart = nil
-                // Kept through an unbind (reconcile unbinds a tab whose
-                // @display changed -- a guest edit): bound back to that
-                // index it is the launch's tab again until the probe seals it.
-                if let w = windowIndex, w != hostLaunchedWindow { hostLaunchedWindow = nil }
                 agentProcessPID = nil; agentProcessUptime = nil
                 if windowIndex != nil { releasedWindowIndex = nil }
             }
@@ -254,35 +250,6 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// told apart from the ones already there.
     var launchingSince: Date?
     var launchBaselineIndex: Int?
-    /// The tab a launch of ours bound (reconcile step 2: a tab the host's
-    /// own launch opened, past its baseline) -- set only there, and
-    /// forgotten once the session is bound to another index or its machine
-    /// rebooted. At most one per launch: what a guest could borrow is
-    /// bounded by the host's own sessions, never the pin cap. Tabs the store
-    /// adopted from the guest roster never have it: their @label, @display
-    /// and @worktree are any guest process's to set (Finding CWE-807,
-    /// "Guest-adopted tmux windows are spared from pid-pin eviction, so a
-    /// guest can still fill every slot").
-    var hostLaunchedWindow: Int?
-    /// That tab for good, once the probe has read it: "<boot id>|<tmux
-    /// window id>". tmux picks the id and never reuses it while its server
-    /// lives, and the boot id pins the server: a rebind onto the same
-    /// window (a guest @display edit unbinds it) or an app restart keeps it
-    /// the host's; any other window, or the same id after a reboot, isn't.
-    var hostLaunchedTab: String?
-    /// The session's tab is the one a host launch opened.
-    var isOnHostLaunchedTab: Bool {
-        guard windowIndex != nil else { return false }
-        if windowIndex == hostLaunchedWindow { return true }
-        guard let b = bootID, let w = windowID, let tab = hostLaunchedTab else { return false }
-        return tab == b + "|" + w
-    }
-    /// The probe has read the launched tab's window and boot: keep it.
-    mutating func sealHostLaunchedTab() {
-        guard windowIndex != nil, windowIndex == hostLaunchedWindow,
-              let b = bootID, let w = windowID else { return }
-        hostLaunchedTab = b + "|" + w
-    }
     var endedAt: Date?
     var lastSeenAt: Date?
     var lastError: String?
@@ -634,6 +601,36 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 @Observable
 final class AgentSessionStore {
     private(set) var sessions: [AgentSession] = []
+    /// Per workspace, the tabs a launch of the host's own opened (reconcile
+    /// step 2, past the launch baseline) → once a probe has read the tab,
+    /// "<boot id>|<tmux window id>". Kept on the tab, not on a session:
+    /// reconcile moves a tab between sessions on guest-settable options
+    /// (@display, @label), and the store adopts any guest window labelled
+    /// as an agent, so neither a session nor its options can say a tab is
+    /// the host's (Finding CWE-807, "Guest-adopted tmux windows are spared
+    /// from pid-pin eviction, so a guest can still fill every slot").
+    /// Dropped once the index leaves the live roster, a probe reads another
+    /// window or boot there, or the machine reboots. At most one per launch.
+    private(set) var hostLaunchedTabs: [UUID: [Int: String?]] = [:]
+
+    /// The windows of the tabs the host launched in `profileID` that are
+    /// still open.
+    func hostLaunchedWindows(profileID: UUID) -> Set<Int> {
+        Set(hostLaunchedTabs[profileID]?.keys.map { $0 } ?? [])
+    }
+
+    /// A probe read the window and boot at a session's index: seal an
+    /// unsealed host tab there, or drop a sealed one it contradicts.
+    private func noteProbedTab(_ s: AgentSession) {
+        guard let w = s.windowIndex, let boot = s.bootID, let wid = s.windowID,
+              let entry = hostLaunchedTabs[s.profileID]?[w] else { return }
+        let seen = boot + "|" + wid
+        if let sealed = entry {
+            if sealed != seen { hostLaunchedTabs[s.profileID]?[w] = nil }
+        } else {
+            hostLaunchedTabs[s.profileID]?[w] = .some(seen)
+        }
+    }
     private let fileURL: URL
     /// Sessions whose tab was never found are given up after this long.
     static let launchTimeout: TimeInterval = 180
@@ -1047,14 +1044,14 @@ final class AgentSessionStore {
               sessions[i].windowIndex != nil else { return false }
         if sessions[i].bootID == nil {
             sessions[i].bootID = bootID
-            sessions[i].sealHostLaunchedTab()
+            noteProbedTab(sessions[i])
             save()
             return true
         }
         guard sessions[i].bootID != bootID else { return true }
+        hostLaunchedTabs[sessions[i].profileID] = nil   // a reboot: indices start over
         sessions[i].windowIndex = nil
         sessions[i].bootID = nil
-        sessions[i].hostLaunchedWindow = nil   // indices start over
         if !sessions[i].isLaunching { sessions[i].endedAt = now }
         sessions[i].agentAlive = nil
         save()
@@ -1075,7 +1072,7 @@ final class AgentSessionStore {
         if sessions[i].windowID == nil {
             if sessions[i].isArchived || sessions[i].isDeleted { return false }
             sessions[i].windowID = windowID
-            sessions[i].sealHostLaunchedTab()
+            noteProbedTab(sessions[i])
             save()
             return true
         }
@@ -1282,6 +1279,11 @@ final class AgentSessionStore {
             // saved pill. Only the guest's own roster counts.
             guard !tabs.isEmpty, entry.model.rosterLive else { continue }
             let indices = Set(tabs.map(\.index))
+            // A host tab that closed: its index may go to anyone next.
+            if let held = hostLaunchedTabs[entry.id], !held.keys.allSatisfy(indices.contains) {
+                hostLaunchedTabs[entry.id] = held.filter { indices.contains($0.key) }
+                changed = true
+            }
             // 0. Stale bindings: after a reboot the window indices start over,
             // so a session's index may now be another tab (one we opened
             // under a different name). Unbind first, so the launch waiting
@@ -1358,8 +1360,7 @@ final class AgentSessionStore {
                     }
                     if let tab = Self.launchTab(for: s, in: candidates, soleLaunch: soleLaunch) {
                         s.windowIndex = tab.index
-                        s.hostLaunchedWindow = tab.index
-                        s.hostLaunchedTab = nil   // a new tab: sealed once probed
+                        hostLaunchedTabs[entry.id, default: [:]][tab.index] = .some(nil)   // sealed once probed
                         s.bootID = nil   // stamped by the next probe
                         s.launchingSince = nil
                         s.launchBaselineIndex = nil
@@ -1602,13 +1603,23 @@ final class AgentSessionStore {
 
     // MARK: Persistence
 
-    private struct FilePayload: Codable { var sessions: [AgentSession] }
+    private struct FilePayload: Codable {
+        var sessions: [AgentSession]
+        /// Sealed host tabs only ("<boot>|<window id>"): an unsealed one has
+        /// nothing to check a restored roster against.
+        var hostLaunchedTabs: [String: [String: String]]? = nil
+    }
 
     private func load() {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: fileURL),
               let payload = try? d.decode(FilePayload.self, from: data) else { return }
+        for (pid, held) in payload.hostLaunchedTabs ?? [:] {
+            guard let id = UUID(uuidString: pid) else { continue }
+            let tabs = Dictionary(uniqueKeysWithValues: held.compactMap { w, v in Int(w).map { ($0, Optional(v)) } })
+            if !tabs.isEmpty { hostLaunchedTabs[id] = tabs }
+        }
         // A launch can't survive a restart; whatever it made is adopted. A
         // liveness verdict is only as fresh as the last probe.
         sessions = payload.sessions.map { s in
@@ -1656,7 +1667,11 @@ final class AgentSessionStore {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? e.encode(FilePayload(sessions: sessions)) else { return }
+        let tabs = Dictionary(uniqueKeysWithValues: hostLaunchedTabs.map { pid, held in
+            (pid.uuidString, Dictionary(uniqueKeysWithValues: held.compactMap { w, v in v.map { (String(w), $0) } }))
+        }.filter { !$0.1.isEmpty })
+        guard let data = try? e.encode(FilePayload(sessions: sessions, hostLaunchedTabs: tabs.isEmpty ? nil : tabs))
+        else { return }
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: fileURL, options: .atomic)

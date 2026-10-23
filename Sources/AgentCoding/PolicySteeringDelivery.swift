@@ -36,22 +36,15 @@ extension ACAppDelegate {
     }
 
     /// The windows of the agent tabs the host itself opened in a workspace
-    /// (its live sessions bound by its own launch): the ones
-    /// `PolicySteering.noteAgent` keeps a slot for, whatever the guest wrote.
-    /// Not a session adopted from the guest roster: any guest process can
-    /// open a tmux window labelled as an agent (Finding CWE-807,
+    /// (bound by its own launch, `AgentSessionStore.hostLaunchedTabs`): the
+    /// ones `PolicySteering.noteAgent` keeps a slot for, whatever the guest
+    /// wrote. Not a session adopted from the guest roster: any guest process
+    /// can open a tmux window labelled as an agent (Finding CWE-807,
     /// "Guest-adopted tmux windows are spared from pid-pin eviction, so a
     /// guest can still fill every slot").
     @MainActor
     func hostAgentWindows(profileID: UUID) -> Set<Int> {
-        Self.hostAgentWindows(agentSessionStore.sessions, profileID: profileID)
-    }
-
-    nonisolated static func hostAgentWindows(_ sessions: [AgentSession], profileID: UUID) -> Set<Int> {
-        Set(sessions.compactMap { s in
-            s.profileID == profileID && !s.isDeleted && !s.isArchived && !s.hasEnded && s.isOnHostLaunchedTab
-                ? s.windowIndex : nil
-        })
+        agentSessionStore.hostLaunchedWindows(profileID: profileID)
     }
 
     /// True once the note reached a tab: a Claude note file is in place (its
