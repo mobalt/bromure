@@ -3653,14 +3653,43 @@ public final class ProfileStore {
     /// gave up) can't turn it into a kept workspace (Finding CWE-459, "vm
     /// run --rm reboot keeps the workspace only in memory, so quit during
     /// relaunch retains the disk"). It goes with the directory.
+    /// It holds the pid of the process that owns the workspace (made it, or
+    /// boots it): two processes share this store (the login agent and the
+    /// GUI), and only the owner -- or anyone once the owner is gone -- may
+    /// sweep it.
     static let ephemeralMarker = "ephemeral"
 
-    public func markEphemeral(_ profile: Profile) {
-        try? Data().write(to: profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker))
+    private func ephemeralMarkerURL(_ profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker)
+    }
+
+    /// Mark (or re-claim) `profile` as `vm run --rm`, owned by `owner`.
+    public func markEphemeral(_ profile: Profile, owner: pid_t = getpid()) {
+        try? Data(String(owner).utf8).write(to: ephemeralMarkerURL(profile), options: .atomic)
     }
 
     public func isEphemeral(_ profile: Profile) -> Bool {
-        fm.fileExists(atPath: profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker).path)
+        fm.fileExists(atPath: ephemeralMarkerURL(profile).path)
+    }
+
+    /// The marker's owning pid; nil with no marker, 0 when unreadable.
+    public func ephemeralOwner(_ profile: Profile) -> pid_t? {
+        guard isEphemeral(profile) else { return nil }
+        let text = (try? String(contentsOf: ephemeralMarkerURL(profile), encoding: .utf8)) ?? ""
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Whether this process may delete a stopped `--rm` workspace: it owns
+    /// it (`mine`), or (`!mine`, a launch) its owner is no longer running.
+    /// A pid that's alive again under another program errs on keeping it.
+    public func ephemeralSweepable(_ profile: Profile, mine: Bool, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        if mine { return owner == getpid() }
+        return owner != getpid() && (owner <= 0 || !isAlive(owner))
+    }
+
+    public static func processAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
     }
 
     public func diskURL(for profile: Profile) -> URL {

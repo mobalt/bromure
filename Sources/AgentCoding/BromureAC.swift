@@ -3646,8 +3646,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
-        // a crash): nothing runs yet, so every one is over.
-        sweepStoppedEphemeral()
+        // a crash) and whose process is gone.
+        sweepStoppedEphemeral(atLaunch: true)
         // First launch after the model-management redesign: seed the global
         // ModelSettings from what the user already configured per-workspace so
         // the new "Models" pane opens pre-populated. Idempotent once configured.
@@ -12444,6 +12444,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // began during a prompt above keeps the disk, and this launch leaves
         // no pane behind.
         guard bootsInFlight.begin(profile.id) else { return }
+        // A `--rm` workspace this process boots is this process's to sweep.
+        if store.isEphemeral(profile) { store.markEphemeral(profile) }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -15637,15 +15639,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return inMemory || store.isEphemeral(p)
     }
 
-    /// Delete every `vm run --rm` workspace that isn't running and whose
-    /// disk no boot holds -- at a quit or a caught signal (a reboot's
-    /// relaunch can't finish then), and at launch (whatever a crash left:
-    /// its VM died with that process). A running one's stop deletes it; a
-    /// boot under way is left to the next launch's sweep.
-    func sweepStoppedEphemeral() {
+    /// Delete the `vm run --rm` workspaces that are over: at a quit or a
+    /// caught signal (`atLaunch` false; a reboot's relaunch can't finish
+    /// then), the ones THIS process owns that aren't running and whose disk
+    /// no boot of its holds; at launch, the ones whose owning process is
+    /// gone (it quit uncleanly or crashed: their VM died with it). Another
+    /// live process's -- the login agent's, the GUI's -- are never touched:
+    /// running sessions and disk holds are per process. A running one's
+    /// stop deletes it; a boot under way is left to the next launch's sweep.
+    func sweepStoppedEphemeral(atLaunch: Bool = false) {
         var deleted = false
         for p in profiles where runningSessions[p.id] == nil && !diskInUse(p.id)
-            && (ephemeralProfiles.contains(p.id) || store.isEphemeral(p)) {
+            && store.ephemeralSweepable(p, mine: !atLaunch) {
             ephemeralProfiles.remove(p.id)
             rebootingProfiles.remove(p.id)
             try? store.delete(p)
