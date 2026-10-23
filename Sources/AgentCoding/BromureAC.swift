@@ -12224,6 +12224,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 alert.runModal()
                 dropAbandonedEphemeral(profile.id)
                 return
+            case .markCleared:
+                showMarkCleared(profile)
+                dropAbandonedEphemeral(profile.id)
+                return
             }
             // Fall through — disk + home are gone, flag is cleared,
             // launch path now treats this like any first launch.
@@ -14561,6 +14565,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
                 dropAbandonedEphemeral(profile.id)
                 return
+            case .markCleared:
+                launchQuestions.end(profile.id); asking = false
+                let (title, message) = Self.markClearedParts(profile.name)
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
+                return
             }
         }
         let current = readCurrentBaseVersion()
@@ -14626,15 +14638,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// The wipe a confirmed compromise prompt performs (disk + home, keep
-    /// tokens/settings), plus the bookkeeping that goes with it.
-    /// `.diskInUse`: a boot began while the prompt was up (it has the disk
-    /// open), so nothing is wiped and this launch stops. `.failed`: some of
+    /// tokens/settings), plus the bookkeeping that goes with it. The mark is
+    /// looked at again: the question was up a while, and a clear (the
+    /// sidebar, another window, a fat client) may have answered it the other
+    /// way meanwhile -- that disk is the user's to keep. `.failed`: some of
     /// it couldn't be erased, so it stays marked.
-    @MainActor func wipeCompromised(profile: Profile) -> CompromiseWipe {
-        if diskInUse(profile.id) { return .diskInUse }
+    @MainActor func wipeCompromised(profile: Profile) -> CompromiseWipeStep {
         let session = SessionDisk(
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
+        switch Self.compromiseStep(.wipe, marked: session.isCompromised,
+                                   last: session.lastCompromiseResolution) {
+        case .already: return .alreadyWiped
+        case .undone: return .markCleared
+        case .perform: break
+        }
+        if diskInUse(profile.id) { return .diskInUse }
         do {
             try session.wipeForCompromise()
         } catch let e as SessionDisk.WipeIncomplete {
@@ -14660,23 +14679,75 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                left.isEmpty ? "?" : left.joined(separator: ", "))
     }
 
+    /// What a wipe or a clear does about the mark it was asked to resolve.
+    enum CompromiseStep: Equatable {
+        /// Still marked: do it.
+        case perform
+        /// Gone the way asked (wiped since the mark, or cleared): nothing to do.
+        case already
+        /// Gone the other way (or nobody knows how): the asked one didn't happen.
+        case undone
+    }
+
+    /// The mark is checked when the answer comes, not when the question was put.
+    static func compromiseStep(_ action: CompromiseRemedy, marked: Bool,
+                               last: CompromiseRemedy?) -> CompromiseStep {
+        if marked { return .perform }
+        if last == action { return .already }
+        // Unmarked with no record: a clear has nothing left to do; a wipe
+        // can't say the disk was erased.
+        return action == .clear && last == nil ? .already : .undone
+    }
+
+    /// How `wipeCompromised` ended.
+    enum CompromiseWipeStep: Equatable {
+        case wiped
+        /// Another wipe got there first: the disk is erased all the same.
+        case alreadyWiped
+        /// Cleared as a false alarm while the question was up: kept as is.
+        case markCleared
+        /// A boot has the disk open: nothing was wiped.
+        case diskInUse
+        /// Wiped, but these (file names) couldn't be erased: still marked.
+        case failed([String])
+    }
+
+    /// An open "Wipe and Launch" question, per workspace, and how to take it
+    /// down: a clear answers it.
+    private var compromiseQuestionDismissers: [UUID: () -> Void] = [:]
+
     /// The sidebar's "Wipe and Restore…" / "Clear Compromised Mark…" on a
-    /// workspace marked compromised. nil when done (or not marked), else why
-    /// not. A wipe needs the disk closed; clearing keeps the disk as it is.
+    /// workspace marked compromised. nil when done, else why not. A wipe
+    /// needs the disk closed; clearing keeps the disk as it is. Two of them
+    /// (two windows, a fat client) can be confirmed at once: the second one
+    /// hears what the first did, never a success for what it didn't do.
     @MainActor func resolveCompromise(_ profile: Profile, _ action: CompromiseRemedy) -> String? {
-        guard SessionDisk.isCompromised(profile: profile, store: store) else { return nil }
         switch action {
         case .wipe:
             switch wipeCompromised(profile: profile) {
-            case .wiped, .cancelled: break
+            case .wiped, .alreadyWiped: break
             case .diskInUse:
                 return NSLocalizedString("Shut the workspace down first: its disk is in use.",
+                                         comment: "compromised workspace")
+            case .markCleared:
+                return NSLocalizedString("Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk.",
                                          comment: "compromised workspace")
             case .failed(let left):
                 return Self.wipeFailedMessage(left)
             }
         case .clear:
-            SessionDisk(profile: profile, store: store, baseDiskURL: imageManager.baseDiskURL).clearCompromised()
+            let session = SessionDisk(profile: profile, store: store, baseDiskURL: imageManager.baseDiskURL)
+            switch Self.compromiseStep(.clear, marked: session.isCompromised,
+                                       last: session.lastCompromiseResolution) {
+            case .already: return nil
+            case .undone:
+                return NSLocalizedString("It was already wiped: its disk and home were erased, and it boots fresh next time.",
+                                         comment: "compromised workspace")
+            case .perform: break
+            }
+            session.clearCompromisedAsFalseAlarm()
+            // A "Wipe and Launch" still up for it is answered now.
+            compromiseQuestionDismissers.removeValue(forKey: profile.id)?()
             FileHandle.standardError.write(Data("[compromise] mark cleared on \(profile.name) (\(profile.id)) by the user\n".utf8))
             BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "vm.compromise_cleared",
                                                 eventData: ["reason": .string("false alarm")])
@@ -14742,11 +14813,35 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         /// Wiped, but these (file names) couldn't be erased: still marked,
         /// and nothing boots.
         case failed([String])
+        /// The mark was cleared as a false alarm while the question was up
+        /// (which takes it down): nothing was wiped, nothing boots.
+        case markCleared
     }
 
-    static func compromiseWipe(confirmed: Bool, wiped: () -> CompromiseWipe) -> CompromiseWipe {
+    static func compromiseWipe(confirmed: Bool, wiped: () -> CompromiseWipeStep) -> CompromiseWipe {
         guard confirmed else { return .cancelled }
-        return wiped()
+        switch wiped() {
+        case .wiped, .alreadyWiped: return .wiped
+        case .diskInUse: return .diskInUse
+        case .markCleared: return .markCleared
+        case .failed(let left): return .failed(left)
+        }
+    }
+
+    static func markClearedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk.",
+            comment: "compromise wipe skipped"))
+    }
+
+    private func showMarkCleared(_ profile: Profile) {
+        let (title, message) = Self.markClearedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
     }
 
     static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
@@ -14787,8 +14882,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // first button so the user has to click it explicitly.
             alert.buttons.first?.keyEquivalent = ""
             NSApp.activate(ignoringOtherApps: true)
-            let confirmed = alert.runModal() == .alertFirstButtonReturn
-            return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
+            compromiseQuestionDismissers[profile.id] = { [weak alert] in
+                if let alert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
+            }
+            let answer = alert.runModal()
+            compromiseQuestionDismissers[profile.id] = nil
+            if answer == .abort { return .markCleared }
+            return Self.compromiseWipe(confirmed: answer == .alertFirstButtonReturn,
+                                       wiped: { wipeCompromised(profile: profile) })
         }
     }
 
@@ -14799,12 +14900,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         // Fallback (timeout / client gone) is Cancel — never auto-wipe.
-        let confirmed = await PendingPromptBroker.shared.askAsync(
-            profileID: profile.id, title: title, message: info,
-            buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
-                      NSLocalizedString("Cancel", comment: "")],
-            fallback: 1) == 0
-        return Self.compromiseWipe(confirmed: confirmed, wiped: { wipeCompromised(profile: profile) })
+        let ask = Task { @MainActor in
+            await PendingPromptBroker.shared.answerAsync(
+                profileID: profile.id, title: title, message: info,
+                buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
+                          NSLocalizedString("Cancel", comment: "")],
+                fallback: 1)
+        }
+        final class Dismissed { var yes = false }
+        let dismissed = Dismissed()
+        compromiseQuestionDismissers[profile.id] = { dismissed.yes = true; ask.cancel() }
+        // The start's own cancellation still reaches the question.
+        let answer = await withTaskCancellationHandler { await ask.value } onCancel: { ask.cancel() }
+        compromiseQuestionDismissers[profile.id] = nil
+        if dismissed.yes { return .markCleared }
+        return Self.compromiseWipe(confirmed: answer == 0, wiped: { wipeCompromised(profile: profile) })
     }
 
     /// True while a compromise alert is up on screen. The swap-time

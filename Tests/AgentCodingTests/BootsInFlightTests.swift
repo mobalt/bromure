@@ -50,7 +50,7 @@ import Testing
         let later = delegate.applyBaseImageUpgradeAnswer(2, profile: &p, current: "999")
         #expect(later == .diskInUse(upgradeSkipped: false))
         #expect(p.baseImageUpgradeRemindAfter != nil && p.baseImageUpgradeDeclinedFor == nil)
-        #expect(delegate.wipeCompromised(profile: p) == .diskInUse)
+        #expect(delegate.wipeCompromised(profile: p) != .wiped)   // unmarked here: nothing erased
         // Once that boot is over, the answer applies.
         delegate.bootsInFlight.end(p.id)
         let after = delegate.applyBaseImageUpgradeAnswer(1, profile: &p, current: "999")

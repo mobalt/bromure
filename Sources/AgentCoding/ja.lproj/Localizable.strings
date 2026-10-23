@@ -4287,6 +4287,9 @@
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "先にワークスペースをシャットダウンしてください。ディスクが使用中です。";
 "Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "一部のファイルを消去できなかったため（%@）、侵害マークは残っています。シャットダウンしてからもう一度お試しください。";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "その間に侵害マークが解除されたため、何も消去されていません。現在のディスクで起動します。";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "すでに消去されています。ディスクとホームは削除され、次回はクリーンな状態で起動します。";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "確認の表示中に侵害マークが誤検知として解除されたため、何も消去されず、起動もしていません。現在のディスクで起動するには、もう一度開始してください。";
 "Wipe “%@”?" = "「%@」を消去しますか？";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "システムディスク、ホーム、保存された状態が消去されます。設定と認証情報、マウントしているプロジェクトフォルダはそのまま残ります。侵害のマークは外れ、次回はクリーンな状態で起動します。";
 "Wipe" = "消去";

@@ -4290,6 +4290,9 @@
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "請先關閉此工作區：它的磁碟正在使用中。";
 "Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "部分檔案無法清除（%@），因此它仍被標記為已遭入侵。請將其關閉後再試一次。";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "在此期間，其已遭入侵標記已被清除，因此未清除任何內容：它將使用目前的磁碟啟動。";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "它已被清除：其磁碟和主目錄已刪除，下次將全新啟動。";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "在提示顯示期間，其已遭入侵標記已作為誤報被清除，因此未清除任何內容，也未啟動。請再次啟動，以使用目前的磁碟啟動它。";
 "Wipe “%@”?" = "要清除「%@」嗎？";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "它的系統磁碟、主目錄和已儲存的狀態將被清除；它的設定和憑證會保留，掛載的專案檔案夾也不受影響。它將不再被標示為遭入侵，下次啟動時為全新狀態。";
 "Wipe" = "清除";

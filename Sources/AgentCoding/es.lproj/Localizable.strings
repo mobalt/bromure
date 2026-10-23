@@ -4289,6 +4289,9 @@
 /* Added since 5.4.1: compromised-workspace remedies */
 "Shut the workspace down first: its disk is in use." = "Apaga primero el espacio de trabajo: su disco está en uso.";
 "Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "No se pudieron borrar algunos de sus archivos (%@), así que sigue marcado como comprometido. Apágalo y vuelve a intentarlo.";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "Su marca de compromiso se eliminó mientras tanto, así que no se borró nada: arranca con su disco actual.";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "Ya se borró: se eliminaron su disco y su carpeta personal, y la próxima vez arrancará desde cero.";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "Su marca de compromiso se eliminó como falsa alarma mientras la pregunta estaba abierta, así que no se borró nada y no arrancó. Vuelve a iniciarlo para arrancarlo con su disco actual.";
 "Wipe “%@”?" = "¿Borrar «%@»?";
 "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Se borran su disco del sistema, su home y su estado guardado; se conservan sus ajustes y credenciales, y también las carpetas de proyecto que monta. Deja de estar marcado como comprometido y arranca limpio la próxima vez.";
 "Wipe" = "Borrar";
