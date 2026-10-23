@@ -269,20 +269,36 @@ public final class SessionDisk {
     /// they live outside Bromure's storage and may legitimately
     /// hold the user's source. The caller surfaces a warning about
     /// this in the wipe-confirmation alert.
-    public func wipeForCompromise() {
+    ///
+    /// The boot checkpoints (disk and home) go too: they are copies of the
+    /// same images, and Rewind would put them back once the mark is gone.
+    /// The mark is cleared only when everything is gone; anything left
+    /// throws, and the workspace stays marked.
+    public func wipeForCompromise() throws {
         let dir = store.profileDirectory(for: profile)
-        try? fm.removeItem(at: diskURL)
-        try? fm.removeItem(at: homeDirectory)
-        // ext4-model home + its bootstrap dir + any pre-migration backup
-        // are all just as contaminated as the virtiofs home was.
-        try? fm.removeItem(at: homeImageURL)
-        try? fm.removeItem(at: bootstrapHomeDirectory)
-        try? fm.removeItem(at: store.homeBackupDirectory(for: profile))
-        try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
-        try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
-        try? fm.removeItem(at: dir.appendingPathComponent("meta-share"))
-        try? fm.removeItem(at: dir.appendingPathComponent("outbox"))
+        let contaminated = [
+            diskURL, homeDirectory,
+            // ext4-model home + its bootstrap dir + any pre-migration backup
+            // are all just as contaminated as the virtiofs home was.
+            homeImageURL, bootstrapHomeDirectory, store.homeBackupDirectory(for: profile),
+            // Rollback images of both (checkpoints/ holds home/).
+            store.checkpointsDirectory(for: profile),
+            // The saved RAM image + its fingerprint, and the EFI variable
+            // store the guest could write (the next boot copies the base's).
+            savedStateURL, savedStateURL.appendingPathExtension("json"), efiVarsURL,
+            dir.appendingPathComponent("tabs.json"),
+            dir.appendingPathComponent("meta-share"),
+            dir.appendingPathComponent("outbox"),
+        ]
+        for url in contaminated { try? fm.removeItem(at: url) }
+        let left = contaminated.filter { fm.fileExists(atPath: $0.path) }
+        guard left.isEmpty else { throw WipeIncomplete(left: left) }
         clearCompromised()
+    }
+
+    /// A compromise wipe that couldn't erase everything: still marked.
+    public struct WipeIncomplete: Error, Equatable {
+        public let left: [URL]
     }
 
     /// Per-tab snapshot persisted alongside `vm.state` so the host

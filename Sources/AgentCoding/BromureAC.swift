@@ -12216,6 +12216,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Confirmed, but not carried out: say so, never wipe the open disk.
                 showWipeSkipped(profile)
                 return
+            case .failed(let left):
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = String(format: NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace"), profile.name)
+                alert.informativeText = Self.wipeFailedMessage(left)
+                alert.runModal()
+                dropAbandonedEphemeral(profile.id)
+                return
             }
             // Fall through — disk + home are gone, flag is cleared,
             // launch path now treats this like any first launch.
@@ -14544,6 +14552,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
                 dropAbandonedEphemeral(profile.id)
                 return
+            case .failed(let left):
+                launchQuestions.end(profile.id); asking = false
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id,
+                    title: String(format: NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace"), profile.name),
+                    message: Self.wipeFailedMessage(left),
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
+                return
             }
         }
         let current = readCurrentBaseVersion()
@@ -14610,20 +14627,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The wipe a confirmed compromise prompt performs (disk + home, keep
     /// tokens/settings), plus the bookkeeping that goes with it.
-    /// False: a boot began while the prompt was up (it has the disk open),
-    /// so nothing is wiped and this launch stops.
-    @MainActor func wipeCompromised(profile: Profile) -> Bool {
-        if diskInUse(profile.id) { return false }
+    /// `.diskInUse`: a boot began while the prompt was up (it has the disk
+    /// open), so nothing is wiped and this launch stops. `.failed`: some of
+    /// it couldn't be erased, so it stays marked.
+    @MainActor func wipeCompromised(profile: Profile) -> CompromiseWipe {
+        if diskInUse(profile.id) { return .diskInUse }
         let session = SessionDisk(
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
-        session.wipeForCompromise()
+        do {
+            try session.wipeForCompromise()
+        } catch let e as SessionDisk.WipeIncomplete {
+            FileHandle.standardError.write(Data("[compromise] wipe of \(profile.name) left \(e.left.map(\.path)) -- still marked\n".utf8))
+            refreshSidebar()
+            return .failed(e.left.map(\.lastPathComponent))
+        } catch {
+            refreshSidebar()
+            return .failed([])
+        }
         emitDiskResetEvent(profile: profile, reason: "compromised")
         // Re-render so the badge disappears immediately. (`launch`
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
         refreshSidebar()
-        return true
+        return .wiped
+    }
+
+    /// Why a wipe that ran left the workspace marked.
+    static func wipeFailedMessage(_ left: [String]) -> String {
+        String(format: NSLocalizedString("Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again.",
+                                         comment: "compromise wipe failed"),
+               left.isEmpty ? "?" : left.joined(separator: ", "))
     }
 
     /// The sidebar's "Wipe and Restore…" / "Clear Compromised Mark…" on a
@@ -14633,9 +14667,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard SessionDisk.isCompromised(profile: profile, store: store) else { return nil }
         switch action {
         case .wipe:
-            guard wipeCompromised(profile: profile) else {
+            switch wipeCompromised(profile: profile) {
+            case .wiped, .cancelled: break
+            case .diskInUse:
                 return NSLocalizedString("Shut the workspace down first: its disk is in use.",
                                          comment: "compromised workspace")
+            case .failed(let left):
+                return Self.wipeFailedMessage(left)
             }
         case .clear:
             SessionDisk(profile: profile, store: store, baseDiskURL: imageManager.baseDiskURL).clearCompromised()
@@ -14701,11 +14739,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         /// "Wipe and Launch", but a boot began while the question was up and
         /// has the disk open: nothing was wiped, and the user is told so.
         case diskInUse
+        /// Wiped, but these (file names) couldn't be erased: still marked,
+        /// and nothing boots.
+        case failed([String])
     }
 
-    static func compromiseWipe(confirmed: Bool, wiped: () -> Bool) -> CompromiseWipe {
+    static func compromiseWipe(confirmed: Bool, wiped: () -> CompromiseWipe) -> CompromiseWipe {
         guard confirmed else { return .cancelled }
-        return wiped() ? .wiped : .diskInUse
+        return wiped()
     }
 
     static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
