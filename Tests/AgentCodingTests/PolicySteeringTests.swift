@@ -775,7 +775,16 @@ struct PolicyNoteDeliveryTests {
         try hook("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#)
         #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"))
         #expect(fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
-        _ = stuck
+
+        // Finding (CWE-670): "Owed-note mark follows a reused tmux window
+        // after the note is gone". The host drops the note (pruned, or the
+        // tab closed); a new tab tmux numbers 3 again, idle, is done -- not
+        // held by a mark nothing is owed for any more.
+        for n in try fm.contentsOfDirectory(at: stuck.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+        where n.lastPathComponent.hasPrefix("w3-") { try fm.removeItem(at: n) }
+        try hook("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"new-2"}"#)
+        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nnew-2")
+        #expect(!fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
     }
 
     @Test("Under a filesystem ruleset the sandbox grants /proc (read-only) with the meta share",
