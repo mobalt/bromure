@@ -45,6 +45,10 @@ struct DrawerAllowEventExeTests {
         let again = try #require(Self.deny(pid, host: "api.example", exe: "/usr/bin/tool", at: t0.addingTimeInterval(3)))
         let rows3 = PolicyDrawer.blockedRows([tool, later, again], profileID: pid, since: t0.addingTimeInterval(-60))
         #expect(rows3.first { $0.fw.exe == "/usr/bin/tool" }?.count == 2)
+        // The toolbar badge counts the same rows the drawer lists.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let drawer = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/PolicyDrawer.swift"), encoding: .utf8)
+        #expect(drawer.components(separatedBy: "rowKey(host: host, port: port, exe: fw.exe)").count == 3)
     }
 
     @Test("The program survives the timeline's persisted form")

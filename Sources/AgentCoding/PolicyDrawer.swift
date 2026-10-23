@@ -180,15 +180,19 @@ struct PolicyDrawer: View {
             .filter { !dismissed.contains($0.key) }
     }
 
+    /// One row per destination and program: a deny for another program (its
+    /// event names it) never takes over a row, and so never what its Allow
+    /// grants.
+    static func rowKey(host: String, port: Int, exe: String?) -> String {
+        "\(host.lowercased()):\(port)" + (exe.map { "|" + $0 } ?? "")
+    }
+
     static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date) -> [Blocked] {
         var byKey: [String: Blocked] = [:]
         for e in events where e.profileID == profileID && e.machine == nil && e.time > cutoff {
             guard let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port, port > 0 else { continue }
-            // One row per program, too: a deny for another program (the
-            // event names it) never takes over a row, and so never what its
-            // Allow grants.
-            let key = "\(host.lowercased()):\(port)" + (fw.exe.map { "|" + $0 } ?? "")
+            let key = rowKey(host: host, port: port, exe: fw.exe)
             let n = (byKey[key]?.count ?? 0) + (e.count ?? 1)
             if let old = byKey[key], old.last > e.time {
                 byKey[key] = Blocked(key: key, host: old.host, port: port, fw: old.fw, last: old.last, count: n)
@@ -619,7 +623,7 @@ struct PolicyDrawer: View {
         list.policyDrawerSeen[id] = now
     }
 
-    /// Distinct destinations blocked since the drawer was last seen (the
+    /// Distinct rows (destination and program) blocked since the drawer was last seen (the
     /// toolbar badge).
     @MainActor static func unseenCount(profileID: UUID, list: SessionListModel) -> Int {
         let since = list.policyDrawerSeen[profileID] ?? Date().addingTimeInterval(-2 * 3600)
@@ -628,7 +632,7 @@ struct PolicyDrawer: View {
             if e.time <= since { break }
             guard e.profileID == profileID, e.machine == nil, let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port else { continue }
-            keys.insert("\(host.lowercased()):\(port)")
+            keys.insert(rowKey(host: host, port: port, exe: fw.exe))
         }
         return keys.count
     }
