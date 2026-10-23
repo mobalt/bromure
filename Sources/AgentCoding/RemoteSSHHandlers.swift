@@ -356,6 +356,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         if !channel.isWritable { pauseReadPump(channel) }
     }
 
+    /// The pumped fd hit EOF and the drain-then-finish is under way
+    /// (ioQueue only).
+    private var draining = false
+    private var drainCalls = 0
+    /// Tests: how many times the pumped fd's EOF reached the drain.
+    func drainCallsForTesting() -> Int { ioQueue.sync { drainCalls } }
+
     /// The read pump is suspended for backpressure (ioQueue only).
     private var pumpPaused = false
 
@@ -394,6 +401,15 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// finish() only after every queued pump write has actually left the
     /// channel — then back on ioQueue, where the pump state lives.
     private func finishAfterDrain(channel: Channel, pid: pid_t, master: Int32) {
+        // A read source stays readable at EOF and fires again on every pass
+        // until it's cancelled — and finish() only cancels it once the last
+        // write has left. Without this, each pass queued another event-loop
+        // task and another callback on that write: tens of millions while a
+        // slow client took it, gigabytes of RAM and a pegged SSH loop.
+        drainCalls += 1
+        guard !draining else { return }
+        draining = true
+        cancelReadSource()
         let pending = lastPumpWrite
         let el = channel.eventLoop
         el.execute { [weak self] in

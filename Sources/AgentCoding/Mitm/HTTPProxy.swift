@@ -3056,37 +3056,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var pending = Data()
         var gateStopped = false
         while true {
-            if Task.isCancelled { return }
-            // 1. Drain all readable bytes into `pending`.
-            var eof = false
-            drain: while true {
-                let outcome: StreamReadOutcome
-                do { outcome = try readNB() } catch { return }
-                switch outcome {
-                case .bytes(let d):
-                    guard let gate else { onChunk(d); pending.append(d); continue }
-                    let (fwd, stop) = gate(d)
-                    onChunk(fwd); pending.append(fwd)
-                    if stop { gateStopped = true; eof = true; break drain }
-                case .wouldBlock:   break drain
-                case .eof:          eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                // 1. Drain all readable bytes into `pending`.
+                var eof = false
+                drain: while true {
+                    let outcome: StreamReadOutcome
+                    do { outcome = try readNB() } catch { return false }
+                    switch outcome {
+                    case .bytes(let d):
+                        guard let gate else { onChunk(d); pending.append(d); continue }
+                        let (fwd, stop) = gate(d)
+                        onChunk(fwd); pending.append(fwd)
+                        if stop { gateStopped = true; eof = true; break drain }
+                    case .wouldBlock:   break drain
+                    case .eof:          eof = true; break drain
+                    }
                 }
+                // 2. Flush `pending` to the write side, waiting for writability if
+                //    the socket buffer is full (backpressure).
+                while !pending.isEmpty {
+                    let n: Int
+                    do { n = try writeNB(pending) } catch { return false }
+                    if n > 0 { pending.removeFirst(n); continue }
+                    if Task.isCancelled { return false }
+                    var pfd = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
+                    if poll(&pfd, 1, 250) < 0 && errno != EINTR { return false }
+                }
+                if gateStopped { onGateStop(); return false }
+                if eof { return false }
+                // 3. Wait for the next readable event.
+                var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, 250) < 0 && errno != EINTR { return false }
+                return true
             }
-            // 2. Flush `pending` to the write side, waiting for writability if
-            //    the socket buffer is full (backpressure).
-            while !pending.isEmpty {
-                let n: Int
-                do { n = try writeNB(pending) } catch { return }
-                if n > 0 { pending.removeFirst(n); continue }
-                if Task.isCancelled { return }
-                var pfd = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
-                if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
-            }
-            if gateStopped { onGateStop(); return }
-            if eof { return }
-            // 3. Wait for the next readable event.
-            var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 

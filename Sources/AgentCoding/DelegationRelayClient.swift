@@ -43,27 +43,32 @@ final class DelegationRelayClient: @unchecked Sendable {
         let dial = self.dial, label = self.label, parkedFor = self.parkedFor
         Thread.detachNewThread { [weak self] in
             while self?.isRunning == true {
-                guard let fd = dial(), fd >= 0 else {
-                    Thread.sleep(forTimeInterval: 2); continue
-                }
-                guard let self, self.track(fd) else { Darwin.close(fd); return }
-                // Parked until an agent opens its MCP: its hello comes first.
-                switch Self.readLine(fd, within: parkedFor) {
-                case .line(let hello, let rest):
-                    FatClientLog.log("delegation-relay: \(label) stream \(hello)")
-                    // Strong: this thread closes the fd (stop() only shuts it
-                    // down), so it must outlive the client letting go.
-                    Thread.detachNewThread { [self] in
-                        self.pump(fd, hello: hello, pending: rest)
-                        self.release(fd)
+                // One pool per dial: a raw Thread never drains its implicit pool.
+                let go = autoreleasepool { () -> Bool in
+                    guard let fd = dial(), fd >= 0 else {
+                        Thread.sleep(forTimeInterval: 2); return true
                     }
-                case .expired:
-                    // Maybe a dead end nobody told us about: a fresh one.
-                    self.release(fd)
-                case .closed:
-                    self.release(fd)
-                    Thread.sleep(forTimeInterval: 0.5)
+                    guard let self, self.track(fd) else { Darwin.close(fd); return false }
+                    // Parked until an agent opens its MCP: its hello comes first.
+                    switch Self.readLine(fd, within: parkedFor) {
+                    case .line(let hello, let rest):
+                        FatClientLog.log("delegation-relay: \(label) stream \(hello)")
+                        // Strong: this thread closes the fd (stop() only shuts it
+                        // down), so it must outlive the client letting go.
+                        Thread.detachNewThread { [self] in
+                            self.pump(fd, hello: hello, pending: rest)
+                            self.release(fd)
+                        }
+                    case .expired:
+                        // Maybe a dead end nobody told us about: a fresh one.
+                        self.release(fd)
+                    case .closed:
+                        self.release(fd)
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                    return true
                 }
+                if !go { return }
             }
         }
     }

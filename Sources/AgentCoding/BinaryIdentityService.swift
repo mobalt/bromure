@@ -286,18 +286,28 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         FileHandle.standardError.write(Data("[identity] attestor connected for \(profileID)\n".utf8))
         tv = timeval(tv_sec: 0, tv_usec: 0)
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        while let line = reader.next() {
-            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+        Self.serveLines(&reader) { obj in
             // Unsolicited guest reports (no id): the sandbox launcher's status.
             if obj["id"] == nil, let event = obj["event"] as? String {
                 if event == "sandbox_status" { GuestSandboxStatusStore.shared.update(profileID: profileID, report: obj) }
-                continue
+                return
             }
-            guard let id = obj["id"] as? Int else { continue }
+            guard let id = obj["id"] as? Int else { return }
             lock.lock(); let w = waiters.removeValue(forKey: id); lock.unlock()
             w?.resume(returning: obj)
         }
         closeChannel()
+    }
+
+    /// Hand each JSON line to `handle` until EOF. One pool per line: this
+    /// runs on a raw Thread for the VM's lifetime, whose pool never drains,
+    /// and every line's objects would stay alive until the VM stopped.
+    static func serveLines(_ reader: inout LineReader, _ handle: ([String: Any]) -> Void) {
+        while autoreleasepool(invoking: { () -> Bool in
+            guard let line = reader.next() else { return false }
+            if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] { handle(obj) }
+            return true
+        }) {}
     }
 
     private func closeChannel() {
@@ -347,7 +357,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
 }
 
 /// Blocking newline reader over a raw fd.
-private struct LineReader {
+struct LineReader {
     let fd: Int32
     var buffer = Data()
     init(fd: Int32) { self.fd = fd }
