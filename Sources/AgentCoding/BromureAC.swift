@@ -3755,7 +3755,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                                            ip: ipString, port: Int(ev.port)) {
                 return
             }
-            let eventData: [String: AnyJSON] = [
+            var eventData: [String: AnyJSON] = [
                 "action": .string(action),
                 "layer": .string("l4"),
                 "proto": .string(proto),
@@ -3769,6 +3769,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "rule": .of(ev.rule),
                 "by_policy": .bool(ev.byPolicy),
             ]
+            // The program the identity gate denied: the drawer row's Allow names it.
+            if let exe = ev.exe { eventData["exe"] = .string(exe) }
             // One more connection to a destination already listed: count it
             // on the timeline's folded row (local only — no log line, no
             // cloud event per connection).

@@ -128,6 +128,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         /// reported within the dedupe window: not a new row, just one more
         /// to count on the allowed row it folds into.
         public var isRepeat: Bool = false
+        /// The program the guest's attestor named for a connection the
+        /// identity gate denied: the row's Allow names it (never a lookup at
+        /// click time, which a later connection could have changed).
+        public var exe: String? = nil
     }
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
@@ -136,6 +140,8 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// IP. `dstIP` is 0 when `name` is set.
     private struct EgressKey: Hashable {
         let portID: Int; let name: String; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8
+        /// A deny for another program is its own report (and drawer row).
+        var exe: String? = nil
     }
     /// When each flow was last reported: a repeat within `egressReportEvery`
     /// isn't re-reported (a busy connection would flood the log), but one
@@ -1214,6 +1220,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         // executable that opened it. The first SYN is held while the guest's
         // attestor answers (the guest retransmits it); later packets of an
         // allowed connection pass on the remembered decision.
+        var deniedExe: String? = nil
         if proto == 6, let policy = g.policy, policy.enforceBinaries,
            !(g.interceptor != nil && g.interceptPorts.contains(dport)) {
             let sport = Self.u16(buf, 14 + ihl)
@@ -1226,7 +1233,8 @@ public final class VMNetSwitch: @unchecked Sendable {
                 guard let gate = identityGate else { verdict = .deny; return dropDenied() }
                 switch gate(pid, sport, dstIP, dport, hostnames, policy) {
                 case nil:      return true                       // attestation in flight
-                case .deny?:   verdict = .deny
+                case let d? where d.verdict == .deny:
+                    verdict = .deny; deniedExe = d.exe
                 default:       verdict = .allow; rememberAttested(key)
                 }
             } else if standing == .current {
@@ -1235,7 +1243,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         }
         func dropDenied() -> Bool {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now)
+                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now, exe: deniedExe)
             if Self.isTCPSyn(buf, n) { injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n)) }
             return true
         }
@@ -1246,7 +1254,7 @@ public final class VMNetSwitch: @unchecked Sendable {
             let midFlow = tcpFlags.map { Self.denyReset(tcpFlags: $0) != .syn } ?? false
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
                        proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now,
-                       midFlow: midFlow)
+                       midFlow: midFlow, exe: deniedExe)
             if proto == 6 {
                 switch Self.denyReset(tcpFlags: tcpFlags) {
                 case .syn:                                     // fail the connect fast
@@ -1341,14 +1349,15 @@ public final class VMNetSwitch: @unchecked Sendable {
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, port: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
-                            midFlow: Bool = false, newConnection: Bool = false) {
+                            midFlow: Bool = false, newConnection: Bool = false, exe: String? = nil) {
         let name = hostnames.first ?? ""
-        let key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
+        var key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
                             // A dying flow's trailing segments dedupe apart from
                             // fresh connections: the app may fold them into the
                             // "connection closed" row, and a new connect after
                             // that must still get its own "deny" row.
                             dstPort: port, proto: (denied ? proto | 0x80 : proto) | (midFlow ? 0x40 : 0))
+        key.exe = denied ? exe : nil
         lock.lock()
         let now = Date()
         guard let observer = egressObserver else { lock.unlock(); return }
@@ -1372,6 +1381,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                                 proto: proto, port: port, denied: denied)
         event.midFlow = midFlow
+        if denied { event.exe = exe }
         if let policy {
             event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
                                            port: port, now: now)?.text
@@ -1396,9 +1406,10 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Hook for binary-identity enforcement (set by the app): the verdict for
     /// a new TCP connection from `srcPort` given the executable the guest's
     /// attestor names for it, or nil while that answer is still coming.
+    /// `exe` is the program it was decided for (reported with a deny).
     public var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32,
                                          _ dport: UInt16, _ hostnames: [String],
-                                         _ policy: EgressPolicy) -> EgressPolicy.Verdict?)?
+                                         _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
 
     private struct AttestedFlow: Hashable { let portID: Int; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
     /// Flows allowed for their executable: when, and under which policy

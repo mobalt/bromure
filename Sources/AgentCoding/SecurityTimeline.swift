@@ -125,12 +125,15 @@ public final class SecurityTimeline {
         /// The destination's other DNS names (CNAME targets, other names
         /// seen for its address) — `host` is the one the guest asked for.
         public var aliases: [String] = []
+        /// The program the guest's attestor named for a denied connection,
+        /// as decided: what this block's Allow grants.
+        public var exe: String? = nil
 
         public init(host: String?, ip: String?, port: Int?, proto: String?, rule: String?,
-                    denied: Bool, byPolicy: Bool, aliases: [String] = []) {
+                    denied: Bool, byPolicy: Bool, aliases: [String] = [], exe: String? = nil) {
             self.host = host; self.ip = ip; self.port = port; self.proto = proto
             self.rule = rule; self.denied = denied; self.byPolicy = byPolicy
-            self.aliases = aliases
+            self.aliases = aliases; self.exe = exe
         }
 
         var wire: [String: Any] {
@@ -141,6 +144,7 @@ public final class SecurityTimeline {
             if let port { d["port"] = port }
             if let proto { d["proto"] = proto }
             if let rule { d["rule"] = rule }
+            if let exe { d["exe"] = exe }
             return d
         }
 
@@ -149,7 +153,7 @@ public final class SecurityTimeline {
             self.init(host: d["host"] as? String, ip: d["ip"] as? String, port: d["port"] as? Int,
                       proto: d["proto"] as? String, rule: d["rule"] as? String,
                       denied: d["denied"] as? Bool ?? false, byPolicy: d["byPolicy"] as? Bool ?? false,
-                      aliases: d["aliases"] as? [String] ?? [])
+                      aliases: d["aliases"] as? [String] ?? [], exe: d["exe"] as? String)
         }
     }
 
@@ -923,7 +927,8 @@ public final class SecurityTimeline {
             }
             e.firewall = Firewall(host: primary, ip: str(d, "ip") ?? str(d, "dst_ip"), port: int(d, "port"),
                                   proto: str(d, "proto"), rule: rule,
-                                  denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases)
+                                  denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases,
+                                  exe: kind == .blocked ? str(d, "exe") : nil)
             // Allowed connections are routine: repeats to one destination
             // fold into one counted row (blocks and cuts stay one row each).
             if kind == .allowed, !closed {

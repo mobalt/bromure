@@ -156,8 +156,7 @@ struct OpenShellAdvisorTests {
         let (a, pid, box) = advisor(mode: .review)
         // A draft for the same destination is settled by the allow.
         a.recordDenial(profileID: pid, layer: "l4", host: "www.bromure.io", port: 443, method: nil, path: nil, reason: "no rule")
-        BinaryIdentityService.shared.noteExe("/usr/bin/curl", profileID: pid, destinations: ["www.bromure.io"], port: 443)
-        let error = await a.allow(profileID: pid, host: "www.bromure.io", port: 443)
+        let error = await a.allow(profileID: pid, host: "www.bromure.io", port: 443, exe: "/usr/bin/curl")
         #expect(error == nil)
         let policy = try OpenShellPolicy.parse(box.policy)
         let rule = try #require(policy.networkPolicies.first { $0.key == "allow_www_bromure_io_443_curl" })
@@ -169,39 +168,34 @@ struct OpenShellAdvisorTests {
     @Test("Allow with no attested program: a host-and-port rule for any program")
     func allowWithoutProgram() async throws {
         let (a, pid, box) = advisor(mode: .review)
-        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) == nil)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: nil) == nil)
         let rule = try #require(try OpenShellPolicy.parse(box.policy).networkPolicies.first { $0.key == "allow_pypi_org_443" })
         #expect(rule.binaries.isEmpty)
         // Allowing it again is refused, not duplicated.
-        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) != nil)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: nil) != nil)
     }
 
     /// Finding (CWE-670): "Sandbox drawer Allow saves a no-op rule when
-    /// Enforce binaries is on". The MiTM recorded the program under the
-    /// destination IP only and the row's host is the SNI, so Allow found no
-    /// program and saved a rule listing none — which allows nothing there.
-    @Test("Under Enforce binaries: Allow finds the program by host or IP, and refuses when there's none")
+    /// Enforce binaries is on": a rule naming no program allows nothing.
+    /// The program now comes from the blocked row's own event.
+    @Test("Under Enforce binaries: Allow names the row's program, and refuses when there's none")
     func allowUnderEnforce() async throws {
         let (a, pid, box) = advisor(mode: .review)
         a.enforceBinariesProvider = { _ in true }
-        // The MiTM's path: identity asked by IP, then the SNI learned.
-        BinaryIdentityService.shared.noteExe("/usr/bin/pip", profileID: pid, destinations: ["151.101.0.223"], port: 443)
-        let identity = OpenShellPolicy.BinaryIdentity(exe: "/usr/bin/pip", sha256: "", ancestors: [])
-        BinaryIdentityService.shared.noteHost(identity, profileID: pid, host: "pypi.org", port: 443)
-        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443) == nil)
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: "/usr/bin/pip") == nil)
         let rule = try #require(try OpenShellPolicy.parse(box.policy).networkPolicies.first { $0.key.hasPrefix("allow_pypi_org_443") })
         #expect(rule.binaries == ["/usr/bin/pip"])
-        // Known by IP only (as the row's dst_ip shows it): found too.
-        BinaryIdentityService.shared.noteExe("/usr/bin/curl", profileID: pid, destinations: ["140.82.112.3"], port: 8443)
-        #expect(await a.allow(profileID: pid, host: "github.com", port: 8443, ip: "140.82.112.3") == nil)
-        #expect(try OpenShellPolicy.parse(box.policy).networkPolicies.contains { $0.key == "allow_github_com_8443_curl" })
-        // No program known at all: refused, nothing saved, no draft queued.
+        // No program on the row: refused, nothing saved, no draft queued.
         let before = box.policy
-        let refused = await a.allow(profileID: pid, host: "files.example.com", port: 443)
+        let refused = await a.allow(profileID: pid, host: "files.example.com", port: 443, exe: nil)
         #expect(refused?.contains("Enforce binaries") == true)
         #expect(box.policy == before)
         a.recordDenial(profileID: pid, layer: "sni", host: "files.example.com", port: 443, method: nil, path: nil, reason: "no rule")
         #expect(a.pending(for: pid).isEmpty)
+        // A denial that names its program is drafted for it.
+        a.recordDenial(profileID: pid, layer: "sni", host: "files.example.com", port: 443, method: nil, path: nil,
+                       reason: "no rule", exe: "/usr/bin/curl")
+        #expect(a.pending(for: pid).first?.rule.binaries == ["/usr/bin/curl"])
     }
 
     @Test("A MiTM firewall row carries its destination IP (dst_ip)")
@@ -301,7 +295,6 @@ struct OpenShellAdvisorTests {
         l4("/tmp/first")
         Thread.sleep(forTimeInterval: 0.01)
         l4("/usr/bin/tool")                                        // the connection just blocked
-        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 8443, ip: ip).binaries == ["/usr/bin/tool"])
         #expect(ids.recentExe(profileID: pid, destinations: ["cdn.example"], port: 8443) == "/usr/bin/tool")
         // A later program on the IP alone doesn't take the row's name over
         // (Finding CWE-284, "Drawer Allow on an L4 port names whoever last
@@ -317,40 +310,6 @@ struct OpenShellAdvisorTests {
         #expect(ids.recentExe(profileID: pid, destinations: ["named.example", ip], port: 8443) == "/usr/bin/curl")
     }
 
-    /// Finding (CWE-284): "Drawer Allow on an L4 port names whoever last
-    /// dialed the destination IP". Allow looked the program up when clicked,
-    /// so any guest program that connected to the address since the deny --
-    /// filing both the IP and its cached names -- was the one the rule named.
-    /// The program is now filed with the deny itself.
-    @Test("Allow names the program the deny was for, whatever connected there since")
-    func allowNamesTheDeniedProgram() throws {
-        let pid = UUID(), ids = BinaryIdentityService.shared
-        let ip = "104.16.0.9"
-        func l4(_ exe: String, denied: Bool) {
-            ids.noteExe(exe, profileID: pid, destinations: [ip], port: 9443)
-            ids.noteExe(exe, profileID: pid, destinations: ["api.example"], port: 9443, replace: false)
-            if denied { ids.noteDenied(exe, profileID: pid, destinations: ["api.example", ip], port: 9443) }
-        }
-        l4("/usr/bin/tool", denied: true)                          // the row
-        Thread.sleep(forTimeInterval: 0.01)
-        l4("/tmp/steer", denied: false)                            // allowed, after the deny
-        #expect(ids.recentExe(profileID: pid, destinations: ["api.example", ip], port: 9443) == "/tmp/steer")
-        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 9443, ip: ip).binaries == ["/usr/bin/tool"])
-        // Looked up by the IP alone (an IP row) too.
-        #expect(ids.blockedExe(profileID: pid, destinations: [ip], port: 9443) == "/usr/bin/tool")
-        // A later deny there is the row's latest block: its program.
-        l4("/usr/bin/other", denied: true)
-        #expect(OpenShellAdvisor.allowRule(profileID: pid, host: "api.example", port: 9443, ip: ip).binaries == ["/usr/bin/other"])
-        // Every place a deny is decided for a program files it.
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let ident = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BinaryIdentityService.swift"), encoding: .utf8)
-        #expect(ident.contains("if v == .deny { self.noteDenied(id?.exe"))
-        let mitm = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/Mitm/MitmEngine.swift"), encoding: .utf8)
-        #expect(mitm.components(separatedBy: "BinaryIdentityService.shared.noteDenied(identity?.exe").count == 3)
-        let drawer = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/PolicyDrawer.swift"), encoding: .utf8)
-        #expect(!drawer.contains("BinaryIdentityService.shared.recentExe("))
-    }
-
     @Test("Allow names the program attested for the row's hostname, not a newer occupant of its IP")
     func allowNamesTheHostsProgram() throws {
         let pid = UUID(), ids = BinaryIdentityService.shared
@@ -360,8 +319,6 @@ struct OpenShellAdvisorTests {
         // Afterwards, another program dials the same address.
         Thread.sleep(forTimeInterval: 0.01)
         ids.noteExe("/tmp/evil", profileID: pid, destinations: ["151.101.0.223"], port: 443)
-        let rule = OpenShellAdvisor.allowRule(profileID: pid, host: "pypi.org", port: 443, ip: "151.101.0.223")
-        #expect(rule.binaries == ["/usr/bin/curl"])
         #expect(ids.recentExe(profileID: pid, destinations: ["pypi.org", "151.101.0.223"], port: 443) == "/usr/bin/curl")
         // The L4 gate files a connection under every name cached for its IP
         // (a guess): it fills a name with no program on record, never

@@ -548,16 +548,14 @@ public final class MitmEngine {
                                           hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
                                           port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
-                        BinaryIdentityService.shared.noteDenied(identity?.exe, profileID: profileID,
-                                                                destinations: [host, destIP], port: destPort)
                         if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
-                                                                   port: destPort, denied: true) {
+                                                                   port: destPort, denied: true, exe: identity?.exe) {
                         SupplyChainLog.shared.record(
                             "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
                         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                         "host": .string(host), "port": .int(destPort), "layer": .string("l4"),
-                                        "dst_ip": .string(destIP),
+                                        "dst_ip": .string(destIP), "exe": .of(identity?.exe),
                                         "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
                                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
                                         "by_policy": .bool(true)])
@@ -610,16 +608,14 @@ public final class MitmEngine {
                                       port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                 case .deny:
                     let label = sniHost ?? destIP
-                    BinaryIdentityService.shared.noteDenied(identity?.exe, profileID: profileID,
-                                                            destinations: [label, destIP], port: destPort)
                     if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
-                                                               port: destPort, denied: true) {
+                                                               port: destPort, denied: true, exe: identity?.exe) {
                     SupplyChainLog.shared.record(
                         "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                     "host": .string(label), "port": .int(destPort), "layer": .string("sni"),
-                                    "dst_ip": .string(destIP),
+                                    "dst_ip": .string(destIP), "exe": .of(identity?.exe),
                                     "rule": .of(policy.firstMatch(ip: nil, hostnames: sniHost.map { [$0] } ?? [],
                                                                   proto: .tcp,
                                                                   port: UInt16(truncatingIfNeeded: destPort))?.text),
