@@ -154,7 +154,7 @@ public enum CredentialMint {
         if h == "api.digitalocean.com" {
             return classifyDigitalOcean(method: method.uppercased(), path: path)
         }
-        guard AWSResigner.isAWSHost(h) || h == "public.ecr.aws" else { return nil }
+        guard isAWSFamilyHost(h) else { return nil }
         // Every action the request names (target header, query, form body):
         // whichever one AWS acts on, a refusal or a rewrite covers it.
         let actions = awsActions(host: h, method: method, path: path, query: query,
@@ -197,6 +197,17 @@ public enum CredentialMint {
         }
         if method == "POST", segs == ["v2", "spaces", "keys"] { return .mint(.doSpacesKey) }
         return nil
+    }
+
+    /// Every name an AWS endpoint answers on, not only the ones the resigner
+    /// signs for: dual-stack (`portal.sso.us-east-1.api.aws` resolves to the
+    /// same portal as `….amazonaws.com`), ECR Public, and the other
+    /// partitions' domains. A credential issued on any of them is rewritten.
+    static func isAWSFamilyHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if AWSResigner.isAWSHost(h) || h == "public.ecr.aws" { return true }
+        return ["api.aws", "amazonaws.eu", "c2s.ic.gov", "sc2s.sgov.gov", "cloud.adc-e.uk", "csp.hci.ic.gov"]
+            .contains { h.hasSuffix("." + $0) }
     }
 
     /// "service:Action" for an AWS request: the JSON protocol's

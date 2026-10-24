@@ -57,6 +57,14 @@ struct CredentialMintTests {
                   "iam.amazonaws.com") == .mint(.awsAccessKey))
         #expect(c(Self.request("POST", "/", headers: [Self.signed("iam"), Self.form], body: "Action=createLoginProfile"),
                   "iam.amazonaws.com") == .deny(action: "iam:createLoginProfile"))
+        // Dual-stack and other partitions' names for the same endpoints.
+        #expect(c(Self.request("GET", "/federation/credentials?role_name=r&account_id=1"), "portal.sso.us-east-1.api.aws")
+                == .mint(.awsTemporary(action: "sso:GetRoleCredentials")))
+        #expect(c(Self.request("POST", "/", body: "Action=AssumeRoleWithWebIdentity"), "sts.us-east-1.api.aws")
+                == .mint(.awsTemporary(action: "sts:AssumeRoleWithWebIdentity")))
+        #expect(c(Self.request("POST", "/", body: "Action=AssumeRole"), "sts.us-iso-east-1.c2s.ic.gov")
+                == .mint(.awsTemporary(action: "sts:AssumeRole")))
+        #expect(c(Self.request("POST", "/", body: "Action=AssumeRole"), "sts.example.com") == nil)
         // Ordinary calls are left alone.
         #expect(c(Self.request("POST", "/", headers: [Self.signed("sts"), Self.form], body: "Action=GetCallerIdentity"), "sts.amazonaws.com") == nil)
         #expect(c(Self.request("GET", "/v2/droplets"), "api.digitalocean.com") == nil)
