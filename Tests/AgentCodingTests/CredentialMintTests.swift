@@ -46,6 +46,17 @@ struct CredentialMintTests {
         // A password the guest chose: nothing to fake, refused.
         #expect(c(Self.request("POST", "/", headers: [Self.signed("iam"), Self.form], body: "Action=CreateLoginProfile&UserName=bob&Password=x"),
                   "iam.amazonaws.com") == .deny(action: "iam:CreateLoginProfile"))
+        // No way around it: case, a second Action, a FIPS host, an untyped body.
+        #expect(c(Self.request("POST", "/", headers: [Self.signed("sts"), Self.form], body: "action=assumerole"),
+                  "sts.amazonaws.com") == .mint(.awsTemporary(action: "sts:AssumeRole")))
+        #expect(c(Self.request("POST", "/?Action=GetCallerIdentity", headers: [Self.signed("sts"), Self.form], body: "Action=AssumeRole"),
+                  "sts.amazonaws.com") == .mint(.awsTemporary(action: "sts:AssumeRole")))
+        #expect(c(Self.request("POST", "/", body: "Action=GetSessionToken"), "sts-fips.us-east-1.amazonaws.com")
+                == .mint(.awsTemporary(action: "sts:GetSessionToken")))
+        #expect(c(Self.request("POST", "/", headers: [Self.signed("iam")], body: "Action=CreateAccessKey&Action=ListUsers"),
+                  "iam.amazonaws.com") == .mint(.awsAccessKey))
+        #expect(c(Self.request("POST", "/", headers: [Self.signed("iam"), Self.form], body: "Action=createLoginProfile"),
+                  "iam.amazonaws.com") == .deny(action: "iam:createLoginProfile"))
         // Ordinary calls are left alone.
         #expect(c(Self.request("POST", "/", headers: [Self.signed("sts"), Self.form], body: "Action=GetCallerIdentity"), "sts.amazonaws.com") == nil)
         #expect(c(Self.request("GET", "/v2/droplets"), "api.digitalocean.com") == nil)

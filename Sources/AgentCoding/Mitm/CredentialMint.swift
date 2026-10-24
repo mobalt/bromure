@@ -155,20 +155,32 @@ public enum CredentialMint {
             return classifyDigitalOcean(method: method.uppercased(), path: path)
         }
         guard AWSResigner.isAWSHost(h) || h == "public.ecr.aws" else { return nil }
-        guard let action = awsAction(host: h, method: method, path: path, query: query,
-                                     headers: headers, body: body) else { return nil }
-        if awsDenied.contains(action) { return .deny(action: action) }
-        let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2 else { return nil }
-        switch (parts[0], parts[1]) {
-        case ("sts", let a) where stsTemporary.contains(a): return .mint(.awsTemporary(action: action))
-        case ("sso", "GetRoleCredentials"): return .mint(.awsTemporary(action: action))
-        case ("cognito-identity", "GetCredentialsForIdentity"): return .mint(.awsTemporary(action: action))
-        case ("iam", "CreateAccessKey"): return .mint(.awsAccessKey)
-        case ("ecr", "GetAuthorizationToken"), ("ecr-public", "GetAuthorizationToken"):
-            return .mint(.ecrToken(action: action))
-        default: return nil
+        // Every action the request names (target header, query, form body):
+        // whichever one AWS acts on, a refusal or a rewrite covers it.
+        let actions = awsActions(host: h, method: method, path: path, query: query,
+                                 headers: headers, body: body)
+        if let denied = actions.first(where: { a in awsDenied.contains { $0.caseInsensitiveCompare(a) == .orderedSame } }) {
+            return .deny(action: denied)
         }
+        for action in actions {
+            let parts = action.split(separator: ":", maxSplits: 1).map { $0.lowercased() }
+            guard parts.count == 2 else { continue }
+            let canonical = { (name: String) in "\(parts[0]):\(name)" }
+            switch (parts[0], parts[1]) {
+            case ("sts", let a):
+                if let name = stsTemporary.first(where: { $0.lowercased() == a }) {
+                    return .mint(.awsTemporary(action: canonical(name)))
+                }
+            case ("sso", "getrolecredentials"): return .mint(.awsTemporary(action: canonical("GetRoleCredentials")))
+            case ("cognito-identity", "getcredentialsforidentity"):
+                return .mint(.awsTemporary(action: canonical("GetCredentialsForIdentity")))
+            case ("iam", "createaccesskey"): return .mint(.awsAccessKey)
+            case ("ecr", "getauthorizationtoken"), ("ecr-public", "getauthorizationtoken"):
+                return .mint(.ecrToken(action: canonical("GetAuthorizationToken")))
+            default: break
+            }
+        }
+        return nil
     }
 
     private static func classifyDigitalOcean(method: String, path: String) -> Classification? {
@@ -193,19 +205,29 @@ public enum CredentialMint {
     /// SigV4 scope when signed, else the host.
     static func awsAction(host: String, method: String, path: String, query: String,
                           headers: [(String, String)], body: Data) -> String? {
+        awsActions(host: host, method: method, path: path, query: query, headers: headers, body: body).first
+    }
+
+    /// Every "service:Action" a request names, the target header first.
+    static func awsActions(host: String, method: String, path: String, query: String,
+                           headers: [(String, String)], body: Data) -> [String] {
         func header(_ n: String) -> String? {
             headers.first { $0.0.lowercased() == n }?.1
         }
         if host.hasPrefix("portal.sso.") {
-            return path.hasSuffix("/federation/credentials") ? "sso:GetRoleCredentials" : nil
+            return path.lowercased().hasSuffix("/federation/credentials") ? ["sso:GetRoleCredentials"] : []
         }
         let service: String = {
             if let auth = header("authorization"), let scope = AWSResigner.parseScope(auth) {
                 return scope.service
             }
             if host == "public.ecr.aws" || host.hasPrefix("api.ecr-public.") { return "ecr-public" }
-            return String(host.split(separator: ".").first ?? "")
-        }()
+            // sts-fips.us-east-1…, api.ecr.… → sts, ecr.
+            let first = host.split(separator: ".").first.map(String.init) ?? ""
+            let label = first == "api" ? (host.split(separator: ".").dropFirst().first.map(String.init) ?? "") : first
+            return label.hasSuffix("-fips") ? String(label.dropLast(5)) : label
+        }().lowercased()
+        var out: [String] = []
         if let target = header("x-amz-target"), let dot = target.lastIndex(of: ".") {
             let action = String(target[target.index(after: dot)...])
             let prefix = target[..<dot].lowercased()
@@ -215,24 +237,27 @@ public enum CredentialMint {
             else if prefix.hasPrefix("amazonec2containerregistry") { svc = "ecr" }
             else if prefix.hasPrefix("spencerfrontendservice") { svc = "ecr-public" }
             else { svc = service }
-            return "\(svc):\(action)"
+            out.append("\(svc):\(action)")
         }
-        var action = formValue("Action", in: query)
-        if action == nil, method.uppercased() == "POST",
-           (header("content-type") ?? "").lowercased().contains("x-www-form-urlencoded") {
-            action = formValue("Action", in: String(decoding: body, as: UTF8.self))
+        guard !service.isEmpty else { return out }
+        // Any body that parses as a form, whatever its declared type.
+        for form in [query, String(decoding: body, as: UTF8.self)] {
+            for action in formValues("Action", in: form) where !action.isEmpty {
+                out.append("\(service):\(action)")
+            }
         }
-        guard let action, !action.isEmpty, !service.isEmpty else { return nil }
-        return "\(service):\(action)"
+        return out
     }
 
-    private static func formValue(_ name: String, in form: String) -> String? {
-        for pair in form.split(separator: "&") {
+    private static func formValues(_ name: String, in form: String) -> [String] {
+        form.split(separator: "&").compactMap { pair in
             let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
-            guard kv.count == 2, kv[0].removingPercentEncoding == name else { continue }
-            return kv[1].replacingOccurrences(of: "+", with: " ").removingPercentEncoding
+            guard kv.count == 2,
+                  kv[0].replacingOccurrences(of: "+", with: " ").removingPercentEncoding?
+                    .caseInsensitiveCompare(name) == .orderedSame else { return nil }
+            return kv[1].replacingOccurrences(of: "+", with: " ").removingPercentEncoding?
+                .trimmingCharacters(in: .whitespaces)
         }
-        return nil
     }
 
     // MARK: Rewriting the response
