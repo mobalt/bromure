@@ -4301,3 +4301,8 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已标记为入侵：Bromure 发现此工作区试图把凭据发送到不应发送的地方（请求已被阻止）。启动时会先询问是否抹掉其磁盘和主目录。右键点按可立即抹掉，或在误报时清除标记。";
 "Wipe and Restore…" = "抹掉并恢复…";
 "Clear Compromised Mark…" = "清除已入侵标记…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "为此主机和端口添加规则";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "为此主机和端口添加规则，适用于 %@";

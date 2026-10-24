@@ -100,7 +100,7 @@ struct DrawerAllowEventExeTests {
         let drawer = try src("Sources/AgentCoding/PolicyDrawer.swift")
         #expect(!drawer.contains("BinaryIdentityService.shared"))
         #expect(drawer.contains("allow(profileID: pid, host: host, port: port, exe: exe)"))
-        #expect(drawer.contains("if let exe = program(item, profile) { parts.append(exe) }"))
+        #expect(drawer.contains("if let exe = program(item, profile) {\n                            Text(verbatim: exe)"))
         #expect(!(try src("Sources/AgentCoding/OpenShellAdvisor.swift")).contains("BinaryIdentityService.shared"))
     }
 }

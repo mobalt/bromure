@@ -4301,3 +4301,8 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "侵害の可能性あり：このワークスペースが認証情報を本来送るべきでない宛先へ送ろうとしたことを Bromure が検出しました（リクエストはブロック済み）。起動時にはまずディスクとホームの消去を確認します。右クリックで今すぐ消去するか、誤検知ならマークを外せます。";
 "Wipe and Restore…" = "消去して復元…";
 "Clear Compromised Mark…" = "侵害マークを外す…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "このホストとポートのルールを追加";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "このホストとポートのルールを %@ に追加";

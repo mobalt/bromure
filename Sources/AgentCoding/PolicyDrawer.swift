@@ -219,7 +219,18 @@ struct PolicyDrawer: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(verbatim: "\(item.host):\(item.port)")
                             .font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                        Text(verbatim: subtitle(item, profile))
+                        // The program on its own line, clipped in the middle:
+                        // /tmp/curl and /usr/bin/curl are different grants, and
+                        // a tail cut hid the file name (Finding CWE-451,
+                        // "Drawer subtitle clips the program path at the file
+                        // name").
+                        if let exe = program(item, profile) {
+                            Text(verbatim: exe)
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                                .help(Text(verbatim: exe))
+                        }
+                        Text(verbatim: Self.blockedSubtitle(count: item.count, last: item.last, now: now))
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         if let err = errors[item.key] {
                             Text(verbatim: err).font(.caption).foregroundStyle(.red)
@@ -243,13 +254,21 @@ struct PolicyDrawer: View {
         }
     }
 
-    private func subtitle(_ item: Blocked, _ profile: Profile) -> String {
+    /// How often and when, under the program line.
+    static func blockedSubtitle(count: Int, last: Date, now: Date) -> String {
         var parts: [String] = []
-        // The full path: /tmp/curl and /usr/bin/curl are different grants.
-        if let exe = program(item, profile) { parts.append(exe) }
-        if item.count > 1 { parts.append("\(item.count)×") }
-        parts.append(RelativeDateTimeFormatter().localizedString(for: item.last, relativeTo: now))
+        if count > 1 { parts.append("\(count)×") }
+        parts.append(RelativeDateTimeFormatter().localizedString(for: last, relativeTo: now))
         return parts.joined(separator: " · ")
+    }
+
+    /// Allow's help names the program it grants, in full.
+    static func allowHelp(exe: String?) -> String {
+        guard let exe else {
+            return NSLocalizedString("Add a rule for this host and port", comment: "sandbox drawer: Allow help, no program known")
+        }
+        return String(format: NSLocalizedString("Add a rule for this host and port, for %@",
+                                                comment: "sandbox drawer: Allow help, the program's full path"), exe)
     }
 
     /// The program that tried: the attestor's answer on the block's own
@@ -274,9 +293,7 @@ struct PolicyDrawer: View {
         if isOpenShell {
             Button("Allow") { allowOpenShell(item, profile) }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-                .help(Text(item.fw.exe != nil
-                           ? "Add a rule for this host and port, for the program that tried"
-                           : "Add a rule for this host and port"))
+                .help(Text(verbatim: Self.allowHelp(exe: item.fw.exe)))
         } else if let target = FirewallRuleActions.targets(for: item.fw).first,
                   let rule = FirewallRuleActions.allowRule(target: target.name, fw: item.fw) {
             Menu {
