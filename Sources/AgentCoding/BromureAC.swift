@@ -10956,6 +10956,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var t = $0; t.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines); return t
         }
 
+        // Credentials the VM minted while the editor was open
+        // (`saveMintedCredential`): the editor never edits them, so the app's
+        // copy -- secrets included -- is the current one.
+        if let current = profiles.first(where: { $0.id == profile.id }) {
+            profile.mintedCredentials = current.mintedCredentials
+        }
         // The editor's copy is as old as the window: keep what the app
         // updated meanwhile (lastUsedAt went backwards on a save).
         try store.saveEdited(&profile)
