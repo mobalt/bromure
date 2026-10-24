@@ -132,7 +132,12 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     /// system trust for that handshake: Finding CWE-362, "Live kube trust
     /// rebuild drops the cluster CA and client cert between lock
     /// acquisitions"). A host whose new PEM doesn't parse keeps the CA it
-    /// had, rather than falling back to system trust.
+    /// had, rather than falling back to system trust: its own (`previous[h]`),
+    /// under `h` and its bare-host alias. Never `previous[bare]` itself --
+    /// that alias is whichever `host:port` registered last, possibly a
+    /// context this rebuild removed (Finding CWE-295, "A failed cluster-CA
+    /// parse republishes a removed context's CA on the bare host"). With
+    /// no previous CA of its own it stays unpinned, as a new host would.
     public func replaceAll(_ cas: [(pem: String, host: String)], for profileID: UUID) {
         var parsed: [String: SecCertificate] = [:]
         var failed: [String] = []
@@ -147,8 +152,9 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
         for h in failed {
             FileHandle.standardError.write(Data(
                 "[mitm] cluster CA parse failed for host=\(h) — keeping its previous CA\n".utf8))
+            guard let old = previous[h] else { continue }
             for key in [h] + (h.split(separator: ":").first.map { [String($0)] } ?? []) where parsed[key] == nil {
-                if let old = previous[key] { parsed[key] = old }
+                parsed[key] = old
             }
         }
         perProfile[profileID] = parsed.isEmpty ? nil : parsed
