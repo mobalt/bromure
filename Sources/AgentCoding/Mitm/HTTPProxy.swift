@@ -1502,7 +1502,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 // the real path.
                 upstream = sim
             } else {
-                let captureSession = upstreamSession(for: host, insecure: insecure)
+                let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
                 noteUpstreamSession(captureSession)
                 defer { captureSession.finishTasksAndInvalidate() }
                 upstream = try await relayUpstreamCollecting(
@@ -1756,7 +1756,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     The session's delegate looks up the profile's per-host
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
-        let session = upstreamSession(for: host, insecure: insecure)
+        let session = upstreamSession(for: host, port: port, insecure: insecure)
         noteUpstreamSession(session)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
@@ -2735,7 +2735,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // pinned cluster CA. Skipping either is what made `kubectl exec`
         // (an HTTP upgrade) fail its upstream handshake against a private
         // API server while `kubectl get` succeeded.
-        let identityEntry = clientIdentities.entry(for: host, profileID: profileID)
+        let identityEntry = clientIdentities.entry(for: host, port: port, profileID: profileID)
         // Same consent gate the URLSession path applies to the identity, so
         // an upgrade can't become a way around a prompt that an ordinary
         // request would raise.
@@ -2768,7 +2768,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         let clientIdentity = identityEntry?.identity
-        let pinnedCA = clusterCAs.ca(for: host, profileID: profileID)
+        let pinnedCA = clusterCAs.ca(for: host, port: port, profileID: profileID)
 
         let upstreamFD = try pinnedUpstream.map { try UpstreamPinning.connect($0, port: port) }
             ?? connectTCP(host: host, port: port)
@@ -3731,12 +3731,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// profile's identity registry. The session is single-use because
     /// URLSessionDelegate must be retained for the session's lifetime
     /// and we want the connection's identity binding to be tight.
-    private func upstreamSession(for host: String, insecure: Bool = false) -> URLSession {
+    private func upstreamSession(for host: String, port: Int, insecure: Bool = false) -> URLSession {
         let delegate = ClientCertChallengeDelegate(
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
             consent: consent,
-            profileID: profileID, host: host, insecure: insecure)
+            profileID: profileID, host: host, port: port, insecure: insecure)
         let cfg = URLSessionConfiguration.ephemeral
         // `timeoutIntervalForRequest` is an IDLE timer — it fires when no byte
         // arrives from upstream for this long, NOT a wall-clock cap on the
@@ -5515,6 +5515,9 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     let consent: ConsentBroker
     let profileID: UUID
     let host: String
+    /// The upstream port: the identity and CA are the ones registered for
+    /// this endpoint, not for another context on the same host name.
+    let port: Int
     /// The guest asked (and the profile permitted) this request to skip
     /// upstream cert validation — accept any server trust. See
     /// `GuardrailsPolicy.allowInsecureBypass`.
@@ -5531,12 +5534,13 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         profileID: UUID, host: String, insecure: Bool = false) {
+         profileID: UUID, host: String, port: Int, insecure: Bool = false) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
         self.consent = consent
         self.profileID = profileID
         self.host = host
+        self.port = port
         self.insecure = insecure
     }
 
@@ -5547,7 +5551,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         let method = challenge.protectionSpace.authenticationMethod
         switch method {
         case NSURLAuthenticationMethodClientCertificate:
-            guard let entry = identityRegistry.entry(for: host, profileID: profileID) else {
+            guard let entry = identityRegistry.entry(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
@@ -5598,7 +5602,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
                 return
             }
             guard let trust = challenge.protectionSpace.serverTrust,
-                  let ca = caRegistry.ca(for: host, profileID: profileID) else {
+                  let ca = caRegistry.ca(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
