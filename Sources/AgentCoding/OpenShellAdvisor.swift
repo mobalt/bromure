@@ -155,16 +155,17 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         // has nothing narrow to allow; L7 denials need the agent's intent).
         guard ["l4", "sni", "proxy"].contains(layer), port > 0, port <= 65_535,
               EgressPolicy.parseIPv4Address(host) == nil, host.contains(".") else { return }
+        let rule = Self.allowRule(host: host, port: port, exe: exe)
+        let enforce = enforceBinariesProvider(profileID)
+        // Enforce binaries on and no program known: the rule would list none
+        // and so allow nothing. Don't draft a proposal that can't work.
+        if rule.binaries.isEmpty, enforce { return }
         lock.lock()
         let exists = (proposals[profileID] ?? []).contains {
-            $0.host == host.lowercased() && Int($0.port) == port && $0.status != .approved
+            $0.status != .approved && Self.sameGrant($0, host: host, port: port, binaries: rule.binaries, enforce: enforce)
         }
         lock.unlock()
         guard !exists else { return }
-        let rule = Self.allowRule(host: host, port: port, exe: exe)
-        // Enforce binaries on and no program known: the rule would list none
-        // and so allow nothing. Don't draft a proposal that can't work.
-        if rule.binaries.isEmpty, enforceBinariesProvider(profileID) { return }
         _ = enqueue(profileID: profileID, rule: rule,
                     source: "mechanistic", intent: "Drafted from a blocked connection to \(host):\(port)")
     }
@@ -177,15 +178,35 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     /// connection (to the address, or a sibling name cached for it) could
     /// have replaced it unseen (Finding CWE-284, "Drawer Allow grants a later
     /// denied program, not the block the row lists").
+    /// The key names the program by its file name and a hash of its whole
+    /// path: `/usr/bin/curl` and `/tmp/curl` are different programs to
+    /// `binaries`, so each gets its own rule (Finding CWE-694, "Drawer Allow
+    /// cannot grant a second program that shares a file name").
     static func allowRule(host: String, port: Int, exe: String?) -> OpenShellPolicy.NetworkRule {
         let h = host.lowercased()
         func slug(_ s: String) -> String { s.map { $0.isLetter || $0.isNumber ? $0 : "_" }.reduce(into: "") { $0.append($1) } }
         var key = "allow_" + slug(h) + "_\(port)"
-        if let exe { key += "_" + slug((exe as NSString).lastPathComponent) }
+        if let exe { key += "_" + slug((exe as NSString).lastPathComponent) + "_" + pathHash(exe) }
         let ep = OpenShellPolicy.Endpoint(host: h, ports: [UInt16(port)], path: nil,
                                           allowedIPs: [], l7: nil, tlsSkip: false, enforcement: .audit,
                                           access: nil, rules: [], denyRules: [], allowEncodedSlash: false)
         return .init(key: key, name: key, endpoints: [ep], binaries: exe.map { [$0] } ?? [])
+    }
+
+    /// A stable short hash of a program path (FNV-1a; `hashValue` changes
+    /// per launch).
+    static func pathHash(_ path: String) -> String {
+        var h: UInt32 = 2_166_136_261
+        for b in path.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
+        return String(format: "%08x", h)
+    }
+
+    /// Whether `p` grants what a rule for this host, port and program would:
+    /// with Enforce binaries on, a rule only lets the programs it lists in,
+    /// so a proposal for another program is another grant.
+    static func sameGrant(_ p: Proposal, host: String, port: Int, binaries: [String], enforce: Bool) -> Bool {
+        p.host == host.lowercased() && Int(p.port) == port
+            && (!enforce || Set(p.rule.binaries) == Set(binaries))
     }
 
     /// The user allowed a blocked destination (the Sandbox drawer): add the
@@ -207,12 +228,15 @@ public final class OpenShellAdvisor: @unchecked Sendable {
         await approve(id: id, profileID: profileID)
         let settled = proposal(id: id, profileID: profileID)
         if settled?.status == .rejected { return settled?.rejectionReason ?? "couldn't add the rule" }
+        let enforce = enforceBinariesProvider(profileID)
         lock.lock()
         for i in (proposals[profileID] ?? []).indices {
             let p = proposals[profileID]![i]
             // Not one an approval is applying: it ends approved, not
-            // rejected while its rule is being saved.
-            if p.id != id, p.status == .pending, p.host == host.lowercased(), Int(p.port) == port,
+            // rejected while its rule is being saved. Nor one for another
+            // program: this rule doesn't let it in.
+            if p.id != id, p.status == .pending,
+               Self.sameGrant(p, host: host, port: port, binaries: rule.binaries, enforce: enforce),
                !applyingProposals.contains("\(profileID)|\(p.id)") {
                 proposals[profileID]![i].status = .rejected
                 proposals[profileID]![i].rejectionReason = "allowed by hand"
@@ -256,14 +280,17 @@ public final class OpenShellAdvisor: @unchecked Sendable {
            let result = OpenShellGovernance.shared.check(policyYAML: merged), !result.passed {
             findings.append("exceeds_boundary")
         }
+        let enforce = source == "agent_authored" && enforceBinariesProvider(profileID)
         lock.lock()
-        // An agent's proposal for the same host:port supersedes a mechanistic draft.
+        // An agent's proposal for the same host:port supersedes a mechanistic
+        // draft -- one that lets the draft's program in, under Enforce binaries.
         if source == "agent_authored" {
             for i in (proposals[profileID] ?? []).indices {
                 let p = proposals[profileID]![i]
                 if p.source == "mechanistic", p.status == .pending,
                    !applyingProposals.contains("\(profileID)|\(p.id)"),     // being approved: it stands
-                   rule.endpoints.contains(where: { $0.host == p.host && $0.ports.contains(p.port) }) {
+                   rule.endpoints.contains(where: { $0.host == p.host && $0.ports.contains(p.port) }),
+                   !enforce || Set(p.rule.binaries).isSubset(of: rule.binaries) {
                     proposals[profileID]![i].status = .rejected
                     proposals[profileID]![i].rejectionReason = "superseded by an agent-authored proposal"
                 }
