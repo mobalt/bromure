@@ -1885,12 +1885,9 @@ final class ScheduledAutomationEngine {
                 if let base = at.flatMap({ $0 > 0 ? landed[$0 - 1].sha : next.tipSHA ?? walkBase }) {
                     var bases = next.commitBases ?? [:]
                     bases[key] = base
-                    if bases.count > 200 {
-                        let open = Set(store.runs(for: a.id).filter { $0.outcome == .launched || $0.refusedByGuest == true }
-                            .compactMap(\.itemKey))
-                        bases = bases.filter { open.contains($0.key) || $0.key == key }
-                    }
-                    next.commitBases = bases
+                    next.commitBases = Self.trimmedCommitBases(
+                        bases, runs: store.runs(for: a.id), handled: store.handledItemKeys(for: a.id),
+                        underWay: launchesUnderWay(a.id), firing: key)
                 }
             }
             fire(a, now: Date(),
@@ -1900,6 +1897,26 @@ final class ScheduledAutomationEngine {
                  slugSuffix: Self.slugSuffix(for: enriched, kind: a.trigger),
                  itemKey: key)
         }
+    }
+
+    /// `commitBases` past `limit` entries keeps the bases a refusal can
+    /// still rewind to: runs not done yet, refused runs not fired again,
+    /// launches still on their way (a clone, checkout or boot records its
+    /// run only after an await -- an earlier commit of this same poll isn't
+    /// in `runs` yet), and the one firing now. A done run can't be refused
+    /// any more (Finding CWE-670, "A commit's rewind base is dropped before
+    /// an async launch is recorded").
+    nonisolated static func trimmedCommitBases(_ bases: [String: String], runs: [AutomationRunRecord],
+                                               handled: Set<String>, underWay: Set<String>,
+                                               firing key: String, limit: Int = 200) -> [String: String] {
+        guard bases.count > limit else { return bases }
+        var keep = underWay.union([key])
+        for r in runs {
+            guard let k = r.itemKey else { continue }
+            if r.outcome == .launched, r.completedAt == nil { keep.insert(k) }
+            if r.refusedByGuest == true, !handled.contains(k) { keep.insert(k) }
+        }
+        return bases.filter { keep.contains($0.key) }
     }
 
     /// The github.com token for comment enrichment (GitHub triggers only).
