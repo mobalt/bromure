@@ -1552,6 +1552,10 @@ final class ScheduledAutomationEngine {
     }
     /// Automations with a GitHub poll in flight — one at a time per automation.
     private var pollsInFlight: Set<UUID> = []
+    /// Event automations `repollSoon` asked to poll early since their poll
+    /// last started. A poll keeps the cleared `lastPolledAt` only for one
+    /// asked for while it ran; one that started from it saves its own time.
+    private var repollRequested: Set<UUID> = []
     /// Branches already told to finish this session — avoids resending on
     /// repeated .done flips. (The authoritative watch lives in the run
     /// records' branchSlug, which survives app restarts.)
@@ -1692,13 +1696,18 @@ final class ScheduledAutomationEngine {
         var next = ScheduledAutomationStore.PRPollState(
             lastPolledAt: now, highWater: previous?.highWater, tipSHA: previous?.tipSHA)
         next.commitBases = previous?.commitBases
+        repollRequested.remove(a.id)
         defer {
             // A refusal while this poll ran rewound the tip or asked for a
-            // poll soon (`requeueRefused`): this poll's view is older.
+            // poll soon (`requeueRefused`): this poll's view is older. A nil
+            // `lastPolledAt` this poll started from is answered by it --
+            // keeping it would poll every tick, backoff gone (Finding
+            // CWE-670, "Event automations poll every tick once an early poll
+            // has been requested").
             if let current = store.pollState(for: a.id) {
                 if current.tipSHA != previous?.tipSHA { next.tipSHA = current.tipSHA }
-                if current.lastPolledAt == nil { next.lastPolledAt = nil }
             }
+            if repollRequested.contains(a.id) { next.lastPolledAt = nil }
             store.setPollState(next, for: a.id)
         }
 
@@ -1985,6 +1994,7 @@ final class ScheduledAutomationEngine {
               var state = store.pollState(for: automationID) else { return }
         state.lastPolledAt = nil
         store.setPollState(state, for: automationID)
+        repollRequested.insert(automationID)
     }
 
     /// Manual "Run now" — the same path as a scheduled fire; the schedule is
