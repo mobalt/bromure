@@ -1401,6 +1401,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// stay on the host; the VM's env carries fakes. See ManualToken.
     public var manualTokens: [ManualToken]
 
+    /// Credentials the VM created through an API (STS, iam:CreateAccessKey,
+    /// registry and cluster logins …) and the proxy kept on the host,
+    /// handing the VM fakes. Saved here so the fakes keep working after a
+    /// restart. See `MintedCredential`.
+    public var mintedCredentials: [MintedCredential] = []
+
     /// Pre-existing SSH private keys the user has pointed at this
     /// profile. Loaded into the bromure ssh-agent at every session
     /// launch alongside the auto-generated key.
@@ -2351,6 +2357,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case gitHTTPSCredentials
         case additionalTools
         case manualTokens
+        case mintedCredentials
         case importedSSHKeys
         case environmentVariables
         case traceLevel
@@ -2479,6 +2486,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         additionalTools = dedup
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
+        mintedCredentials = try c.decodeIfPresent([MintedCredential].self, forKey: .mintedCredentials) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
         environmentVariables = try c.decodeIfPresent([EnvironmentVariable].self,
                                                      forKey: .environmentVariables) ?? []
@@ -2608,6 +2616,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !manualTokens.isEmpty {
             try c.encode(manualTokens, forKey: .manualTokens)
+        }
+        if !mintedCredentials.isEmpty {
+            try c.encode(mintedCredentials, forKey: .mintedCredentials)
         }
         if !importedSSHKeys.isEmpty {
             try c.encode(importedSSHKeys, forKey: .importedSSHKeys)
@@ -3079,6 +3090,14 @@ struct ProfileSecrets: Codable {
     /// write-only over the remote export path like everything else here.
     /// Keyed by EnvironmentVariable.id.uuidString.
     var environmentVariableValues: [String: String]?
+    /// Minted credentials' real values, keyed by MintedCredential.id: the
+    /// token or secret access key, and the session token. Optional for
+    /// older `secrets.enc` blobs.
+    var mintedCredentialSecrets: [String: MintedSecret]?
+    struct MintedSecret: Codable, Equatable {
+        var secret: String
+        var sessionToken: String
+    }
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -3101,6 +3120,7 @@ struct ProfileSecrets: Codable {
             && (mcpEnvironmentValues?.isEmpty ?? true)
             && (mcpRawJSONs?.isEmpty ?? true)
             && (environmentVariableValues?.isEmpty ?? true)
+            && (mintedCredentialSecrets?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -3135,6 +3155,13 @@ struct ProfileSecrets: Codable {
                 s.manualTokenValues[t.id.uuidString] = t.realValue
                 profile.manualTokens[i].realValue = ""
             }
+        }
+
+        for (i, m) in profile.mintedCredentials.enumerated() where !m.secret.isEmpty || !m.sessionToken.isEmpty {
+            s.mintedCredentialSecrets = s.mintedCredentialSecrets ?? [:]
+            s.mintedCredentialSecrets?[m.id.uuidString] = MintedSecret(secret: m.secret, sessionToken: m.sessionToken)
+            profile.mintedCredentials[i].secret = ""
+            profile.mintedCredentials[i].sessionToken = ""
         }
 
         if !profile.kubeconfigs.isEmpty {
@@ -3258,6 +3285,13 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        for (i, m) in profile.mintedCredentials.enumerated() {
+            if let v = mintedCredentialSecrets?[m.id.uuidString] {
+                profile.mintedCredentials[i].secret = v.secret
+                profile.mintedCredentials[i].sessionToken = v.sessionToken
+            }
+        }
+
         if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
         if let lin = linearToken { profile.linearToken = lin }
@@ -3345,6 +3379,9 @@ struct ProfileSecrets: Codable {
         additionalToolApiKeys.merge(newer.additionalToolApiKeys) { _, n in n }
         gitHTTPSTokens.merge(newer.gitHTTPSTokens) { _, n in n }
         manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
+        if let v = newer.mintedCredentialSecrets {
+            mintedCredentialSecrets = (mintedCredentialSecrets ?? [:]).merging(v) { _, n in n }
+        }
         // Kube round-trips through the redacted export with blank auth. Merge per
         // id so an identity/guardrail edit (name, requireApproval, …) applies while
         // a blank auth keeps the stored cert/token; a real incoming auth still wins.
@@ -3815,6 +3852,9 @@ public final class ProfileStore {
             return true
         }
         if profile.manualTokens.contains(where: { !$0.realValue.isEmpty }) {
+            return true
+        }
+        if profile.mintedCredentials.contains(where: { !$0.secret.isEmpty || !$0.sessionToken.isEmpty }) {
             return true
         }
         if !profile.awsCredentials.secretAccessKey.isEmpty

@@ -4308,3 +4308,6 @@
 "Add a rule for this host and port, for %@" = "为此主机和端口添加规则，适用于 %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "“%@”已不存在：另一个 Bromure 进程已将其删除。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "用于 %@（SigV4 在主机端签名）";

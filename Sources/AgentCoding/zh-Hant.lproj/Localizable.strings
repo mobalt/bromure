@@ -4311,3 +4311,6 @@
 "Add a rule for this host and port, for %@" = "為此主機和連接埠新增規則，適用於 %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "「%@」已不存在：另一個 Bromure 程序已將其刪除。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "用於 %@（SigV4 在主機端簽章）";

@@ -4308,3 +4308,6 @@
 "Add a rule for this host and port, for %@" = "このホストとポートのルールを %@ に追加";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "「%@」はもう存在しません。別の Bromure プロセスが削除しました。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "%@ に対して（ホストで SigV4 署名）";

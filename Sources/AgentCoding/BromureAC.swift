@@ -2098,6 +2098,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // handlers without holding the Profile itself.
     /// Squelch on or off for a workspace: saved, and in force from its next
     /// model request (the proxy reads `SquelchSettings`, kept by `profiles`).
+    /// Keep a credential the VM minted (`MintedCredential`) in its
+    /// workspace's configuration, dropping ones long expired. No live
+    /// refresh: the proxy registered it already, and nothing in the guest's
+    /// environment changes.
+    func saveMintedCredential(_ minted: MintedCredential, profileID: Profile.ID) {
+        guard let i = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        var p = profiles[i]
+        p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] minted credential: couldn't save profile: \(error)")
+            return
+        }
+        profiles[i] = p
+        runningSessions[profileID]?.profile = p
+        if lastStagedProfiles[profileID] != nil {
+            lastStagedProfiles[profileID]?.mintedCredentials = p.mintedCredentials
+        }
+    }
+
     @discardableResult
     func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
         guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
@@ -2835,6 +2854,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // A supply-chain override prompt's "Always allow" saves to the
             // workspace's reputation allowlist.
             self.wireSupplyChainOverrides(e.supplyChainBroker)
+            // A credential the VM minted through an API is saved in its
+            // workspace (the proxy already made it usable).
+            e.credentialMinter.sink = { [weak self] pid, minted in
+                Task { @MainActor in self?.saveMintedCredential(minted, profileID: pid) }
+            }
             if BACEnrollmentStore.load() != nil {
                 let up = BACTraceUploader()
                 up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))
@@ -11730,6 +11754,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Full map = profile plan + kubeconfig bearer/exec swaps, the
             // same composition the launch path builds.
             var fresh = plan.tokenMap()
+            // Credentials the VM minted earlier (`MintedCredential`).
+            fresh.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             let kubeMat = KubeconfigMaterializer().materialize(
                 profile: profile, bromureCAPEM: engine.ca.certificatePEM,
                 directClusters: kubeClusterEngine.directClusters(for: profile.id),
@@ -12372,6 +12399,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Token map = the profile-derived plan + the kubeconfig
             // bearer/exec swap entries.
             var tokenMap = plan.tokenMap()
+            // Credentials the VM minted in an earlier boot (`MintedCredential`).
+            tokenMap.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             for swap in kubeMat.bearerSwaps {
                 tokenMap.entries.append(TokenMap.Entry(
                     fake: swap.fakeToken, real: swap.realToken, host: swap.host,

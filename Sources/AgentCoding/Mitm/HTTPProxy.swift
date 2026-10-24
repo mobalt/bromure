@@ -90,6 +90,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
+    /// The engine's `CredentialMinter`: rewrites the responses of calls
+    /// that issue a credential (`CredentialMint`). Set by MitmEngine.
+    nonisolated(unsafe) static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)?
     nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
     /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
     /// the token exchange is answered by the host, not the provider.
@@ -1704,6 +1707,40 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     with a response written straight back to the guest, so
         //     the SDK gets a meaningful HTTP error rather than an
         //     opaque InvalidSignatureException after a round-trip.
+        // A call that issues a credential (sts:AssumeRole, iam:CreateAccessKey,
+        // ecr:GetAuthorizationToken, doctl registry/kubernetes/spaces …): its
+        // response is buffered and the credentials in it replaced by fakes
+        // before the VM sees it (`CredentialMint`); one whose secret no fake
+        // can stand in for is refused here, in every guardrail mode.
+        let mintKind: CredentialMint.Kind?
+        switch CredentialMint.classify(rawRequest: swap.modified, host: host) {
+        case .deny(let action)?:
+            FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.denial(action)
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        case .mint(let kind)?:
+            mintKind = kind
+        case nil:
+            mintKind = nil
+        }
+        let minter = Self.credentialMinterProvider?()
+        if mintKind != nil, minter == nil || bodyFile != nil {
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.refusal(minter == nil ? "no credential minter" : "a streamed body")
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        }
+
         var toForward: Data
         // Skip AWS SigV4 re-signing for an insecure request — resigning uses
         // the real AWS secret, exactly the credential we won't put on an
@@ -2588,7 +2625,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         defer { if ownsRelaySession { relaySession.finishTasksAndInvalidate() } }
         let relay: RelayResponse
-        if depiRouted {
+        if let mintKind, let minter {
+            // Buffered so no byte of a real credential reaches the guest; a
+            // response the rewrite can't account for becomes a 502.
+            let pid = profileID
+            relay = try await relayUpstreamBuffered(
+                rawRequest: toForward, host: upstreamHost, port: upstreamPort,
+                session: relaySession, tls: tls, scheme: upstreamScheme,
+                rewrite: { minter.process(response: $0, kind: mintKind, profileID: pid) })
+        } else if depiRouted {
             // Depi-routed npm traffic goes through the buffered
             // relay so a 401 can be swapped for a self-explanatory
             // error before any byte reaches the guest — the
