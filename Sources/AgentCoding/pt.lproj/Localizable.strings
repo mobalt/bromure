@@ -4301,3 +4301,8 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marcado como comprometido: o Bromure detectou este espaço de trabalho enviando uma credencial para onde não devia (a solicitação foi bloqueada). Ao iniciá-lo, você é perguntado primeiro se quer apagar o disco e a home. Clique com o botão direito para apagá-lo agora ou para remover a marca se foi um alarme falso.";
 "Wipe and Restore…" = "Apagar e restaurar…";
 "Clear Compromised Mark…" = "Remover marca de comprometido…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "Adicionar uma regra para este host e porta";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "Adicionar uma regra para este host e porta, para %@";

@@ -4304,3 +4304,8 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已標示為遭入侵：Bromure 發現此工作區試圖將憑證傳送到不應傳送的地方（請求已被阻擋）。啟動時會先詢問是否清除其磁碟和主目錄。按右鍵可立即清除，或在誤報時移除標記。";
 "Wipe and Restore…" = "清除並復原…";
 "Clear Compromised Mark…" = "移除遭入侵標記…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "為此主機和連接埠新增規則";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "為此主機和連接埠新增規則，適用於 %@";
