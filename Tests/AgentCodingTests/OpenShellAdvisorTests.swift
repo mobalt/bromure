@@ -159,7 +159,7 @@ struct OpenShellAdvisorTests {
         let error = await a.allow(profileID: pid, host: "www.bromure.io", port: 443, exe: "/usr/bin/curl")
         #expect(error == nil)
         let policy = try OpenShellPolicy.parse(box.policy)
-        let rule = try #require(policy.networkPolicies.first { $0.key == "allow_www_bromure_io_443_curl" })
+        let rule = try #require(policy.networkPolicies.first { $0.key == "allow_www_bromure_io_443_curl_" + OpenShellAdvisor.pathHash("/usr/bin/curl") })
         #expect(rule.binaries == ["/usr/bin/curl"])
         #expect(rule.endpoints.first?.host == "www.bromure.io")
         #expect(a.pending(for: pid).isEmpty)
@@ -173,6 +173,39 @@ struct OpenShellAdvisorTests {
         #expect(rule.binaries.isEmpty)
         // Allowing it again is refused, not duplicated.
         #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: nil) != nil)
+    }
+
+    /// Finding (CWE-694): "Drawer Allow cannot grant a second program that
+    /// shares a file name". The key named the program by file name only, so
+    /// allowing /tmp/curl after /usr/bin/curl was refused as a duplicate
+    /// key; drafts and the "allowed by hand" settle keyed on host and port.
+    @Test("Under Enforce binaries: two programs with one file name are two grants")
+    func allowSameFileName() async throws {
+        let (a, pid, box) = advisor(mode: .review)
+        a.enforceBinariesProvider = { _ in true }
+        for exe in ["/usr/bin/curl", "/tmp/curl"] {
+            a.recordDenial(profileID: pid, layer: "sni", host: "pypi.org", port: 443, method: nil, path: nil,
+                           reason: "no rule", exe: exe)
+        }
+        #expect(Set(a.pending(for: pid).map(\.rule.binaries)) == [["/usr/bin/curl"], ["/tmp/curl"]])
+        // Allowing one settles its own draft, not the other program's.
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: "/usr/bin/curl") == nil)
+        #expect(a.pending(for: pid).map(\.rule.binaries) == [["/tmp/curl"]])
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: "/tmp/curl") == nil)
+        let rules = try OpenShellPolicy.parse(box.policy).networkPolicies.filter { $0.key.hasPrefix("allow_pypi_org_443") }
+        #expect(Set(rules.map(\.binaries)) == [["/usr/bin/curl"], ["/tmp/curl"]])
+        #expect(Set(rules.map(\.key)).count == 2)
+        #expect(a.pending(for: pid).isEmpty)
+        // The same program again is still refused, not duplicated.
+        #expect(await a.allow(profileID: pid, host: "pypi.org", port: 443, exe: "/tmp/curl") != nil)
+        // An agent's rule for one program doesn't supersede another's draft.
+        a.recordDenial(profileID: pid, layer: "sni", host: "pypi.org", port: 443, method: nil, path: nil,
+                       reason: "no rule", exe: "/usr/local/bin/python3")
+        _ = a.submit(profileID: pid, body: proposal("pypi_alt", host: "pypi.org"))   // lists /usr/bin/curl
+        #expect(a.pending(for: pid).contains { $0.source == "mechanistic" && $0.rule.binaries == ["/usr/local/bin/python3"] })
+        // Keys are stable across launches.
+        #expect(OpenShellAdvisor.pathHash("/usr/bin/curl") == OpenShellAdvisor.pathHash("/usr/bin/curl"))
+        #expect(OpenShellAdvisor.pathHash("/usr/bin/curl") != OpenShellAdvisor.pathHash("/tmp/curl"))
     }
 
     /// Finding (CWE-670): "Sandbox drawer Allow saves a no-op rule when
