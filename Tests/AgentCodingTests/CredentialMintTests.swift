@@ -299,6 +299,23 @@ struct CredentialMintTests {
         #expect(MintedCredential.tokenEntries([fresh, recent], salt: Self.salt, now: now).map(\.real) == ["x"])
     }
 
+    @Test("a save from an older copy (editor, remote edit, AppleScript) keeps what the VM minted since")
+    func savesKeepMinted() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let app = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let script = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/ScriptCommands.swift"), encoding: .utf8)
+        // The editor: the app's current list, before saveEdited writes the secrets blob.
+        let persist = try #require(app.range(of: "func persistEditedProfile("))
+        let body = app[persist.upperBound...]
+        let carry = try #require(body.range(of: "profile.mintedCredentials = current.mintedCredentials"))
+        let save = try #require(body.range(of: "try store.saveEdited(&profile)"))
+        #expect(carry.lowerBound < save.lowerBound)
+        // The document round-trips: the stored list, never the document's.
+        #expect(app.components(separatedBy: "incoming.mintedCredentials = existing.mintedCredentials").count == 2)
+        #expect(script.contains("incoming.mintedCredentials = existing.mintedCredentials"))
+    }
+
     @Test("the proxy refuses or rewrites before anything reaches the VM")
     func wiring() throws {
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()

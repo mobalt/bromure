@@ -11152,6 +11152,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var merged = existingSecrets
             merged.overlay(with: incomingSecrets)
             merged.apply(to: &incoming)
+            // Minted credentials are the VM's, never the document's: a copy
+            // round-tripped while the VM minted one would drop it (and its
+            // secret), and the next boot would sign its key as the workspace.
+            incoming.mintedCredentials = existing.mintedCredentials
 
             // Kube contexts are part of this full-document replace: honor the
             // caller's exact set so removing one in the (redacted) editor sticks.
@@ -11310,6 +11314,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var merged = existingSecrets
         merged.overlay(with: incomingSecrets)
         merged.apply(to: &incoming)
+        // No VM runs on the template: it mints nothing.
+        incoming.mintedCredentials = []
         // Only an explicitly-sent kubeconfigs array is authoritative (removing a
         // context in the redacted editor must stick); an absent key = untouched.
         if let sentKube = rawDoc["kubeconfigs"] as? [[String: Any]] {
