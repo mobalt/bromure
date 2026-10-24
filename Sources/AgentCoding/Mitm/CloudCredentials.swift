@@ -132,12 +132,11 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     /// system trust for that handshake: Finding CWE-362, "Live kube trust
     /// rebuild drops the cluster CA and client cert between lock
     /// acquisitions"). A host whose new PEM doesn't parse keeps the CA it
-    /// had, rather than falling back to system trust: its own (`previous[h]`),
-    /// under `h` and its bare-host alias. Never `previous[bare]` itself --
-    /// that alias is whichever `host:port` registered last, possibly a
-    /// context this rebuild removed (Finding CWE-295, "A failed cluster-CA
-    /// parse republishes a removed context's CA on the bare host"). With
-    /// no previous CA of its own it stays unpinned, as a new host would.
+    /// had, rather than falling back to system trust -- its own, never a
+    /// context's this rebuild removed (Finding CWE-295, "A failed
+    /// cluster-CA parse republishes a removed context's CA on the bare
+    /// host"): `restoreFailed`. With no previous CA of its own it stays
+    /// unpinned, as a new host would.
     public func replaceAll(_ cas: [(pem: String, host: String)], for profileID: UUID) {
         var parsed: [String: SecCertificate] = [:]
         var failed: [String] = []
@@ -152,12 +151,43 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
         for h in failed {
             FileHandle.standardError.write(Data(
                 "[mitm] cluster CA parse failed for host=\(h) — keeping its previous CA\n".utf8))
-            guard let old = previous[h] else { continue }
-            for key in [h] + (h.split(separator: ":").first.map { [String($0)] } ?? []) where parsed[key] == nil {
-                parsed[key] = old
+        }
+        Self.restoreFailed(failed, included: Set(cas.map { $0.host.lowercased() }),
+                           previous: previous, into: &parsed)
+        perProfile[profileID] = parsed.isEmpty ? nil : parsed
+    }
+
+    private static func bareHost(_ h: String) -> String {
+        h.split(separator: ":").first.map(String.init) ?? h
+    }
+
+    /// Hosts whose PEM didn't parse keep what they had. A `host:port` keeps
+    /// its own key. The bare slot -- the CONNECT lookup's, written by
+    /// whichever `host:port` (or port-less host) registered last -- keeps
+    /// its certificate only while the entry that wrote it is in this
+    /// rebuild; otherwise it takes the first failed `host:port`'s own CA,
+    /// and with none it stays unpinned. A slot a parsed PEM filled is
+    /// left alone.
+    static func restoreFailed(_ failed: [String], included: Set<String>,
+                              previous: [String: SecCertificate],
+                              into parsed: inout [String: SecCertificate]) {
+        for h in failed where bareHost(h) != h && parsed[h] == nil {
+            if let old = previous[h] { parsed[h] = old }
+        }
+        var seen = Set<String>()
+        for bare in failed.map(bareHost) where seen.insert(bare).inserted && parsed[bare] == nil {
+            if let slot = previous[bare] {
+                // Who wrote it: a host:port holding the same certificate,
+                // else the port-less host itself.
+                let writers = previous.filter { $0.key != bare && bareHost($0.key) == bare && CFEqual($0.value, slot) }
+                    .map(\.key)
+                let present = writers.isEmpty ? included.contains(bare) : writers.contains(where: included.contains)
+                if present { parsed[bare] = slot; continue }
+            }
+            if let own = failed.first(where: { $0 != bare && bareHost($0) == bare && previous[$0] != nil }) {
+                parsed[bare] = previous[own]
             }
         }
-        perProfile[profileID] = parsed.isEmpty ? nil : parsed
     }
 
     public func ca(for host: String, profileID: UUID) -> SecCertificate? {

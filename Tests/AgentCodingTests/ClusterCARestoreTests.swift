@@ -67,4 +67,40 @@ struct ClusterCARestoreTests {
         #expect(Self.der(reg.ca(for: "10.163.15.50:6443", profileID: pid)) == a)
         #expect(Self.der(reg.ca(for: "10.163.15.50", profileID: pid)) == b)
     }
+
+    @Test("every PEM on a host failing: the bare slot stays with the entry that wrote it, across edits")
+    func allFailedKeepsSlotOwner() throws {
+        let caA = try #require(try Self.selfSignedPEM("cluster-a"))
+        let caB = try #require(try Self.selfSignedPEM("cluster-b"))
+        let reg = ClusterCATrustRegistry(), pid = UUID()
+        reg.replaceAll([(pem: caA, host: "10.163.15.50:6443"), (pem: caB, host: "10.163.15.50:8443")], for: pid)
+        let a = Self.der(reg.ca(for: "10.163.15.50:6443", profileID: pid))
+        let b = Self.der(reg.ca(for: "10.163.15.50:8443", profileID: pid))
+        // Both fail, :6443 first in the list: the slot stays :8443's.
+        reg.replaceAll([(pem: Self.broken, host: "10.163.15.50:6443"), (pem: Self.broken, host: "10.163.15.50:8443")], for: pid)
+        #expect(Self.der(reg.ca(for: "10.163.15.50", profileID: pid)) == b)
+        #expect(Self.der(reg.ca(for: "10.163.15.50:6443", profileID: pid)) == a)
+        // The review's sequence: :6443 fails alone first, then :8443 fails too.
+        reg.replaceAll([(pem: caA, host: "10.163.15.50:6443"), (pem: caB, host: "10.163.15.50:8443")], for: pid)
+        reg.replaceAll([(pem: Self.broken, host: "10.163.15.50:6443"), (pem: caB, host: "10.163.15.50:8443")], for: pid)
+        reg.replaceAll([(pem: Self.broken, host: "10.163.15.50:6443"), (pem: Self.broken, host: "10.163.15.50:8443")], for: pid)
+        #expect(Self.der(reg.ca(for: "10.163.15.50", profileID: pid)) == b)
+        #expect(Self.der(reg.ca(for: "10.163.15.50:8443", profileID: pid)) == b)
+    }
+
+    @Test("a port-less host keeps the slot it wrote, never one a removed host:port wrote")
+    func portless() throws {
+        let caA = try #require(try Self.selfSignedPEM("cluster-a"))
+        let caB = try #require(try Self.selfSignedPEM("cluster-b"))
+        let reg = ClusterCATrustRegistry(), pid = UUID()
+        // Its own: kept.
+        reg.replaceAll([(pem: caA, host: "k8s.example.com")], for: pid)
+        let a = Self.der(reg.ca(for: "k8s.example.com", profileID: pid))
+        reg.replaceAll([(pem: Self.broken, host: "k8s.example.com")], for: pid)
+        #expect(Self.der(reg.ca(for: "k8s.example.com", profileID: pid)) == a)
+        // A host:port on the same name wrote the slot last, then went away.
+        reg.replaceAll([(pem: caA, host: "k8s.example.com"), (pem: caB, host: "k8s.example.com:8443")], for: pid)
+        reg.replaceAll([(pem: Self.broken, host: "k8s.example.com")], for: pid)
+        #expect(reg.ca(for: "k8s.example.com", profileID: pid) == nil)
+    }
 }
