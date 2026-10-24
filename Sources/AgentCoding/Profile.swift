@@ -3910,12 +3910,18 @@ public final class ProfileStore {
         fm.fileExists(atPath: profileDirectory(for: profile).appendingPathComponent("profile.json").path)
     }
 
+    /// Save a change to a workspace that is already saved -- from a copy
+    /// held in memory, which may outlive the directory. Never recreates it.
+    public func update(_ profile: Profile) throws {
+        guard exists(profile) else { throw ProfileGone(name: profile.name) }
+        try save(profile)
+    }
+
     /// Stamp a launch on a saved workspace; never recreates a deleted one.
     public func touch(_ profile: Profile) throws {
-        guard exists(profile) else { throw ProfileGone(name: profile.name) }
         var p = profile
         p.lastUsedAt = Date()
-        try save(p)
+        try update(p)
     }
 
     public func delete(_ profile: Profile) throws {

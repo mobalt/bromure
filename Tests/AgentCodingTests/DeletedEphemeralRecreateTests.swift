@@ -28,6 +28,40 @@ struct DeletedEphemeralRecreateTests {
         #expect(!store.exists(p))
         #expect(store.loadAll().isEmpty)
         #expect(ProfileStore.ProfileGone(name: "rm-run").localizedDescription.contains("rm-run"))
+        // Nor does an update from the stale in-memory copy.
+        var edited = p
+        edited.squelch.enabled = true
+        #expect(throws: ProfileStore.ProfileGone.self) { try store.update(edited) }
+        #expect(!FileManager.default.fileExists(atPath: store.profileDirectory(for: p).path))
+        // A saved one updates.
+        let kept = Profile(name: "kept", tool: .claude, authMode: .token)
+        try store.save(kept)
+        var k2 = kept
+        k2.squelch.enabled = true
+        try store.update(k2)
+        #expect(store.loadAll().first { $0.id == kept.id }?.squelch.enabled == true)
+    }
+
+    @Test("a fat-client Start (POST /vms) of a deleted workspace answers 404 instead of saving it back")
+    func fatClientStart() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: root.appendingPathComponent(p), encoding: .utf8) }
+        let ac = try src("Sources/AgentCoding/BromureAC.swift")
+        let start = try #require(ac.range(of: "private func automationCreateVM(spec: [String: Any]) async -> [String: Any]? {"))
+        let body = ac[start.upperBound...]
+        let gone = try #require(body.range(of: "guard store.exists(existing) else {"))
+        let save = try #require(body.range(of: "do { try store.save(profile) }"))
+        #expect(gone.lowerBound < save.lowerBound)
+        #expect(body[gone.lowerBound...].prefix(400).contains("\"notFound\": true"))
+        // Updates from an in-memory row never recreate one either.
+        for (file, needle) in [("Sources/AgentCoding/BromureAC.swift", "p.squelch.enabled = on\n        do { try store.update(p) }"),
+                               ("Sources/AgentCoding/BromureAC.swift", "change(&saved)\n        try? store.update(saved)"),
+                               ("Sources/AgentCoding/FirewallRuleActions.swift", "p.egressRules = text\n        do { try store.update(p) }"),
+                               ("Sources/AgentCoding/SupplyChainOverrides.swift", "do { try store.update(p) }"),
+                               ("Sources/AgentCoding/ScriptCommands.swift", "try d.store.update(incoming)"),
+                               ("Sources/AgentCoding/ScriptCommands.swift", "try d.store.update(p)")] {
+            #expect(try src(file).contains(needle), "\(file): \(needle)")
+        }
     }
 
     @Test("launch checks the disk before it asks or boots, and again at touch; an edit doesn't write it back")

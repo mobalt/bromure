@@ -2104,7 +2104,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var p = profiles[i]
         guard p.squelch.enabled != on else { return true }
         p.squelch.enabled = on
-        do { try store.save(p) } catch {
+        do { try store.update(p) } catch {
             NSLog("[bromure-ac] squelch: couldn't save profile: \(error)")
             return false
         }
@@ -6457,7 +6457,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func saveField(of id: Profile.ID, _ change: (inout Profile) -> Void) {
         guard var saved = profiles.first(where: { $0.id == id }) else { return }
         change(&saved)
-        try? store.save(saved)
+        try? store.update(saved)
         if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i] = saved }
     }
 
@@ -7042,6 +7042,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // 1. Resolve an existing profile, or mint one on the fly.
         var profile: Profile
         if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
+            // Deleted by the other process (its `vm run --rm` sweep): the
+            // row is stale, and the save below would bring it back as a
+            // kept workspace, secrets and all. Answered as deleted (404).
+            guard store.exists(existing) else {
+                profiles = store.loadAll()
+                refreshSidebar()
+                return ["error": ProfileStore.ProfileGone(name: existing.name).localizedDescription, "notFound": true]
+            }
             profile = existing
         } else if let refusal = Self.unknownWorkspaceRefusal(spec["profile"]) {
             return refusal
@@ -10119,7 +10127,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let override = p.bedrockModelOverride(global: global) else { continue }
             p.modelOverride = override
             do {
-                try store.save(p)
+                try store.update(p)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept Claude Code on Amazon Bedrock via a workspace override")
@@ -10142,7 +10150,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyLocalEngine(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept its own local engine via a workspace override")
@@ -10164,7 +10172,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyOmpCustom(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): moved omp's custom server into the workspace's model settings")
@@ -11015,7 +11023,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             changed = true
         }
         if changed {
-            do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
+            do { try store.update(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
             if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
             applyLiveEditToRunningSession(p)
         } else {
@@ -12044,7 +12052,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.sshPublicKey != nil {
                 var p = profile
                 p.sshPublicKey = nil
-                try? store.save(p)
+                try? store.update(p)
                 profiles = store.loadAll()
                 refreshSidebar()
             }
@@ -12817,7 +12825,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // never attaches the old virtiofs home again.
             if var p = self.profiles.first(where: { $0.id == profile.id }) {
                 p.homeModel = .ext4
-                try? self.store.save(p)
+                try? self.store.update(p)
                 self.profiles = self.store.loadAll()
             }
             self.runningSessions[profile.id]?.homeJustMigrated = true
