@@ -453,7 +453,7 @@ extension ACAppDelegate {
         guard var p = profiles.first(where: { $0.id == profileID }), p.egressRules != text else { return false }
         let previous = p.egressRules
         p.egressRules = text
-        do { try store.save(p) } catch {
+        do { try store.update(p) } catch {
             NSLog("[bromure-ac] firewall: couldn't save rules for \(p.name): \(error)")
             return false
         }

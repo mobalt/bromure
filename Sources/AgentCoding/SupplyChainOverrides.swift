@@ -11,7 +11,7 @@ extension ACAppDelegate {
         guard var p = profiles.first(where: { $0.id == profileID }) else { return false }
         if p.supplyChain.reputationAllowlist.contains(where: { $0.lowercased() == entry.lowercased() }) { return true }
         p.supplyChain.reputationAllowlist.append(entry)
-        do { try store.save(p) } catch {
+        do { try store.update(p) } catch {
             NSLog("[bromure-ac] supply chain: couldn't save the allowlist for \(p.name): \(error)")
             return false
         }

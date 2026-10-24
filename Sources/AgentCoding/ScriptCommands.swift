@@ -248,7 +248,7 @@ final class BromureACSetProfileJSONCommand: NSScriptCommand {
                 var incomingCopy = incoming
                 merged.overlay(with: ProfileSecrets.extract(stripping: &incomingCopy))
                 merged.apply(to: &incoming)
-                try d.store.save(incoming)
+                try d.store.update(incoming)
                 d.profiles = d.store.loadAll()
                 // Apply live to a running session (no reboot) — matching the
                 // GUI/automation save path. Without this an external edit via
@@ -334,7 +334,7 @@ final class BromureACSetProfileSettingCommand: NSScriptCommand {
                 return "error: unknown key '\(k)'" as Any
             }
             do {
-                try d.store.save(p)
+                try d.store.update(p)
                 d.profiles = d.store.loadAll()
                 d.applyLiveEditToRunningSession(p)   // live-apply (no reboot)
                 return "ok" as Any

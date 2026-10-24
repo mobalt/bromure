@@ -4306,3 +4306,5 @@
 "Add a rule for this host and port" = "Ajouter une règle pour cet hôte et ce port";
 /* sandbox drawer: Allow help, the program's full path */
 "Add a rule for this host and port, for %@" = "Ajouter une règle pour cet hôte et ce port, pour %@";
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "« %@ » n’existe plus : un autre processus Bromure l’a supprimé.";

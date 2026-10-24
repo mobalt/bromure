@@ -2104,7 +2104,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var p = profiles[i]
         guard p.squelch.enabled != on else { return true }
         p.squelch.enabled = on
-        do { try store.save(p) } catch {
+        do { try store.update(p) } catch {
             NSLog("[bromure-ac] squelch: couldn't save profile: \(error)")
             return false
         }
@@ -6457,7 +6457,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func saveField(of id: Profile.ID, _ change: (inout Profile) -> Void) {
         guard var saved = profiles.first(where: { $0.id == id }) else { return }
         change(&saved)
-        try? store.save(saved)
+        try? store.update(saved)
         if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i] = saved }
     }
 
@@ -7042,6 +7042,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // 1. Resolve an existing profile, or mint one on the fly.
         var profile: Profile
         if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
+            // Deleted by the other process (its `vm run --rm` sweep): the
+            // row is stale, and the save below would bring it back as a
+            // kept workspace, secrets and all. Answered as deleted (404).
+            guard store.exists(existing) else {
+                profiles = store.loadAll()
+                refreshSidebar()
+                return ["error": ProfileStore.ProfileGone(name: existing.name).localizedDescription, "notFound": true]
+            }
             profile = existing
         } else if let refusal = Self.unknownWorkspaceRefusal(spec["profile"]) {
             return refusal
@@ -10119,7 +10127,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let override = p.bedrockModelOverride(global: global) else { continue }
             p.modelOverride = override
             do {
-                try store.save(p)
+                try store.update(p)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept Claude Code on Amazon Bedrock via a workspace override")
@@ -10142,7 +10150,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyLocalEngine(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept its own local engine via a workspace override")
@@ -10164,7 +10172,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyOmpCustom(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): moved omp's custom server into the workspace's model settings")
@@ -10903,6 +10911,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let refusal = OpenShellGovernance.shared.refusal(saving: profile, editing: editing) {
             throw refusal
         }
+        // An edit of a workspace the other process deleted meanwhile: don't
+        // write it back.
+        if editing != nil, !store.exists(profile) {
+            profiles = store.loadAll()
+            refreshSidebar()
+            throw ProfileStore.ProfileGone(name: profile.name)
+        }
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
@@ -11008,7 +11023,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             changed = true
         }
         if changed {
-            do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
+            do { try store.update(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
             if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
             applyLiveEditToRunningSession(p)
         } else {
@@ -12037,7 +12052,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.sshPublicKey != nil {
                 var p = profile
                 p.sshPublicKey = nil
-                try? store.save(p)
+                try? store.update(p)
                 profiles = store.loadAll()
                 refreshSidebar()
             }
@@ -12133,6 +12148,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Already booting (a detached boot has no pane to find above): one
         // boot per disk.
         if bootsInFlight.contains(profile.id) { return }
+        // Deleted by the other process (its `vm run --rm` sweep): the row
+        // is stale. Booting it would save it back as a kept workspace.
+        guard store.exists(profile) else { forgetDeletedProfile(profile, unattended: unattended); return }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -12289,7 +12307,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
-        try? store.touch(profile)
+        // Again after the questions above: they wait on the user, and the
+        // other process may have deleted it meanwhile.
+        do { try store.touch(profile) } catch is ProfileStore.ProfileGone {
+            forgetDeletedProfile(profile, unattended: unattended)
+            return
+        } catch {}
 
         // Home-storage migration (virtiofs → ext4 image) is MANDATORY: a
         // legacy virtiofs home is live-mounted as the guest's `/home/ubuntu`,
@@ -12802,7 +12825,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // never attaches the old virtiofs home again.
             if var p = self.profiles.first(where: { $0.id == profile.id }) {
                 p.homeModel = .ext4
-                try? self.store.save(p)
+                try? self.store.update(p)
                 self.profiles = self.store.loadAll()
             }
             self.runningSessions[profile.id]?.homeJustMigrated = true
@@ -15796,6 +15819,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// over, and goes as its stop would have taken it. (A reboot keeps it
     /// through its teardown -- `rebootingProfiles` -- so it can boot again;
     /// abandoned, nothing else would ever delete it.)
+    /// A workspace the other process deleted (`ProfileStore.ProfileGone`):
+    /// drop the stale row instead of acting on it.
+    private func forgetDeletedProfile(_ profile: Profile, unattended: Bool) {
+        ephemeralProfiles.remove(profile.id)
+        rebootingProfiles.remove(profile.id)
+        if unattended {
+            refuseUnattendedLaunch(profile, ProfileStore.ProfileGone(name: profile.name).localizedDescription)
+        }
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
     private func dropAbandonedEphemeral(_ id: Profile.ID) {
         // Not while a boot holds the disk (begun, not registered yet): that
         // boot is the workspace's, and its stop deletes it.
