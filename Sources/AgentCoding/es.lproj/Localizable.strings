@@ -4303,3 +4303,6 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marcado como comprometido: Bromure detectó que este espacio de trabajo enviaba una credencial a donde no debía (la solicitud se bloqueó). Al iniciarlo se te pide primero borrar su disco y su home. Haz clic derecho para borrarlo ahora o para quitar la marca si fue una falsa alarma.";
 "Wipe and Restore…" = "Borrar y restaurar…";
 "Clear Compromised Mark…" = "Quitar marca de comprometido…";
+
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "«%@» ya no existe: otro proceso de Bromure lo eliminó.";

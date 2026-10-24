@@ -3890,7 +3890,29 @@ public final class ProfileStore {
         try save(profile)
     }
 
+    /// A workspace whose directory is gone: the other process sharing this
+    /// store (login agent, GUI) deleted it -- a stopped `vm run --rm`
+    /// workspace its sweep took. An update from a stale copy must not write
+    /// it back, secrets and all, as a kept workspace (Finding CWE-459, "The
+    /// other Bromure process recreates a deleted vm run --rm workspace,
+    /// including its secrets").
+    public struct ProfileGone: LocalizedError {
+        public let name: String
+        public var errorDescription: String? {
+            String(format: NSLocalizedString(
+                "“%@” no longer exists: another Bromure process deleted it.",
+                comment: "workspace deleted by the other process (login agent or app)"), name)
+        }
+    }
+
+    /// Whether `profile` is still saved here (what `loadAll` lists).
+    public func exists(_ profile: Profile) -> Bool {
+        fm.fileExists(atPath: profileDirectory(for: profile).appendingPathComponent("profile.json").path)
+    }
+
+    /// Stamp a launch on a saved workspace; never recreates a deleted one.
     public func touch(_ profile: Profile) throws {
+        guard exists(profile) else { throw ProfileGone(name: profile.name) }
         var p = profile
         p.lastUsedAt = Date()
         try save(p)

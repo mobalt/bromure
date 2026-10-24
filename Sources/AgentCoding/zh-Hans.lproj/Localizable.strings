@@ -4301,3 +4301,6 @@
 "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已标记为入侵：Bromure 发现此工作区试图把凭据发送到不应发送的地方（请求已被阻止）。启动时会先询问是否抹掉其磁盘和主目录。右键点按可立即抹掉，或在误报时清除标记。";
 "Wipe and Restore…" = "抹掉并恢复…";
 "Clear Compromised Mark…" = "清除已入侵标记…";
+
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "“%@”已不存在：另一个 Bromure 进程已将其删除。";

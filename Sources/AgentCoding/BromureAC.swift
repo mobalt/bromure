@@ -10903,6 +10903,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let refusal = OpenShellGovernance.shared.refusal(saving: profile, editing: editing) {
             throw refusal
         }
+        // An edit of a workspace the other process deleted meanwhile: don't
+        // write it back.
+        if editing != nil, !store.exists(profile) {
+            profiles = store.loadAll()
+            refreshSidebar()
+            throw ProfileStore.ProfileGone(name: profile.name)
+        }
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
@@ -12133,6 +12140,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Already booting (a detached boot has no pane to find above): one
         // boot per disk.
         if bootsInFlight.contains(profile.id) { return }
+        // Deleted by the other process (its `vm run --rm` sweep): the row
+        // is stale. Booting it would save it back as a kept workspace.
+        guard store.exists(profile) else { forgetDeletedProfile(profile, unattended: unattended); return }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -12289,7 +12299,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
-        try? store.touch(profile)
+        // Again after the questions above: they wait on the user, and the
+        // other process may have deleted it meanwhile.
+        do { try store.touch(profile) } catch is ProfileStore.ProfileGone {
+            forgetDeletedProfile(profile, unattended: unattended)
+            return
+        } catch {}
 
         // Home-storage migration (virtiofs → ext4 image) is MANDATORY: a
         // legacy virtiofs home is live-mounted as the guest's `/home/ubuntu`,
@@ -15796,6 +15811,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// over, and goes as its stop would have taken it. (A reboot keeps it
     /// through its teardown -- `rebootingProfiles` -- so it can boot again;
     /// abandoned, nothing else would ever delete it.)
+    /// A workspace the other process deleted (`ProfileStore.ProfileGone`):
+    /// drop the stale row instead of acting on it.
+    private func forgetDeletedProfile(_ profile: Profile, unattended: Bool) {
+        ephemeralProfiles.remove(profile.id)
+        rebootingProfiles.remove(profile.id)
+        if unattended {
+            refuseUnattendedLaunch(profile, ProfileStore.ProfileGone(name: profile.name).localizedDescription)
+        }
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
     private func dropAbandonedEphemeral(_ id: Profile.ID) {
         // Not while a boot holds the disk (begun, not registered yet): that
         // boot is the workspace's, and its stop deletes it.
