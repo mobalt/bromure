@@ -316,7 +316,7 @@ final class GhosttyRuntime: @unchecked Sendable {
             // Agents ring the bell at the end of every turn; the sidebar's
             // status already says so. Silent unless asked for
             // (`defaults write io.bromure.ac ui.terminalBell -bool YES`).
-            if UserDefaults.standard.bool(forKey: "ui.terminalBell") {
+            if ACDefaults.standard.bool(forKey: "ui.terminalBell") {
                 DispatchQueue.main.async { NSSound.beep() }
             }
             return true

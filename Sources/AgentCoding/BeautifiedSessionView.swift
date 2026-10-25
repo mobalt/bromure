@@ -5513,8 +5513,8 @@ struct DelegationPanel: View {
     let open: (UUID) -> Void
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
-    @AppStorage("sessions.delegationsExpanded") private var expanded = true
-    @AppStorage("sessions.requestsExpanded") private var requestsExpanded = false
+    @AppStorage("sessions.delegationsExpanded", store: ACDefaults.standard) private var expanded = true
+    @AppStorage("sessions.requestsExpanded", store: ACDefaults.standard) private var requestsExpanded = false
     @State private var drafts: [UUID: String] = [:]
 
     private var remoteHosts: [UUID: String] {

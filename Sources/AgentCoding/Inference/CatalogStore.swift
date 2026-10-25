@@ -47,7 +47,7 @@ public final class CatalogStore: @unchecked Sendable {
     /// when the *bundled* `Resources/catalog.json` should be authoritative.
     /// Delete the key to go back to normal.
     public static var refreshDisabled: Bool {
-        UserDefaults.standard.bool(forKey: "catalog.refreshDisabled")
+        ACDefaults.standard.bool(forKey: "catalog.refreshDisabled")
     }
 
     private func adoptRemote(_ parsed: ModelCatalog) {

@@ -980,9 +980,9 @@ public enum TaskFinish: String, Codable, CaseIterable, Sendable {
     /// The app-wide default (Preferences). Merge unless set otherwise.
     public static var appDefault: TaskFinish {
         get {
-            (UserDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
+            (ACDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
+        set { ACDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
     }
 
     /// The effective choice: the task's own, else its workspace's, else the

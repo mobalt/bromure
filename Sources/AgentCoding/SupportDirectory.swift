@@ -234,3 +234,45 @@ enum ACSupportDir {
     }
     #endif
 }
+
+/// The app's settings, per state.
+///
+/// `UserDefaults.standard` is per bundle ID: two instances of one build on two
+/// states would share the automation port, the remote-access port and, above
+/// all, the persisted VM subnet (`vmnet.switch.subnetBase172`), and so could
+/// not run at once. `ACDefaults.standard` is the store every setting goes
+/// through instead: `.standard` for the default state (nothing changes for
+/// an install that never chose a state), a suite named after the bundle and
+/// the state (`<bundle id>.state.<name>`, so `defaults read` finds it) for
+/// any other. `@AppStorage` takes it as `store:`. A unit test keeps
+/// `UserDefaults.standard` out of Sources/AgentCoding.
+///
+/// Settings that describe the Mac rather than a state — the VM MTU, display
+/// scale, key repeat — stay in SandboxEngine's `.standard` reads, shared by
+/// every state on purpose.
+enum ACDefaults {
+    #if AGENT_HOST
+    static let standard: UserDefaults = .standard
+    static let suiteName: String? = nil
+    #else
+    static let standard: UserDefaults = {
+        guard let suiteName else { return .standard }
+        return UserDefaults(suiteName: suiteName) ?? .standard
+    }()
+
+    /// The suite this state's settings live in; nil for the default state
+    /// (the bundle's own domain).
+    static let suiteName: String? = ACSupportDir.isDefault ? nil : suiteName(forState: ACSupportDir.stateName)
+
+    /// The settings domain of a state: the bundle's own for the default
+    /// state, `<bundle id>.state.<name>` for another.
+    static func suiteName(forState name: String) -> String? {
+        name == ACSupportDir.defaultStateName ? nil : "\(bundleDomain).state.\(name)"
+    }
+
+    /// The default state's settings domain (`defaults read <this>`).
+    static var bundleDomain: String {
+        Bundle.main.bundleIdentifier ?? "io.bromure.agentic-coding"
+    }
+    #endif
+}

@@ -940,6 +940,11 @@ struct Run: ParsableCommand {
         // still explained when we weren't started from a terminal.
         AppLog.install()
         AppLog.stamp("state '\(ACSupportDir.stateName)' at \(ACSupportDir.url.path) (\(ACSupportDir.state.source.rawValue)); build \(ACInstance.buildName)")
+        // The two SandboxEngine stores a state must own: the persisted VM
+        // subnet (two instances on two states, two subnets) and the
+        // per-workspace remembered decisions. Before any VM boots.
+        VMNetSwitch.subnetDefaults = ACDefaults.standard
+        ProfilePrefs.defaults = ACDefaults.standard
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
         // checks `imageManager.hasBaseImage` and routes to the in-app
@@ -3923,7 +3928,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Sessions-first UI + the beautified transcript are the defaults; a
         // user who flipped either off before keeps their choice (register
         // only fills in missing keys).
-        UserDefaults.standard.register(defaults: [
+        ACDefaults.standard.register(defaults: [
             "ui.beautifiedTranscript": true,
             "ui.sessionsFirst": true,
         ])
@@ -3991,12 +3996,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Resources toggle, or the old migration prompt's "Don't Ask Again")
         // is kept. Synchronous + before any VM boots, so the switch starts on
         // the right network. AC-only; Bromure Web never calls this.
-        if UserDefaults.standard.object(forKey: "vmnet.useRandom172") == nil {
-            let declined = UserDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined")
-            UserDefaults.standard.set(!declined, forKey: "vmnet.useRandom172")
+        if ACDefaults.standard.object(forKey: "vmnet.useRandom172") == nil {
+            let declined = ACDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined")
+            ACDefaults.standard.set(!declined, forKey: "vmnet.useRandom172")
             if !declined { VMNetSwitch.ensureRandom172Base() }
         }
-        if UserDefaults.standard.bool(forKey: "vmnet.useRandom172") {
+        if ACDefaults.standard.bool(forKey: "vmnet.useRandom172") {
             VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
         }
 
@@ -4429,7 +4434,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// UserDefaults-backed remote config. Defaults: disabled, port 2222,
     /// bind 0.0.0.0, both auth methods on.
     func remoteAccessConfig() -> RemoteAccessServer.Config {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         var c = RemoteAccessServer.Config()
         let p = ProcessInfo.processInfo.environment["BROMURE_AC_REMOTE_PORT"]
             .flatMap(Int.init) ?? d.integer(forKey: "remoteAccess.port")
@@ -4450,7 +4455,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `startInit`/`startPostinstall` stop the server up front and call
     /// this again from their completion path.
     @MainActor func startRemoteAccessIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
+        guard ACDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
         // A side-by-side test instance shares this Mac's device identity and
         // preferences: it must not answer for the Mac (SSH front door, P2P).
         guard !Self.remoteAccessSuppressed else {
@@ -4583,7 +4588,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Persists to UserDefaults, then (re)starts or stops sshd. Returns a
     /// status dict (same shape as `remoteAccessStatus`).
     @MainActor func remoteAccessApply(_ spec: [String: Any]) -> [String: Any] {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         if let port = spec["port"] as? Int {
             guard port > 0, port < 65536 else { return ["error": "port must be in 1..65535"] }
             guard port >= 1024 else { return ["error": "port must be ≥ 1024 (non-root can't bind privileged ports)"] }
@@ -4645,7 +4650,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @MainActor func remoteAccessStatus() -> [String: Any] {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         let cfg = remoteAccessConfig()
         let server = RemoteAccessServer.shared
         let user = NSUserName()
@@ -4684,7 +4689,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Automation server
 
     @MainActor func startAutomationServerIfNeeded() {
-        let defaults = UserDefaults.standard
+        let defaults = ACDefaults.standard
         // Default OFF — opt-in to keep the loopback HTTP API hidden
         // until the user enables it (Bromure → Preferences → Automation,
         // or `defaults write io.bromure.agentic-coding automation.enabled
@@ -4811,7 +4816,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             return [
-                "locale": (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
+                "locale": (ACDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
                 "mainWindowOpen": self.mainWindow?.isVisible ?? false,
                 "editorOpen": self.editorWindow?.isVisible ?? false,
                 "profileCount": self.profiles.count,
@@ -9391,7 +9396,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Help → Manual.
     @objc func openManualAction(_ sender: Any?) {
-        let raw = UserDefaults.standard.string(forKey: "help.manualURL") ?? Self.defaultManualURL
+        let raw = ACDefaults.standard.string(forKey: "help.manualURL") ?? Self.defaultManualURL
         if let url = URL(string: raw) { NSWorkspace.shared.open(url) }
     }
 
@@ -11148,7 +11153,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).
         if editing == nil {
-            UserDefaults.standard.set(profile.id.uuidString, forKey: NewSessionView.lastProfileKey)
+            ACDefaults.standard.set(profile.id.uuidString, forKey: NewSessionView.lastProfileKey)
         }
         // Show the SSH key viewer right after a brand-new generation so the
         // user can paste it into GitHub before forgetting.
@@ -18065,9 +18070,9 @@ struct RebuildBaseImageView: View {
 
     @State private var method: RebuildBaseImageWindow.Method = .download
     @State private var fresh = false
-    @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
-    @AppStorage(BaseImageCustomize.pathKey) private var path = ""
-    @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
+    @AppStorage(BaseImageCustomize.enabledKey, store: ACDefaults.standard) private var customize = false
+    @AppStorage(BaseImageCustomize.pathKey, store: ACDefaults.standard) private var path = ""
+    @State private var showCustomize = ACDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

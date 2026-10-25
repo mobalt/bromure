@@ -126,8 +126,11 @@ function acSupportDirName() {
 }
 const AC_SUPPORT_DIR = acSupportDirName();
 
+// BROMURE_STATE_DIR (a state chosen at launch) puts the socket in that
+// directory, whatever the home.
 const CTL_SOCK = process.env.BROMURE_AC_CONTROL_SOCK ||
-  `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/${AC_SUPPORT_DIR}/control.sock`;
+  (process.env.BROMURE_STATE_DIR ? `${process.env.BROMURE_STATE_DIR}/control.sock` :
+  `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/${AC_SUPPORT_DIR}/control.sock`);
 
 function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve) => {

@@ -661,8 +661,8 @@ final class AgentSessionStore {
         // Once: sessions named by cutting their first message (before the
         // title rule) get a real title. Renamed ones are left alone.
         let key = "sessions.retitled.v1"
-        if !UserDefaults.standard.bool(forKey: key) {
-            UserDefaults.standard.set(true, forKey: key)
+        if !ACDefaults.standard.bool(forKey: key) {
+            ACDefaults.standard.set(true, forKey: key)
             if retitleFromOpeningMessages() > 0 { save() }
         }
     }
@@ -3434,11 +3434,11 @@ struct SessionSectionsView: View {
     var contentSearch: (String) -> [UUID: String] = { _ in [:] }
     /// A session's last reply, for its row's tooltip.
     var lastReply: (UUID) -> String? = { _ in nil }
-    @AppStorage("sessions.listExpanded") private var expanded = true
+    @AppStorage("sessions.listExpanded", store: ACDefaults.standard) private var expanded = true
     /// Rooms folded in the sidebar (their members hidden) — remembered
     /// across launches, on this Mac and in a fat client alike (room ids are
     /// unique across machines).
-    @AppStorage("sessions.foldedRooms") private var foldedRoomsRaw = ""
+    @AppStorage("sessions.foldedRooms", store: ACDefaults.standard) private var foldedRoomsRaw = ""
     private var foldedRooms: Set<UUID> {
         Set(foldedRoomsRaw.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
     }
@@ -3459,12 +3459,12 @@ struct SessionSectionsView: View {
         var renaming: AgentRoom?
         var withSession: UUID?
     }
-    @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    @AppStorage("sessions.archivedExpanded", store: ACDefaults.standard) private var archivedExpanded = false
     /// Opened for a moment because the selection went into it (not saved:
     /// the fold stays closed next time).
     @State private var archivedRevealed = false
     /// The Ended group, folded unless opened (or searched).
-    @AppStorage("sessions.endedExpanded") private var endedExpanded = false
+    @AppStorage("sessions.endedExpanded", store: ACDefaults.standard) private var endedExpanded = false
     /// The session a "New worktree…" sheet is open for.
     @State private var worktreeFor: AgentSession?
     /// The session a "Nickname…" sheet is open for.
