@@ -28,6 +28,10 @@ enum BootLaunchAgent {
     /// Install the LaunchAgent when any profile wants startup boot, else remove
     /// it. `agentExecutable` is this app's binary (the thing launchd should run).
     static func reconcile(wantsStartupBoot: Bool, agentExecutable: URL?) {
+        // A state chosen at launch (BROMURE_STATE…) is a scratch or trial
+        // instance: it never installs a login item, which would boot the
+        // default state's binary of the moment on a state that may be gone.
+        guard ACSupportDir.isDefault else { return }
         wantsStartupBoot ? install(agentExecutable: agentExecutable) : uninstall()
     }
 

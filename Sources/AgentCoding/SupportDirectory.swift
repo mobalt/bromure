@@ -1,14 +1,12 @@
 import Foundation
 
-/// The app's data folder — profiles, VM disks, settings, secrets, traces —
-/// and where it lives.
+/// The app's data folder — its *state*: profiles, VM disks, settings,
+/// secrets, traces — and where it lives.
 ///
 /// `name` is the folder under ~/Library/Application Support (and under
 /// ~/Library/Logs): "BromureAC", unless the bundle's Info.plist names another
-/// with `BromureSupportDirName`. `url` is that folder; every data path in
-/// Sources/AgentCoding hangs off it instead of rebuilding
-/// `applicationSupportDirectory/<name>` on the spot, and `logsURL` is the
-/// log folder.
+/// with `BromureSupportDirName`. That folder is the **default state**: the one
+/// a Dock or Finder launch opens with no environment.
 ///
 /// A build signed by a different team gets a different Data Protection
 /// Keychain master key (`SecretsVault`), so it can't decrypt anything the
@@ -18,12 +16,29 @@ import Foundation
 /// inside the bundle reads the same Info.plist, so it reaches the same
 /// instance's control socket.
 ///
+/// A state can also be chosen **at launch** (BUILD_INSTRUCTIONS.md, "States"), so
+/// one build can run on another data set and several instances can run side
+/// by side, each on its own state:
+///
+///   BROMURE_STATE_DIR=/abs/path   that directory is the state
+///   BROMURE_STATE=<name>          `<name>` under `…/Application Support/<name>-states/`
+///                                 ("work", or the default folder's own name, is
+///                                 the default state)
+///
+/// The CLI's `--state <name|path>` sets one of these before anything reads
+/// them. `url` is the state directory every data path hangs off; the ~50
+/// sites that used to rebuild `applicationSupportDirectory/<name>` go through
+/// it. Logs follow the state: `<state>/logs/` for a state chosen at launch,
+/// `~/Library/Logs/<name>` for the default one, as always.
+///
 /// Bromure Sidecar shares this file (Sources/AgentHost/Shared) to find the
 /// Bromure AC on this Mac it attaches to. Its own folder stays
 /// BromureSidecar, so it reads a key that says whose folder this is:
-/// `BromureACSupportDirName`.
+/// `BromureACSupportDirName`. It attaches to the default state only.
 enum ACSupportDir {
     static let defaultName = "BromureAC"
+    /// The name every tool calls the default state by.
+    static let defaultStateName = "work"
 
     #if AGENT_HOST
     static let infoPlistKey = "BromureACSupportDirName"
@@ -31,6 +46,7 @@ enum ACSupportDir {
     static let infoPlistKey = "BromureSupportDirName"
     #endif
 
+    /// The default state's folder name (Info.plist, else "BromureAC").
     static let name: String = resolve(
         Bundle.main.object(forInfoDictionaryKey: infoPlistKey) as? String)
 
@@ -68,19 +84,153 @@ enum ACSupportDir {
     }
 
     #if !AGENT_HOST
-    /// `~/Library/Application Support/<name>/`: the data folder. Every data
-    /// path hangs off it.
-    static var url: URL {
-        applicationSupportDirectory.appendingPathComponent(name, isDirectory: true)
+    /// Where a state lives and how it was chosen.
+    struct State: Equatable {
+        /// "work" for the default state, else the state's name (the
+        /// directory's last path component for one given by path).
+        let stateName: String
+        /// The state directory.
+        let url: URL
+        /// True for the default state: the Info.plist folder, reachable with
+        /// no environment.
+        let isDefault: Bool
+        /// How the state was chosen, for `instance.json` and the log.
+        let source: Source
+
+        enum Source: String { case infoPlist, environmentName, environmentPath }
+
+        /// Where this state's logs go.
+        var logsURL: URL {
+            isDefault
+                ? FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Logs/\(url.lastPathComponent)", isDirectory: true)
+                : url.appendingPathComponent("logs", isDirectory: true)
+        }
     }
-    /// `~/Library/Logs/<name>/`.
-    static var logsURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/\(name)", isDirectory: true)
+
+    /// The state this process runs on. Resolved once, on first use — after
+    /// the CLI's `--state` pre-scan has set the environment.
+    static let state: State = resolveState(
+        environment: liveEnvironment(["BROMURE_STATE_DIR", "BROMURE_STATE"]),
+        defaultFolderName: name,
+        applicationSupport: applicationSupportDirectory)
+
+    /// `getenv` at the time of the call: `ProcessInfo.environment` may be a
+    /// snapshot from before `applyStateArgument`'s `setenv`.
+    private static func liveEnvironment(_ keys: [String]) -> [String: String] {
+        var env: [String: String] = [:]
+        for k in keys { if let v = getenv(k) { env[k] = String(cString: v) } }
+        return env
+    }
+
+    /// The state directory. Every data path hangs off it.
+    static var url: URL { state.url }
+    /// "work", or the state's name.
+    static var stateName: String { state.stateName }
+    /// True when this process runs on the default state.
+    static var isDefault: Bool { state.isDefault }
+    /// This state's log directory.
+    static var logsURL: URL { state.logsURL }
+
+    /// `~/Library/Application Support/<name>-states/`: the named states that
+    /// aren't the default one.
+    static var statesRoot: URL {
+        applicationSupportDirectory.appendingPathComponent("\(name)-states", isDirectory: true)
+    }
+    /// `~/Library/Application Support/<name>-builds/`: immutable app bundles,
+    /// one folder per build, `stable` a symlink to the one the default state
+    /// runs on.
+    static var buildsRoot: URL {
+        applicationSupportDirectory.appendingPathComponent("\(name)-builds", isDirectory: true)
+    }
+    /// The default state's directory, whatever this process runs on.
+    static var defaultStateURL: URL {
+        applicationSupportDirectory.appendingPathComponent(name, isDirectory: true)
     }
 
     static var applicationSupportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    }
+
+    /// The directory of a state named on a command line: "work" (or the
+    /// default folder's name) is the default state, anything else a folder
+    /// under `statesRoot`. Nil for a name that isn't a single path component.
+    static func stateURL(named raw: String) -> URL? {
+        guard let n = validStateName(raw) else { return nil }
+        if n == defaultStateName || n == name { return defaultStateURL }
+        return statesRoot.appendingPathComponent(n, isDirectory: true)
+    }
+
+    /// A state name: one path component, no leading dot (".snapshots" is
+    /// ours), no ":" (a Finder "/").
+    static func validStateName(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, s != ".", s != "..", !s.hasPrefix("."),
+              !s.contains("/"), !s.contains(":") else { return nil }
+        return s
+    }
+
+    /// Resolution order: BROMURE_STATE_DIR → BROMURE_STATE → the default
+    /// folder. Pure, for the tests.
+    static func resolveState(environment: [String: String], defaultFolderName: String,
+                             applicationSupport: URL) -> State {
+        let defaultURL = applicationSupport.appendingPathComponent(defaultFolderName, isDirectory: true)
+        let statesRoot = applicationSupport.appendingPathComponent("\(defaultFolderName)-states", isDirectory: true)
+        if let raw = environment["BROMURE_STATE_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            let url = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+                .standardizedFileURL
+            if url.path == defaultURL.standardizedFileURL.path {
+                return State(stateName: defaultStateName, url: defaultURL, isDefault: true, source: .environmentPath)
+            }
+            return State(stateName: url.lastPathComponent, url: url, isDefault: false, source: .environmentPath)
+        }
+        if let raw = environment["BROMURE_STATE"], let n = validStateName(raw) {
+            if n == defaultStateName || n == defaultFolderName {
+                return State(stateName: defaultStateName, url: defaultURL, isDefault: true, source: .environmentName)
+            }
+            return State(stateName: n, url: statesRoot.appendingPathComponent(n, isDirectory: true),
+                         isDefault: false, source: .environmentName)
+        }
+        return State(stateName: defaultStateName, url: defaultURL, isDefault: true, source: .infoPlist)
+    }
+
+    /// The CLI's `--state <name|path>` (or `--state=…`), taken out of the
+    /// arguments before ArgumentParser sees them and turned into the
+    /// environment the app, its CLI verbs and the agent they autostart all
+    /// read. A value with a "/" is a path; anything else a name. Returns the
+    /// remaining arguments, or nil with a message when the value is unusable.
+    struct ArgumentFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    static func applyStateArgument(_ args: [String]) -> Result<[String], ArgumentFailure> {
+        var rest: [String] = []
+        var value: String?
+        var i = 0
+        while i < args.count {
+            let a = args[i]
+            if a == "--state" {
+                guard i + 1 < args.count else {
+                    return .failure(ArgumentFailure(description: "--state needs a value: a state name or a directory"))
+                }
+                value = args[i + 1]; i += 2; continue
+            }
+            if a.hasPrefix("--state=") { value = String(a.dropFirst("--state=".count)); i += 1; continue }
+            rest.append(a); i += 1
+        }
+        guard let value else { return .success(args) }
+        if value.contains("/") || value.hasPrefix("~") {
+            setenv("BROMURE_STATE_DIR", (value as NSString).expandingTildeInPath, 1)
+            unsetenv("BROMURE_STATE")
+        } else {
+            guard validStateName(value) != nil else {
+                return .failure(ArgumentFailure(description: "--state: '\(value)' isn't a state name"))
+            }
+            setenv("BROMURE_STATE", value, 1)
+            unsetenv("BROMURE_STATE_DIR")
+        }
+        return .success(rest)
     }
     #endif
 }

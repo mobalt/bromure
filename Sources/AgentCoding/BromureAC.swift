@@ -110,6 +110,15 @@ struct BromureAC: ParsableCommand {
             if arg.hasPrefix("-Apple") { skipNext = true; continue }
             filtered.append(arg)
         }
+        // `--state <name|path>` anywhere on the line picks the state this
+        // process (and every child it starts) runs on: it becomes
+        // BROMURE_STATE / BROMURE_STATE_DIR before anything reads them.
+        switch ACSupportDir.applyStateArgument(filtered) {
+        case .success(let rest): filtered = rest
+        case .failure(let message):
+            FileHandle.standardError.write(Data("error: \(message)\n".utf8))
+            Darwin.exit(64)
+        }
         // Invoked as `bromure-cli` (the /usr/local/bin symlink → this binary)
         // with no subcommand: print help instead of falling through to the GUI
         // default subcommand (Run), which traps when there's no .app bundle to
@@ -917,11 +926,20 @@ struct Run: ParsableCommand {
     var headless = false
 
     func run() throws {
-        // First: a durable copy of stderr + launch/quit/fatal-signal stamps
-        // (~/Library/Logs/BromureAC/bromure-ac.log), so a quit that leaves
-        // no crash report is still explained when we weren't started
-        // from a terminal.
+        // First of all: one instance per state. A second launch on a state
+        // that is already served exits here, before it can touch the control
+        // socket, the lease DB or a disk image.
+        do {
+            try ACInstance.acquire(mode: headless ? .headless : .gui)
+        } catch {
+            FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+            Darwin.exit(75)   // EX_TEMPFAIL: try again once that instance has quit
+        }
+        // Then a durable copy of stderr + launch/quit/fatal-signal stamps
+        // (<logs>/bromure-ac.log), so a quit that leaves no crash report is
+        // still explained when we weren't started from a terminal.
         AppLog.install()
+        AppLog.stamp("state '\(ACSupportDir.stateName)' at \(ACSupportDir.url.path) (\(ACSupportDir.state.source.rawValue)); build \(ACInstance.buildName)")
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
         // checks `imageManager.hasBaseImage` and routes to the in-app
@@ -4675,18 +4693,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // isolated instance (CFFIXED_USER_HOME relocates the support dir but
         // NOT UserDefaults, so a defaults-based port would collide with the
         // main instance's 9223 — a double-bind that round-robins its clients).
-        let envPort = ProcessInfo.processInfo.environment["BROMURE_AC_AUTOMATION_PORT"]
+        // Port 0 binds an ephemeral port (reported in /health and
+        // instance.json); a state chosen at launch defaults to exactly that,
+        // on loopback, so an agent's instance is scriptable out of the box
+        // and never collides with the one on the default state.
+        var envPort = ProcessInfo.processInfo.environment["BROMURE_AC_AUTOMATION_PORT"]
             .flatMap { UInt16($0) }
+        if envPort == nil, !ACSupportDir.isDefault { envPort = 0 }
         guard defaults.bool(forKey: "automation.enabled") || envPort != nil else { return }
 
         if automationServer != nil { stopAutomationServer() }
 
-        let port = envPort ?? UInt16(defaults.integer(forKey: "automation.port"))
-        let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
-        let server = ACAutomationServer(port: port > 0 ? port : 9223, bindAddress: bindAddr)
+        let port: UInt16
+        let bindAddr: String
+        if let envPort {
+            port = envPort
+            bindAddr = ACSupportDir.isDefault
+                ? (defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1") : "127.0.0.1"
+        } else {
+            let configured = UInt16(defaults.integer(forKey: "automation.port"))
+            port = configured > 0 ? configured : 9223
+            bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
+        }
+        let server = ACAutomationServer(port: port, bindAddress: bindAddr)
         wireAutomationCallbacks(into: server)
         server.start()
         automationServer = server
+        ACInstance.recordAutomationPort(server.boundPort.map(Int.init))
     }
 
     /// Always-on owner-only Unix control socket for the `bromure-ac` CLI.
@@ -4713,6 +4746,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Wire the shared control-plane callbacks into a server instance (used by
     /// both the opt-in TCP API and the always-on Unix control socket).
     @MainActor private func wireAutomationCallbacks(into server: ACAutomationServer) {
+        server.onQuit = { [weak self] vms in
+            MainActor.assumeIsolated { self?.quitFromControl(vms: vms) ?? false }
+        }
+        server.onAutomationPort = { [weak self] in
+            MainActor.assumeIsolated { self?.automationServer?.boundPort }
+        }
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
             return self.profiles.map { p in
@@ -8055,6 +8094,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `.terminateNow` path (no `.terminateLater` nested-runloop wait, hence no
     /// deadlock against this same actor).
     @MainActor
+    /// `POST /app/quit`: a script's quit. Every workspace closes per `vms`
+    /// ("suspend" | "shutdown") or, with none, per its own close action, as
+    /// the menu Quit would; nobody is asked anything. Returns false when a
+    /// quit is already in progress (that one continues).
+    func quitFromControl(vms: String?) -> Bool {
+        guard quitPhase == .idle else {
+            AppLog.stamp("quit: requested over the control socket while \(quitPhase) — the quit in progress continues")
+            return false
+        }
+        quitCloseActionOverride = vms == "suspend" ? .suspend : vms == "shutdown" ? .shutdown : nil
+        AppLog.stamp("quit: requested over the control socket (vms: \(vms ?? "per workspace"))")
+        Task { @MainActor in await self.performControlQuit() }
+        return true
+    }
+
+    /// Close-action override for the quit in progress (`quitFromControl`).
+    private var quitCloseActionOverride: Profile.CloseAction?
+
+    private func performControlQuit() async {
+        quitPhase = .draining
+        await drainRunningVMs()
+        await teardownAllBrowserVMs()
+        quitPhase = .idle
+        let dismissed = dismissAttachedSheets()
+        if dismissed > 0 { AppLog.stamp("quit: dismissed \(dismissed) sheet(s) blocking termination") }
+        quitPreconfirmed = true
+        NSApp.terminate(nil)
+        // Still here: AppKit refused.
+        quitPreconfirmed = false
+        quitCloseActionOverride = nil
+        AppLog.stamp("quit: terminate returned after the control-socket drain — \(attachedSheetCount()) sheet(s) attached")
+    }
+
     private func performBouncedQuit() async {
         let sheets = attachedSheetCount()
         let decision = QuitFlow.request(phase: quitPhase, attachedSheets: sheets)
@@ -8108,7 +8180,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .map { $0.profileID }
         await withTaskGroup(of: Void.self) { group in
             for id in ids {
-                let action = runningSessions[id]?.profile.closeAction ?? .suspend
+                let action = quitCloseActionOverride ?? runningSessions[id]?.profile.closeAction ?? .suspend
                 group.addTask { @MainActor in await self.stopSession(id, action: action) }
             }
         }
@@ -8128,6 +8200,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
         SquelchLedger.shared.flush()
+        ACInstance.release()
         // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
         // waiting, a boot that gave up): over with the app.
         sweepStoppedEphemeral()
