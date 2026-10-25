@@ -57,6 +57,8 @@ struct BromureAC: ParsableCommand {
         if !asCLI {
             groups.append(ArgumentParser.CommandGroup(name: "States (the data a build runs on; --state <name> picks one)",
                                        subcommands: [StateCommand.self]))
+            groups.append(ArgumentParser.CommandGroup(name: "Builds and instances (immutable builds; a build running on a state)",
+                                       subcommands: [InstanceCommand.self, BuildCommand.self]))
         }
         groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Local inference", subcommands: [Model.self]))

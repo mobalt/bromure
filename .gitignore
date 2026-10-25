@@ -34,3 +34,6 @@ bromure-agentic-coding-manual.tgz
 # Per-developer build settings (team ID, bundle ID, signing cert); see
 # BUILD_INSTRUCTIONS.md. Sourced by build.sh and package.sh, never committed.
 /.env.local
+
+# Build worktrees of scripts/devbuild.sh (one per named build; never committed).
+/.worktrees/

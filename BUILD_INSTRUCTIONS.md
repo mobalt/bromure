@@ -130,6 +130,41 @@ With `BROMURE_DEV=1` in `.env.local` (or the environment), `./build.sh bromure-a
 
 The bundle's file name is unchanged (`Bromure Agentic Coding.app`). The flavor is independent of the identity: a dev build under the upstream team is fine for local testing, and a release-flavored build under your own team is what `package.sh` produces.
 
+### States: the data a build runs on
+
+A build no longer owns its data folder. The **state** — profiles, VM disks, settings, secrets, traces — is chosen when the process starts:
+
+| | |
+|---|---|
+| nothing set | the bundle's folder (`BromureAC`, or `BromureSupportDirName`): the **default state**, called `work`. A Dock launch opens it, as always. |
+| `BROMURE_STATE=<name>` | `~/Library/Application Support/<folder>-states/<name>/` |
+| `BROMURE_STATE_DIR=<dir>` | that directory |
+| `--state <name\|dir>` | the same, on any `bromure-ac` command (it reaches that state's control socket, and the agent it autostarts inherits it) |
+
+Each state has its own settings (a `UserDefaults` suite, `<bundle id>.state.<name>`; the default state keeps the bundle's own domain), its own logs (`<state>/logs/`; the default state's stay in `~/Library/Logs/<folder>`), its own control socket and, through the settings, its own VM subnet — so two instances on two states run at once. One instance per state: `run` takes `<state>/instance.lock` and a second launch exits with "state X is in use by pid N (build Y)"; `<state>/instance.json` names the holder, with the automation port it bound (`BROMURE_AC_AUTOMATION_PORT=0` binds an ephemeral one and a non-default state does so by default, on loopback). `POST /app/quit {"vms": "suspend"|"shutdown"}` on the control socket quits like the menu does, without the dialog, for scripts.
+
+```bash
+bromure-ac state ls                                   # every state, size, running instance
+bromure-ac state create repro-42                      # new state with work's images/caches/models (clones, instant), nothing else
+bromure-ac state create repro-43 --empty              # a fresh install; --assets-from <state> clones another state's assets
+bromure-ac state create work-try --from work          # full clone, settings included (refused while work runs: --live)
+bromure-ac --state repro-42 vm ls                     # drive the instance on that state
+bromure-ac state snapshot work --label pre-upgrade    # APFS clone under <folder>-states/.snapshots/work/
+bromure-ac state restore work latest                  # the replaced data is kept as a pre-restore snapshot
+bromure-ac state schedule install work                # hourly snapshots (keep all <24h, hourly <7d, daily <30d)
+bromure-ac state rm repro-42
+```
+
+Clones share keychain items (the secrets master key, workspace LUKS keys) with their source under the same signing team; nothing in the app deletes those on workspace removal, and `state rm` never touches the keychain.
+
+### Builds and instances
+
+`scripts/devbuild.sh <name> [<git-ref>]` (default `HEAD`) builds an immutable bundle into `~/Library/Application Support/<folder>-builds/<name>/` from a git worktree (`.worktrees/<name>`, its own `.build`), with `build.json` beside it; `--prod agentic-coding-v5.4.0` names it `prod-5.4.0` and is cached. A ref that predates the states work gets those commits cherry-picked in the worktree first, so a release tag is buildable under your `.env.local` and drivable with `--state`. The `stable` symlink there is the build the default state runs on.
+
+The CLI manages what it produced. `bromure-ac build ls` lists the builds with their roles; `build promote <name>` makes one stable (work is snapshotted with the new build's CLI under `pre-<name>`, its instance quits with every workspace suspended, `stable` and `stable.prev` are repointed, `~/.local/bin/bromure-ac` and the Finder alias in `~/Applications` are remade, work reopens on the new build); `build rollback` swaps `stable` and `stable.prev` the same way; `build prune` removes every other build and its devbuild worktree, keeping those with a running instance and the newest `prod-*`; `build link` remakes the two links by hand. The first build `devbuild.sh` makes becomes stable and gets the links.
+
+`bromure-ac instance start [<state>] [--build <name>] [--gui|--hidden|--headless]` runs a build (default `stable`) on a state (default `work`) and waits for its `/health`. It launches through `open -n`, so the app is a LaunchServices child like a Dock launch, a new instance despite the shared bundle ID, and outlives the terminal; `--direct` spawns the binary instead. `work` starts with a window, any other state `--hidden` (no Dock presence, never takes focus, yet renders its windows for `/debug/ui-shot`). `instance stop [<state>] [--suspend|--shutdown]` quits it over its socket (each workspace's own close action unless overridden), `restart` does both, `ls` shows every state and its instance, `health` prints `/health`, `cli [<state>] -- vm ls` runs the serving build's CLI against the state, `bin-path` prints that CLI's path.
+
 ## File Layout
 
 ```
@@ -141,6 +176,8 @@ bromure/
   build.sh                           # local build: bromure | bromure-ac | sidecar
   package.sh                         # release build + notarization + DMG
   scripts/stamp-identity.sh          # writes your team/bundle ID into build-dir copies
+  scripts/devbuild.sh                # named immutable builds from any git ref
+  scripts/states-e2e.sh              # two instances on two states, side by side
 ```
 
 ## Building
