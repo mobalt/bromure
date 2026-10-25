@@ -195,6 +195,13 @@ enum ACSupportDir {
         return State(stateName: defaultStateName, url: defaultURL, isDefault: true, source: .infoPlist)
     }
 
+    /// A window title with the state's name when it isn't the default one
+    /// ("Bromure Agentic Coding · repro-42"): Mission Control, the Dock
+    /// menu and the window switcher then say which instance this is.
+    static func badged(_ title: String) -> String {
+        isDefault ? title : "\(title) · \(stateName)"
+    }
+
     /// The CLI's `--state <name|path>` (or `--state=…`), taken out of the
     /// arguments before ArgumentParser sees them and turned into the
     /// environment the app, its CLI verbs and the agent they autostart all

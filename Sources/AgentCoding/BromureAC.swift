@@ -54,6 +54,10 @@ struct BromureAC: ParsableCommand {
                                                      VerifyImage.self]))
         }
         groups.append(ArgumentParser.CommandGroup(name: "Workspaces", subcommands: [Profiles.self]))
+        if !asCLI {
+            groups.append(ArgumentParser.CommandGroup(name: "States (the data a build runs on; --state <name> picks one)",
+                                       subcommands: [StateCommand.self]))
+        }
         groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Local inference", subcommands: [Model.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Enterprise features",
@@ -8631,7 +8635,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
-        window.title = "Bromure Agentic Coding"
+        window.title = ACSupportDir.badged("Bromure Agentic Coding")
         window.delegate = self
         window.titlebarAppearsTransparent = false
         // See TabbedSessionWindow for the same fix: AppKit's window
@@ -8653,7 +8657,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private func renderSetup() {
         guard let win = mainWindow else { return }
-        win.title = "Bromure Agentic Coding"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding")
         // Same ordering trap as renderPicker: must swap content view
         // first, otherwise the InitializingView's autolayout
         // constraints + contentMinSize=560 (set in renderInitializing)
@@ -8696,7 +8700,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         subtitle: String = "This is the one-time install. Don't close the window."
     ) {
         guard let win = mainWindow else { return }
-        win.title = "Bromure Agentic Coding — Setup"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding — Setup")
         // Sized to the InitializingView's intrinsic layout (header +
         // status pill + 280pt fixed console + footer + paddings). The
         // user can collapse the console disclosure to shrink further.
@@ -9848,7 +9852,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
-        win.title = "Bromure Agentic Coding"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding")
         win.delegate = self
         win.titlebarAppearsTransparent = false
         win.animationBehavior = .none
@@ -16728,6 +16732,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 button.image = NSImage(systemSymbolName: "shippingbox",
                                        accessibilityDescription: "Bromure Agentic Coding")
                 button.image?.isTemplate = true
+            }
+            // A state chosen at launch shows its name next to the mark, so
+            // two instances' menu-bar items — and the one being worked in —
+            // tell apart at a glance.
+            if !ACSupportDir.isDefault {
+                button.title = " \(ACSupportDir.stateName)"
+                button.imagePosition = .imageLeading
+                button.font = NSFont.menuBarFont(ofSize: 0)
             }
         }
         statusItem = item

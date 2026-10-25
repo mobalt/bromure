@@ -19,7 +19,10 @@ struct ACDefaultsTests {
         let files = Self.swiftFiles()
         try #require(!files.isEmpty, "Sources/AgentCoding not found at \(Self.sourcesDir.path)")
         var offenders: [String] = []
-        for f in files where f.lastPathComponent != "SupportDirectory.swift" {
+        // SupportDirectory.swift defines ACDefaults; StateStore.swift copies and
+        // removes other states' domains by name (persistentDomain(forName:)).
+        let allowed: Set<String> = ["SupportDirectory.swift", "StateStore.swift"]
+        for f in files where !allowed.contains(f.lastPathComponent) {
             let text = try String(contentsOf: f, encoding: .utf8)
             for (i, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let l = line.trimmingCharacters(in: .whitespaces)
