@@ -95,18 +95,52 @@ The entitlements are defined in `Sources/CLI/SafariSandbox.entitlements`. For re
 | `com.apple.security.device.camera` | Webcam passthrough to VM |
 | `com.apple.security.device.audio-input` | Microphone passthrough to VM |
 
-You should not need to edit this file unless you are changing the bundle ID or team ID.
+You should not need to edit this file. To sign under a different team or bundle ID, see [Building under your own team](#building-under-your-own-team) below.
+
+## Building under your own team
+
+The tracked entitlements and Info.plist carry the upstream team ID and bundle IDs. Don't edit them: the build scripts write your identity into build-dir copies instead, driven by two variables.
+
+| Variable | Description |
+|---|---|
+| `BROMURE_TEAM_ID` | Your 10-character Apple Developer team ID |
+| `BROMURE_BUNDLE_ID` | The bundle ID you registered (one per target you build) |
+
+They set `com.apple.application-identifier`, `com.apple.developer.team-identifier` and the keychain access group in the entitlements, and `CFBundleIdentifier` in the Info.plist (`scripts/stamp-identity.sh`). Your provisioning profile must be for that same team and bundle ID. iCloud container identifiers are not rewritten; if your team registered its own, edit the tracked entitlements locally.
+
+Put them, with your signing identity, in `.env.local` at the repository root. It is gitignored and sourced by both `build.sh` and `package.sh`; a variable already set in the environment wins over the file.
+
+```bash
+# .env.local
+CODESIGN_IDENTITY="Developer ID Application: Your Name (ABC123XYZ)"
+BROMURE_TEAM_ID=ABC123XYZ
+BROMURE_BUNDLE_ID=com.example.bromure-ac
+BROMURE_DEV=1
+```
+
+Then `./build.sh bromure-ac` signs under your team with no other flags. Since the bundle ID is per target, keep one `.env.local` per target you build, or pass `BROMURE_BUNDLE_ID=… ./build.sh bromure` on the command line to override it.
+
+### Dev flavor (`BROMURE_DEV=1`)
+
+With `BROMURE_DEV=1` in `.env.local` (or the environment), `./build.sh bromure-ac` builds a copy that can run next to an installed release without touching it:
+
+- named "Bromure AC Dev" in the menu bar and Dock ("Bromure Dev" for the browser, "Bromure Sidecar Dev" for Sidecar); the icon is unchanged;
+- its data in `~/Library/Application Support/BromureACDev` and `~/Library/Logs/BromureACDev` (`BromureSupportDirName`), so it never reads or locks the release's data. A build signed by another team gets a different keychain master key and couldn't decrypt the release's files anyway;
+- Sparkle's scheduled checks and automatic installs off, so a release update can never replace it. "Check for Updates…" still works by hand.
+
+The bundle's file name is unchanged (`Bromure Agentic Coding.app`). The flavor is independent of the identity: a dev build under the upstream team is fine for local testing, and a release-flavored build under your own team is what `package.sh` produces.
 
 ## File Layout
 
 ```
 bromure/
-  bromure.provisionprofile          # downloaded from Apple Developer portal
-  Sources/CLI/
-    SafariSandbox.entitlements       # entitlements plist (checked in)
-    Info.plist                       # app bundle metadata (checked in)
-  build.sh                           # local development build
+  bromure-ac.provisionprofile        # downloaded from Apple Developer portal (gitignored; build.sh embeds it)
+  .env.local                         # your signing identity and flavor (gitignored)
+  Sources/Browser/                   # Bromure: entitlements, Info.plist
+  Sources/AgentCoding/               # Bromure Agentic Coding: entitlements, Info.plist
+  build.sh                           # local build: bromure | bromure-ac | sidecar
   package.sh                         # release build + notarization + DMG
+  scripts/stamp-identity.sh          # writes your team/bundle ID into build-dir copies
 ```
 
 ## Building
@@ -116,8 +150,11 @@ bromure/
 Builds the binary and creates a `.app` bundle with code signing:
 
 ```bash
-CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAM_ID)" ./build.sh
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAM_ID)" ./build.sh            # Bromure
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAM_ID)" ./build.sh bromure-ac # Bromure Agentic Coding
 ```
+
+The target is `bromure` (default), `bromure-ac` or `sidecar`. With `BROMURE_DEV=1` set, the build is the [dev flavor](#dev-flavor-bromure_dev1).
 
 If `CODESIGN_IDENTITY` is not set, it falls back to ad-hoc signing (`-`), which is sufficient for local testing but will not satisfy Gatekeeper or enable iCloud/vmnet.
 
@@ -126,8 +163,10 @@ If `CODESIGN_IDENTITY` is not set, it falls back to ad-hoc signing (`-`), which 
 | Variable | Required | Description |
 |---|---|---|
 | `CODESIGN_IDENTITY` | No (defaults to `-`) | Code signing identity |
+| `BROMURE_TEAM_ID`, `BROMURE_BUNDLE_ID` | No | Sign under your own team ([above](#building-under-your-own-team)) |
+| `BROMURE_DEV` | No | `1` for the dev flavor ([above](#dev-flavor-bromure_dev1)) |
 
-The app bundle is created at `.build/arm64-apple-macosx/release/Bromure.app`.
+All of them can live in `.env.local`. The bundle is created at `.build/arm64-apple-macosx/release/<App name>.app` (`Bromure.app`, `Bromure Agentic Coding.app`, `Bromure Sidecar.app`). `swift build` alone does not refresh it; run `build.sh`.
 
 ### Release Build (`package.sh`)
 
@@ -149,6 +188,9 @@ APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 | `APPLE_ID` | For notarization | Your Apple ID email |
 | `TEAM_ID` | For notarization | Your 10-character Apple Developer team ID |
 | `APP_PASSWORD` | For notarization | App-specific password ([generate here](https://appleid.apple.com) > Sign-In and Security > App-Specific Passwords) |
+| `BROMURE_TEAM_ID`, `BROMURE_BUNDLE_ID` | No | Sign under your own team ([above](#building-under-your-own-team)) |
+
+`package.sh` reads `.env.local` too.
 
 If `APPLE_ID`, `TEAM_ID`, or `APP_PASSWORD` are missing, the script will still sign and package but skip notarization. The resulting DMG will trigger Gatekeeper warnings on other Macs.
 

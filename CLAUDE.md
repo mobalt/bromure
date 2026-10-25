@@ -27,6 +27,8 @@ swift build
 
 The `build.sh` script does: release build → create .app bundle → copy resources → ad-hoc codesign with virtualization entitlement. E2E tests expect the app bundle from `./build.sh` to exist.
 
+Per-developer signing (own team ID, bundle ID, Developer ID cert) goes in the gitignored `.env.local`, never in the tracked entitlements or Info.plist; `BROMURE_DEV=1` there builds a flavor that runs next to an installed release. See BUILD_INSTRUCTIONS.md, "Building under your own team".
+
 ## User Manual
 
 The Bromure (web) manual is `manual-web/` (MDX; `manual/` is Bromure Agentic Coding's). When you change a pictured window — a profile-settings category, an app Settings pane, the setup window, the consent/enrollment windows, the trace viewer — re-render its screenshots in the same change and update the page's text:
