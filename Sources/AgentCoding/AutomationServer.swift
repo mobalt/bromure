@@ -366,6 +366,9 @@ final class ACAutomationServer {
     var onQuit: ((_ vms: String?) -> Bool)?
     /// The TCP automation server's bound port, for `/health` on either server.
     var onAutomationPort: (() -> UInt16?)?
+    /// `POST /app/sync`: flush the host-side stores (the guests are synced
+    /// by the route itself, over their shell connections).
+    var onSyncHostStores: (() -> Void)?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
@@ -760,6 +763,31 @@ final class ACAutomationServer {
             if let c = ACInstance.bundleCommit { health["commit"] = c }
             if let p = DispatchQueue.main.sync(execute: { self.onAutomationPort?() }) { health["automationPort"] = Int(p) }
             sendResponse(fd: fd, status: 200, body: health)
+
+        // Flush before a snapshot: `sync` in every running guest (over its
+        // shell connection, bounded), then the host-side stores. Best effort;
+        // the reply says which guests answered. Trusted callers only.
+        case ("POST", "/app/sync"):
+            guard isTrustedLocal || debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let rows = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
+            var synced: [String] = [], failed: [String] = []
+            for row in rows where (row["state"] as? String) == "running" {
+                guard let id = row["id"] as? String else { continue }
+                guard let conn = DispatchQueue.main.sync(execute: { self.onGetShellConnection?(id) }) else {
+                    failed.append(id); continue
+                }
+                if case .success(let r) = Self.executeShellCommand(fd: conn.fd, command: "sync", timeout: 20), r.exitCode == 0 {
+                    synced.append(id)
+                } else {
+                    failed.append(id)
+                }
+                _ = conn.conn   // keep alive until the command has answered
+            }
+            DispatchQueue.main.sync { self.onSyncHostStores?() }
+            sendResponse(fd: fd, status: 200, body: ["ok": failed.isEmpty, "synced": synced, "failed": failed])
 
         // Quit the app the way the menu does — drain the VMs, then terminate —
         // but without the confirmation dialog: the caller is a script

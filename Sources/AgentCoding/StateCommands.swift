@@ -18,7 +18,9 @@ struct StateCommand: ParsableCommand {
             with `--state <name>` (or BROMURE_STATE=<name>, BROMURE_STATE_DIR=<dir>). Copies are APFS clones: \
             instant and free until written.
             """,
-        subcommands: [StateList.self, StateCreate.self, StateRemove.self, StatePath.self],
+        subcommands: [StateList.self, StateCreate.self, StateRemove.self, StatePath.self,
+                      StateSnapshot.self, StateSnapshots.self, StateRestore.self, StatePrune.self,
+                      StateSchedule.self],
         defaultSubcommand: StateList.self)
 }
 
@@ -54,13 +56,17 @@ struct StateList: ParsableCommand {
                     let s = StateStore.sizes(of: e.url)
                     row["apparentBytes"] = s.apparent; row["allocatedBytes"] = s.allocated
                 }
+                let snaps = StateStore.snapshots(of: e)
+                row["snapshots"] = snaps.count
+                if let last = snaps.last { row["lastSnapshotAt"] = ISO8601DateFormatter().string(from: last.takenAt) }
+                row["hourlySnapshots"] = StateStore.scheduleInstalled(for: e)
                 rows.append(row)
             }
             let data = try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys])
             print(String(decoding: data, as: UTF8.self))
             return
         }
-        print(row("STATE", "SIZE", "RUNNING", "PATH"))
+        print(row("STATE", "SIZE", "RUNNING", "SNAPSHOT", "PATH"))
         for e in entries {
             let size = noSize ? "-" : StateStore.human(StateStore.sizes(of: e.url).allocated)
             var running = "-"
@@ -74,7 +80,13 @@ struct StateList: ParsableCommand {
             }
             var name = e.name
             if e.isDefault { name += " (default)" }
-            print(row(name, size, running, e.url.path))
+            let snaps = StateStore.snapshots(of: e)
+            var snapshot = "-"
+            if let last = snaps.last {
+                snapshot = "\(Self.age(last.takenAt)) ago (\(snaps.count))"
+            }
+            if StateStore.scheduleInstalled(for: e) { snapshot += " ⟳" }
+            print(row(name, size, running, snapshot, e.url.path))
             if let m = e.metadata {
                 var notes: [String] = []
                 if let c = m.clonedFrom { notes.append("cloned from \(c)\(m.live == true ? " (live)" : "")") }
@@ -89,8 +101,17 @@ struct StateList: ParsableCommand {
 extension StateList {
     /// Fixed-width columns (String(format: "%-18s") can't take Swift strings).
     static func pad(_ s: String, _ w: Int) -> String { s.count >= w ? s : s + String(repeating: " ", count: w - s.count) }
-    func row(_ a: String, _ b: String, _ c: String, _ d: String) -> String {
-        "\(Self.pad(a, 18)) \(Self.pad(b, 10)) \(Self.pad(c, 34)) \(d)"
+    func row(_ a: String, _ b: String, _ c: String, _ d: String, _ e: String) -> String {
+        "\(Self.pad(a, 18)) \(Self.pad(b, 10)) \(Self.pad(c, 34)) \(Self.pad(d, 14)) \(e)"
+    }
+
+    /// "3m", "5h", "2d".
+    static func age(_ d: Date, now: Date = Date()) -> String {
+        let s = Int(now.timeIntervalSince(d))
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
     }
 }
 
@@ -206,3 +227,167 @@ struct StatePath: ParsableCommand {
     }
 }
 
+// MARK: Snapshots
+
+struct StateSnapshot: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "snapshot",
+        abstract: "Snapshot a state: an APFS clone of it under the states folder's .snapshots (instant).",
+        discussion: """
+            A running state is asked to sync first (every running guest runs `sync`, the host flushes \
+            its stores) and its saved RAM images are left out, since its VMs have moved past them. \
+            Unlabelled snapshots are the scheduled kind and are thinned by `state prune`; a labelled one \
+            (`--label pre-devbuild-02`) stays until removed.
+            """)
+
+    @Argument(help: "State name.")
+    var state: String
+
+    @Option(name: .long, help: "A label after the time stamp (one word).")
+    var label: String?
+
+    @Flag(name: .long, help: "Apply the retention policy afterwards (what the hourly schedule does).")
+    var prune = false
+
+    func run() throws {
+        do {
+            let e = try StateStore.existing(state)
+            let t0 = Date()
+            let s = try StateStore.snapshot(e, label: label)
+            print("Snapshot \(s.name) of '\(e.name)' in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s\(e.instance.locked ? " (running: synced, RAM images left out)" : ""): \(s.url.path)")
+            if prune {
+                let dropped = try StateStore.prune(e)
+                if !dropped.isEmpty { print("Pruned \(dropped.count): \(dropped.map(\.name).joined(separator: ", "))") }
+            }
+        } catch let e as StateStore.Failure { throw ValidationError(e.description) }
+    }
+}
+
+struct StateSnapshots: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "snapshots", abstract: "List a state's snapshots, oldest first.")
+
+    @Argument(help: "State name.")
+    var state: String
+
+    @Flag(name: .long, help: "Machine-readable JSON.")
+    var json = false
+
+    func run() throws {
+        do {
+            let e = try StateStore.existing(state)
+            let snaps = StateStore.snapshots(of: e)
+            if json {
+                let rows: [[String: Any]] = snaps.map { s in
+                    var r: [String: Any] = ["name": s.name, "path": s.url.path,
+                                            "takenAt": ISO8601DateFormatter().string(from: s.takenAt), "automatic": s.isAutomatic]
+                    if let l = s.label { r["label"] = l }
+                    return r
+                }
+                print(String(decoding: try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted]), as: UTF8.self))
+                return
+            }
+            if snaps.isEmpty { print("No snapshots of '\(e.name)'."); return }
+            for s in snaps {
+                print("\(StateList.pad(s.name, 44)) \(StateList.pad(StateList.age(s.takenAt), 6)) ago  \(s.isAutomatic ? "scheduled" : "kept (\(s.label!))")")
+            }
+            let policy = StateStore.RetentionPolicy.fromSettings()
+            let drop = StateStore.snapshotsToDrop(snaps, policy: policy, now: Date())
+            print("\(snaps.count) snapshot(s); `state prune \(e.name)` would drop \(drop.count) (keep all <\(Int(policy.keepAllHours))h, hourly <\(Int(policy.hourlyDays))d, daily <\(Int(policy.dailyDays))d).")
+        } catch let e as StateStore.Failure { throw ValidationError(e.description) }
+    }
+}
+
+struct StateRestore: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "restore",
+        abstract: "Put a snapshot back (the state must not be running); the replaced data is kept as a pre-restore snapshot.")
+
+    @Argument(help: "State name.")
+    var state: String
+
+    @Argument(help: "Snapshot name (see `state snapshots`), or `latest`.")
+    var snapshot: String
+
+    @Option(name: .long, help: "Restore only this path inside the state, e.g. profiles/<workspace uuid>.")
+    var only: String?
+
+    @Flag(name: [.customShort("f"), .long], help: "Skip the confirmation prompt.")
+    var force = false
+
+    func run() throws {
+        do {
+            let e = try StateStore.existing(state)
+            if e.instance.locked { throw StateStore.Failure.running(e.name, e.instance.info) }
+            let snaps = StateStore.snapshots(of: e)
+            guard let s = snapshot == "latest" ? snaps.last : snaps.first(where: { $0.name == snapshot }) else {
+                throw StateStore.Failure.missing("snapshot \(snapshot) of \(e.name)")
+            }
+            if !force {
+                FileHandle.standardError.write(Data(
+                    "Restore \(only.map { "'\($0)' of " } ?? "")'\(e.name)' from \(s.name) (\(StateList.age(s.takenAt)) ago)? The current data is kept as a pre-restore snapshot. [y/N] ".utf8))
+                let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+                guard answer == "y" || answer == "yes" else { print("Aborted."); return }
+            }
+            try StateStore.restore(e, from: s, only: only)
+            print("Restored \(only ?? "'\(e.name)'") from \(s.name). The replaced data is the newest `pre-restore` snapshot.")
+        } catch let e as StateStore.Failure { throw ValidationError(e.description) }
+    }
+}
+
+struct StatePrune: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "prune",
+        abstract: "Thin a state's scheduled snapshots: keep all <24h, hourly <7d, daily <30d (settings snapshots.*).")
+
+    @Argument(help: "State name.")
+    var state: String
+
+    @Flag(name: .long, help: "Show what would go; remove nothing.")
+    var dryRun = false
+
+    func run() throws {
+        do {
+            let e = try StateStore.existing(state)
+            let policy = StateStore.RetentionPolicy.fromSettings()
+            if dryRun {
+                let drop = StateStore.snapshotsToDrop(StateStore.snapshots(of: e), policy: policy, now: Date())
+                print(drop.isEmpty ? "Nothing to prune." : "Would drop \(drop.count): \(drop.map(\.name).joined(separator: ", "))")
+                return
+            }
+            let dropped = try StateStore.prune(e, policy: policy)
+            print(dropped.isEmpty ? "Nothing to prune." : "Pruned \(dropped.count): \(dropped.map(\.name).joined(separator: ", "))")
+        } catch let e as StateStore.Failure { throw ValidationError(e.description) }
+    }
+}
+
+struct StateSchedule: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "schedule",
+        abstract: "Hourly snapshots of a state: a per-user LaunchAgent running `state snapshot <state> --prune`.",
+        discussion: "The agent runs the `stable` build's CLI, so it follows a promote. `install` loads it now; `remove` unloads and deletes it; `status` says which.")
+
+    @Argument(help: "install | remove | status")
+    var action: String
+
+    @Argument(help: "State name (default: work).")
+    var state: String = ACSupportDir.defaultStateName
+
+    func run() throws {
+        do {
+            let e = try StateStore.existing(state)
+            switch action {
+            case "install":
+                try StateStore.installSchedule(for: e)
+                print("Hourly snapshots of '\(e.name)' installed: \(StateStore.schedulePlistURL(for: e).path)")
+            case "remove":
+                StateStore.removeSchedule(for: e)
+                print("Hourly snapshots of '\(e.name)' removed.")
+            case "status":
+                print(StateStore.scheduleInstalled(for: e) ? "installed (\(StateStore.scheduleLabel(for: e)))" : "not installed")
+            default:
+                throw ValidationError("action must be install, remove or status")
+            }
+        } catch let e as StateStore.Failure { throw ValidationError(e.description) }
+    }
+}

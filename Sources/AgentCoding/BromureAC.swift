@@ -4761,6 +4761,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onAutomationPort = { [weak self] in
             MainActor.assumeIsolated { self?.automationServer?.boundPort }
         }
+        server.onSyncHostStores = {
+            SquelchLedger.shared.flush()
+            ACDefaults.standard.synchronize()
+        }
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
             return self.profiles.map { p in
