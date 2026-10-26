@@ -313,7 +313,9 @@ public final class SessionDisk {
             dir.appendingPathComponent("meta-share"),
             dir.appendingPathComponent("outbox"),
         ]
+        let hadHomeImage = fm.fileExists(atPath: homeImageURL.path)
         for url in contaminated { try? fm.removeItem(at: url) }
+        if hadHomeImage { ProfileStore.homeImageChanged(profile.id) }
         let left = contaminated.filter { fm.fileExists(atPath: $0.path) }
         guard left.isEmpty else { throw WipeIncomplete(left: left) }
         clearCompromised()

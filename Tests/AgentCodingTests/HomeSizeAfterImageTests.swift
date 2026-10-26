@@ -123,6 +123,10 @@ struct HomeSizeAfterImageTests {
         try store.resetHome(for: p)
         await settle()
         #expect(heard == 3)
+        try disk.ensureHomeImageExists()
+        try? disk.wipeForCompromise()                       // the compromise wipe deletes it too
+        await settle()
+        #expect(heard == 5)
     }
 
     @Test("a fat client remeasures on every run-state change, booting and a failed boot included; the local field stats the file itself")
