@@ -2823,6 +2823,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
         runningSessions[profile.id] = session
+        // The boot created the home image an open editor may still think absent.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: profile.id)
         updateStatusMenu()
         // Boot completes asynchronously after the launch path's initial render,
         // so refresh the picker now that the VM is actually running (Start →
@@ -2840,6 +2842,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         updateStatusMenu()
         // "Until the workspace stops" firewall rules end here.
         endUntilStopFirewallRules(for: id)
+        // An open editor's Erase / Reset come back now it's stopped.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
     }
 
     /// NSEvent monitor that intercepts ⌘T / ⌘W / ⌘1-9 at the
@@ -10644,7 +10648,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let homeImage = store.homeImageURL(for: editing)
         let hasHomeImage = editing.homeModel == .ext4
             && FileManager.default.fileExists(atPath: homeImage.path)
-        return ProfileStorageContext(
+        var context = ProfileStorageContext(
             baseImageURL: baseURL,
             baseImageVersion: readCurrentBaseVersion(),
             baseImageBuildDate: buildDate,
@@ -10662,6 +10666,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? { [weak self] in self?.restoreHomeStorage(editing) }
                 : nil
         )
+        context.remeasure = { [weak self] in self?.makeStorageContext(for: editing) }
+        return context
     }
 
     func closeEditorWindow() {

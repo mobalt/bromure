@@ -1014,7 +1014,16 @@ final class RemoteHostController {
         profilesByID = newProfiles
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
         specs = newSpecs
-        if listModel.profileRows != rows { listModel.profileRows = rows }
+        if listModel.profileRows != rows {
+            // A workspace that started (its boot creates the home image) or
+            // stopped: its open editor measures the server's storage again.
+            let was = Dictionary(listModel.profileRows.map { ($0.id, $0.state == .running) },
+                                 uniquingKeysWith: { a, _ in a })
+            listModel.profileRows = rows
+            for r in rows where was[r.id] != nil && was[r.id] != (r.state == .running) {
+                NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: r.id)
+            }
+        }
 
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
@@ -2092,6 +2101,7 @@ final class RemoteHostController {
             base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
+        c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }
         return c
     }
 

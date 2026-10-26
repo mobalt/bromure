@@ -235,6 +235,13 @@ struct ProfileStorageContext {
     /// server (the URLs above are only placeholders there), and the erase /
     /// reset / restore actions left to the server Mac.
     var remoteSizes: StorageSizes? = nil
+    /// The same context measured again now. Everything above is a snapshot
+    /// taken when the editor opened, and the editor stays open across a
+    /// boot that creates the home image or an erase that deletes it: the
+    /// home-size floor read "no image yet" from it and let a size below
+    /// the image be saved (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists"). nil: nothing to re-read.
+    var remeasure: (@MainActor () async -> ProfileStorageContext?)? = nil
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -251,6 +258,13 @@ struct ProfileStorageContext {
             onRestoreHome: nil
         )
     }
+}
+
+extension Notification.Name {
+    /// A workspace's storage may have changed under an open editor: it
+    /// started (a boot creates the home image) or stopped. `object` is the
+    /// profile id; its editor measures the storage again.
+    static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
 }
 
 /// What each storage layer costs on the Mac that holds it.
@@ -482,6 +496,12 @@ struct ProfileEditorView: View {
     @State private var selectedCategory: EditorCategory = .general
     /// Bumped when an erase or reset in Resources changed the disks.
     @State private var storageRevision = 0
+    /// `storageContext` measured again since the editor opened (after an
+    /// erase, a boot, a stop); nil until then.
+    @State private var liveStorage: ProfileStorageContext?
+    /// Bumped when `liveStorage` arrives, so the storage stack re-measures it.
+    @State private var storageGeneration = 0
+    private var currentStorage: ProfileStorageContext? { liveStorage ?? storageContext }
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
@@ -988,7 +1008,10 @@ struct ProfileEditorView: View {
     /// draft (the pane can't save it live the way the local store does).
     private func commitSave() {
         if case .remoteGlobal? = modelsPane { onSaveGlobalModels?(remoteGlobalDraft) }
-        onSave(draft, generateSSH)
+        var out = draft
+        out.homeImageGB = Self.homeSetting(out.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        draft = out
+        onSave(out, generateSSH)
     }
 
     /// "Create" / "Save", localized. A bare `isNew ? "Create" : "Save"`
@@ -3970,10 +3993,10 @@ struct ProfileEditorView: View {
 
     /// The home image's size now, GiB — nil before it exists.
     private var homeCapacityGB: Int? {
-        if let r = storageContext?.remoteSizes {
+        if let r = currentStorage?.remoteSizes {
             return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
         }
-        guard let u = storageContext?.profileHomeImageURL,
+        guard let u = currentStorage?.profileHomeImageURL,
               let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
         else { return nil }
         return Int(n.int64Value >> 30)
@@ -4012,6 +4035,30 @@ struct ProfileEditorView: View {
             let gb = min(1024, max(floor, value))
             return (gb == current && saved == nil) ? nil : gb
         }
+    }
+
+    /// Re-read the storage (the snapshot's own `remeasure`), then hold the
+    /// size setting to the image that is there now.
+    @MainActor
+    private func remeasureStorage() async {
+        guard let fresh = await storageContext?.remeasure?() else { return }
+        liveStorage = fresh
+        storageGeneration += 1
+        clampHomeSetting()
+    }
+
+    /// A setting below the existing image is raised to its size: the disk
+    /// layer never shrinks an image, so a smaller stored number would only
+    /// resurface as the size of the next home after an erase.
+    private func clampHomeSetting() {
+        let gb = Self.homeSetting(draft.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        if gb != draft.homeImageGB { draft.homeImageGB = gb }
+    }
+
+    /// `setting` held to an existing image of `existingGB` (nil = none yet).
+    static func homeSetting(_ setting: Int?, existingGB: Int?, saved: Int?) -> Int? {
+        guard let existingGB, let setting, setting < existingGB else { return setting }
+        return HomeSizeBounds(existingGB: existingGB, defaultGB: existingGB).setting(for: setting, saved: saved)
     }
 
     private var homeSizeSection: some View {
@@ -4057,18 +4104,25 @@ struct ProfileEditorView: View {
                 Text("Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let storageContext {
+                if let currentStorage {
                     StorageStackView(
                         isNewProfile: isNew,
-                        context: storageContext,
+                        context: currentStorage,
                         onStorageChanged: { storageRevision += 1 }
                     )
+                    .id(storageGeneration)   // a fresh context: measure it again
                 } else {
                     Text("Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            // Each time the pane shows, after an erase or reset, and when the
+            // workspace starts or stops, the storage is measured again.
+            .task(id: storageRevision) { await remeasureStorage() }
+            .onReceive(NotificationCenter.default.publisher(for: .bromureWorkspaceStorageChanged)) { note in
+                if (note.object as? UUID) == draft.id { storageRevision += 1 }
             }
 
             if draft.homeModel == .ext4 {

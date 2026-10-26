@@ -3961,7 +3961,22 @@ public final class ProfileStore {
     /// launch; an older copy wrote it backwards).
     public func saveEdited(_ profile: inout Profile) throws {
         if let stored = storedProfile(id: profile.id) { profile.adoptRuntimeFields(from: stored) }
+        holdHomeSizeToImage(&profile)
         try save(profile)
+    }
+
+    /// A home size below the workspace's existing image is raised to the
+    /// image's size. The disk layer only grows an image, so a smaller
+    /// setting never took effect and only came back as the size of the next
+    /// home after an erase -- and an editor that opened before the image
+    /// existed offered one (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists").
+    func holdHomeSizeToImage(_ profile: inout Profile) {
+        guard profile.homeModel == .ext4, let gb = profile.homeImageGB,
+              let n = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber
+        else { return }
+        let imageGB = Int(n.int64Value >> 30)
+        if gb < imageGB { profile.homeImageGB = imageGB }
     }
 
     /// A workspace whose directory is gone: the other process sharing this
