@@ -120,7 +120,12 @@ struct OtherProcessMintedTests {
         let rb = ac[reboot.upperBound...].prefix(1800)
         let pin = try #require(rb.range(of: "pinLease(id)"))
         let stop = try #require(rb.range(of: "handleSessionStopped(profileID: id)"))
-        #expect(pin.lowerBound < stop.lowerBound && rb.contains("defer { unpinLease(id) }"))
+        #expect(pin.lowerBound < stop.lowerBound)
+        // Not dropped when rebootMachine returns: launch may still be waiting
+        // on a fat client's prompt. The next boot's acquire takes it over.
+        #expect(!rb.contains("unpinLease(id)"))
+        let launchAcquire = try #require(body.range(of: "WorkspaceLease.acquire(profile.id"))
+        #expect(body[launchAcquire.upperBound...].prefix(400).contains("leasePins[profile.id] = nil"))
         let guestReboot = try #require(ac.range(of: "private func relaunchAfterGuestReboot("))
         let gr = ac[guestReboot.upperBound...].prefix(2500)
         let gpin = try #require(gr.range(of: "pinLease(profileID)"))

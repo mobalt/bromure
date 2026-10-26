@@ -1789,16 +1789,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// This process's VM of `id` is gone: let the other process have it --
     /// unless a reboot is between its stop and its next boot.
     func releaseLeaseIfIdle(_ id: Profile.ID) {
-        if !diskInUse(id), !leasePins.contains(id) { WorkspaceLease.release(id) }
+        if let until = leasePins[id], until > Date() { return }
+        leasePins[id] = nil
+        if !diskInUse(id) { WorkspaceLease.release(id) }
     }
 
-    /// Workspaces whose lease outlives their VM for a moment: a reboot stops
-    /// the old one and boots the next, and the other process must not take
-    /// the workspace in between.
-    private var leasePins: Set<Profile.ID> = []
-    func pinLease(_ id: Profile.ID) { leasePins.insert(id) }
+    /// Workspaces whose lease outlives their VM: a reboot stops the old one
+    /// and boots the next, and the other process must not take the workspace
+    /// in between -- however long the next boot's launch waits first (a
+    /// fat client's prompts, up to two minutes each; Kimi provisioning). The
+    /// next boot's acquire takes the pin over (`launch`); an attempt that
+    /// gives up lets it lapse at `pinLeaseSeconds`, and the lease goes then.
+    private var leasePins: [Profile.ID: Date] = [:]
+    static let pinLeaseSeconds: TimeInterval = 600
+    func pinLease(_ id: Profile.ID) {
+        let until = Date().addingTimeInterval(Self.pinLeaseSeconds)
+        leasePins[id] = until
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.pinLeaseSeconds * 1_000_000_000) + 1_000_000_000)
+            guard let self, self.leasePins[id] == until else { return }   // taken over, or re-pinned
+            self.releaseLeaseIfIdle(id)
+        }
+    }
+    /// The reboot gave up before any boot (nothing left to launch).
     func unpinLease(_ id: Profile.ID) {
-        leasePins.remove(id)
+        leasePins[id] = nil
         releaseLeaseIfIdle(id)
     }
 
@@ -6999,9 +7014,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
         rebootingProfiles.insert(id)
-        // The lease stays with this process from the stop to the next boot.
+        // The lease stays with this process from the stop to the next boot's
+        // acquire (launch takes the pin over; one that gives up lets it lapse).
         pinLease(id)
-        defer { unpinLease(id) }
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -12406,6 +12421,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
             return
         }
+        leasePins[profile.id] = nil   // a reboot's pin: this boot holds it now
         // Again after the questions above: they wait on the user, and the
         // other process may have deleted it meanwhile. The stamp keeps the
         // minted credentials on disk, which this copy may predate (the other
@@ -16140,13 +16156,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let stop = await self.whileHoldingDisk(profileID) {
                             await self.executeBootRemedy(remedy, profile: profile, pane: nil)
                         }
-                        defer { self.unpinLease(profileID) }
+                        if stop != nil { self.unpinLease(profileID) }   // left off: no boot follows
                         guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }
                         self.launch(profile, detached: true)
                     }
                 } else {
                     launch(profile, detached: true)
-                    unpinLease(profileID)
                 }
             } else {
                 unpinLease(profileID)
