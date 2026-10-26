@@ -4041,10 +4041,22 @@ struct ProfileEditorView: View {
     /// size setting to the image that is there now.
     @MainActor
     private func remeasureStorage() async {
-        guard let fresh = await storageContext?.remeasure?() else { return }
+        let asked = storageRevision
+        guard let fresh = await storageContext?.remeasure?(),
+              Self.remeasureLands(asked: asked, now: storageRevision, cancelled: Task.isCancelled)
+        else { return }
         liveStorage = fresh
         storageGeneration += 1
         clampHomeSetting()
+    }
+
+    /// Whether a remeasure's answer is still the newest. A start or stop
+    /// bumps the revision and cancels the task, but a fat client's fetch
+    /// still came back -- a slower one from before the image existed, after
+    /// a newer one, put the floor back at 8 GB (Finding CWE-362, "A slower
+    /// home-size remeasure can drop the floor back below the image").
+    static func remeasureLands(asked: Int, now: Int, cancelled: Bool) -> Bool {
+        !cancelled && asked == now
     }
 
     /// A setting below the existing image is raised to its size: the disk
