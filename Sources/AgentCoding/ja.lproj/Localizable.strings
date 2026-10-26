@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "この Mac はすでに %@ を別の経路に送っています。通常はこの Mac 自身のワークスペースで、リモートのものと同じサブネットを使っています。トンネルはこれを引き継げません。\n\nヘルパー：%@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "ネットワークヘルパーは、画面にログインしているユーザーにのみ対応します。\n\nヘルパー：%@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "ネットワークヘルパーがトンネルインターフェイスを作成できませんでした。\n\nヘルパー：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "ネットワークヘルパーがルーティングするのはプライベートな /24 ネットワーク（10/8、172.16/12、192.168/16、100.64/10 内）だけですが、リモートのサブネット %@ はそれに当たりません。\n\nヘルパー：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "ネットワークヘルパーは、インストール元と同じ署名の Bromure Agentic Coding にのみ対応します。アプリをアップデートまたは再ビルドした直後であれば、ヘルパーを再起動してください：ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにします。\n\nヘルパー：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "ネットワークヘルパーはすでに上限の %d 本のトンネルを保持しています。使っていないリモートのウインドウを閉じるか、アプリを終了して開き直してください。\n\nヘルパー：%@";
 "The network helper couldn't create the tunnel interface." = "ネットワークヘルパーはトンネルインターフェイスを作成できませんでした。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */

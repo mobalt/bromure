@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "这台 Mac 已经把 %@ 路由到别处——通常是它自己的工作区，它们与远程的工作区使用相同的子网。隧道无法接管它。\n\n助手：%@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "网络助手只为在屏幕上登录的用户服务。\n\n助手：%@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "网络助手无法创建隧道接口。\n\n助手：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "网络助手只路由私有 /24 网络（位于 10/8、172.16/12、192.168/16 或 100.64/10 内），而远程主机的子网 %@ 不在其中。\n\n助手：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "网络助手只为安装它的那份 Bromure Agentic Coding（签名相同）服务。如果你刚更新或重新构建了 App，请重新启动助手：在“登录项”中关闭再打开“Bromure Agentic Coding”。\n\n助手：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "网络助手已持有 %d 条隧道，达到上限。请关闭一个未使用的远程主机窗口，或退出后重新打开 App。\n\n助手：%@";
 "The network helper couldn't create the tunnel interface." = "网络助手无法创建隧道接口。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */

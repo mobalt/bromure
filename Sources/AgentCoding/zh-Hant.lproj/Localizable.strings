@@ -1208,6 +1208,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "這台 Mac 已經把 %@ 路由到別處——通常是它自己的工作區，它們與遠端的工作區使用相同的子網路。通道無法接管它。\n\n輔助程式：%@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "網路輔助程式只為在螢幕上登入的使用者服務。\n\n輔助程式：%@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "網路輔助程式無法建立通道介面。\n\n輔助程式：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "網路輔助程式只路由私有 /24 網路（位於 10/8、172.16/12、192.168/16 或 100.64/10 內），而遠端主機的子網路 %@ 不在其中。\n\n輔助程式：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "網路輔助程式只為安裝它的那份 Bromure Agentic Coding（簽署相同）服務。如果你剛更新或重新建置了 App，請重新啟動輔助程式：在「登入項目」中關閉再開啟「Bromure Agentic Coding」。\n\n輔助程式：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "網路輔助程式已持有 %d 條通道，達到上限。請關閉一個未使用的遠端主機視窗，或結束後重新開啟 App。\n\n輔助程式：%@";
 "The network helper couldn't create the tunnel interface." = "網路輔助程式無法建立通道介面。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
