@@ -10666,6 +10666,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? { [weak self] in self?.restoreHomeStorage(editing) }
                 : nil
         )
+        context.homeImageFile = editing.homeModel == .ext4 ? homeImage : nil
         context.remeasure = { [weak self] in self?.makeStorageContext(for: editing) }
         return context
     }

@@ -217,6 +217,10 @@ struct ProfileStorageContext {
     /// new profiles. When set, the home row sizes/labels against the
     /// image instead of walking the directory.
     var profileHomeImageURL: URL?
+    /// Where an ext4 home's image lives, whether or not it exists yet: the
+    /// size field stats it on every draw, so an image a boot created after
+    /// the editor opened is its floor even before a remeasure arrives.
+    var homeImageFile: URL? = nil
     /// True if the profile's VM is currently open in a session window —
     /// reset actions are unsafe in that state.
     var isRunning: Bool
@@ -3996,7 +4000,7 @@ struct ProfileEditorView: View {
         if let r = currentStorage?.remoteSizes {
             return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
         }
-        guard let u = currentStorage?.profileHomeImageURL,
+        guard let u = currentStorage?.profileHomeImageURL ?? currentStorage?.homeImageFile,
               let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
         else { return nil }
         return Int(n.int64Value >> 30)

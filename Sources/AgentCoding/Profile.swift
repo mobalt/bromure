@@ -4301,6 +4301,18 @@ public final class ProfileStore {
         try revertImage(fromCheckpoint: checkpointID,
                         in: homeCheckpointsDirectory(for: profile),
                         over: homeImageURL(for: profile), profile: profile)
+        Self.homeImageChanged(profile.id)   // a checkpoint from before a grow is smaller
+    }
+
+    /// A workspace's home image was created, grown, erased or rolled back:
+    /// an open editor measures it again. Posted where the file changes --
+    /// a boot creates it in `prepare()`, long before the session registers,
+    /// and a boot that then fails never registers at all (Finding CWE-670,
+    /// "Home-size floor stays at 8 GB after prepare() has created the image").
+    public static func homeImageChanged(_ id: UUID) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
+        }
     }
 
     private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
@@ -4334,6 +4346,7 @@ public final class ProfileStore {
         let img = homeImageURL(for: profile)
         if fm.fileExists(atPath: img.path) {
             try fm.removeItem(at: img)
+            Self.homeImageChanged(profile.id)
         }
         // Erased means erased: the home's rollback checkpoints hold the
         // same data and must not survive the wipe.

@@ -84,4 +84,56 @@ struct HomeSizeAfterImageTests {
         #expect(fc.contains("c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }"))
         #expect(fc.contains("post(name: .bromureWorkspaceStorageChanged, object: r.id)"))
     }
+
+    /// Finding (CWE-670): "Home-size floor stays at 8 GB after prepare() has
+    /// created the image". The editor heard only when a session registered --
+    /// after the whole boot, and never for a boot that failed. Now the file's
+    /// own changes tell it.
+    @Test("creating, growing and erasing the image each tell an open editor")
+    @MainActor
+    func imageChangesNotify() async throws {
+        let (store, root) = Self.tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var p = Profile(name: "h", tool: .claude, authMode: .token)
+        p.homeModel = .ext4
+        p.homeImageGB = 8
+        try store.save(p)
+        var heard = 0
+        // By value, as the editor matches it (an `object:` filter compares
+        // bridged UUIDs by identity).
+        let token = NotificationCenter.default.addObserver(forName: .bromureWorkspaceStorageChanged,
+                                                           object: nil, queue: nil) { note in
+            if (note.object as? UUID) == p.id { heard += 1 }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        func settle() async { await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } } }
+
+        let disk = SessionDisk(profile: p, store: store, baseDiskURL: URL(fileURLWithPath: "/dev/null"))
+        try disk.ensureHomeImageExists()                    // prepare(), before the boot
+        await settle()
+        #expect(heard == 1)
+        try disk.ensureHomeImageExists()                    // already there: nothing changed
+        await settle()
+        #expect(heard == 1)
+        var bigger = p
+        bigger.homeImageGB = 16
+        try SessionDisk(profile: bigger, store: store, baseDiskURL: URL(fileURLWithPath: "/dev/null")).growHomeImageIfNeeded()
+        await settle()
+        #expect(heard == 2)
+        try store.resetHome(for: p)
+        await settle()
+        #expect(heard == 3)
+    }
+
+    @Test("a fat client remeasures on every run-state change, booting and a failed boot included; the local field stats the file itself")
+    func everyStateChange() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("for r in rows where was[r.id] != nil && was[r.id] != r.state {"))
+        #expect(try src("Sources/AgentCoding/ProfileViews.swift")
+            .contains("guard let u = currentStorage?.profileHomeImageURL ?? currentStorage?.homeImageFile,"))
+        #expect(try src("Sources/AgentCoding/BromureAC.swift")
+            .contains("context.homeImageFile = editing.homeModel == .ext4 ? homeImage : nil"))
+    }
 }

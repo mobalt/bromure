@@ -170,6 +170,7 @@ public final class SessionDisk {
         }
         defer { try? handle.close() }
         try handle.truncate(atOffset: homeImageTargetBytes)
+        ProfileStore.homeImageChanged(profile.id)
     }
 
     /// The home image's guest-visible size: the workspace's own setting,
@@ -201,6 +202,7 @@ public final class SessionDisk {
         }
         defer { try? handle.close() }
         try handle.truncate(atOffset: target)
+        ProfileStore.homeImageChanged(profile.id)
         let now = ((try? fm.attributesOfItem(atPath: homeImageURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
         return "home image grown \(gib(size)) → \(gib(now)) (target \(gib(target)))"
     }

@@ -1015,12 +1015,13 @@ final class RemoteHostController {
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
         specs = newSpecs
         if listModel.profileRows != rows {
-            // A workspace that started (its boot creates the home image) or
-            // stopped: its open editor measures the server's storage again.
-            let was = Dictionary(listModel.profileRows.map { ($0.id, $0.state == .running) },
+            // A workspace that is booting (its prepare creates the home
+            // image), running, stopped, or back off after a failed boot: its
+            // open editor measures the server's storage again.
+            let was = Dictionary(listModel.profileRows.map { ($0.id, $0.state) },
                                  uniquingKeysWith: { a, _ in a })
             listModel.profileRows = rows
-            for r in rows where was[r.id] != nil && was[r.id] != (r.state == .running) {
+            for r in rows where was[r.id] != nil && was[r.id] != r.state {
                 NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: r.id)
             }
         }
