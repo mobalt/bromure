@@ -2464,6 +2464,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return { [weak self] in
             guard let self else { return }
             if claimed { self.bootsInFlight.end(id) }
+            self.releaseLeaseIfIdle(id)   // the relaunch failed: no VM holds it
             self.refreshSidebar()
         }
     }
@@ -2752,6 +2753,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is the strong owner that keeps the VM alive independent of any window.
     @discardableResult
     func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        // Every running VM holds its workspace's lease (`launch` took it
+        // already; a boot that didn't come through there takes it here).
+        if !WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)),
+           store.exists(profile) {
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' registered while the other Bromure process holds its lease\n".utf8))
+        }
         // A stop asked for during the boot (it had no session to stop then):
         // honored now that there is one.
         if let action = bootsInFlight.takeStop(profile.id) {
@@ -16532,11 +16540,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
-        unregisterSession(profile.id)
         // Out of runningSessions, but the remedy, the fresh VM's prepare() and
         // start() still own the disk until it registers: in use (booting) for
         // the whole gap, or a delete / reset / revert landed under the new VM.
+        // Held before the old VM leaves the registry, so the workspace's lease
+        // stays with this process across the reboot (the other one would boot
+        // its stale copy into the gap).
         let release = holdDiskForRelaunch(profile.id)
+        unregisterSession(profile.id)
         // The reboot killed any streamed planning driver with the guest;
         // without this the hub session stays un-ended forever (no terminal
         // event, the dead driver never reconnects), pinning the plan

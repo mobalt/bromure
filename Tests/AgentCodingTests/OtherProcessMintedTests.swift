@@ -111,6 +111,9 @@ struct OtherProcessMintedTests {
         let touch = try #require(body.range(of: "try store.touch(profile)"))
         #expect(elsewhere.lowerBound < acquire.lowerBound && acquire.lowerBound < touch.lowerBound)
         #expect(ac.contains("runningSessions.removeValue(forKey: id)\n        releaseLeaseIfIdle(id)"))
+        // A reboot holds the disk before the old VM leaves the registry, so the
+        // lease never lapses while this process rebuilds the VM.
+        #expect(ac.contains("let release = holdDiskForRelaunch(profile.id)\n        unregisterSession(profile.id)"))
 
         let sa = try src("Sources/AgentCoding/ScheduledAutomations.swift")
         let skip = try #require(sa.range(of: "if delegate.workspaceOpenElsewhere(a.profileID)"))
