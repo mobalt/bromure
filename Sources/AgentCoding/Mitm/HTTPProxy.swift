@@ -25,6 +25,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// reported it (strict sandbox, transparent flows only). nil on the
     /// cooperative proxy path, which can't be attributed.
     var binaryIdentity: OpenShellPolicy.BinaryIdentity?
+    /// The scheme the guest's request travels in ("http" on a cleartext
+    /// flow), for the firewall events the OCSF export maps.
+    private var flowScheme = "https"
     /// Under an OpenShell policy: the upstream addresses that passed its
     /// destination checks (resolved host-side). Every upstream leg of this
     /// connection dials only these. nil = not pinned.
@@ -357,14 +360,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let rule = guardrailsProvider()?.egressPolicy?
             .firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text
         let token = EgressConnectionRegistry.shared.register(
-            profileID: profileID, host: host, port: port, route: route, rule: rule) { [weak self] in
+            profileID: profileID, host: host, port: port, route: route, rule: rule,
+            identity: binaryIdentity) { [weak self] in
                 self?.cutForFirewall()
             }
         defer { EgressConnectionRegistry.shared.unregister(token) }
         // `policy.local` (the OpenShell advisor) is answered here, never
-        // forwarded: no rule governs it.
+        // forwarded: no rule governs it. Decided for the attested program:
+        // without it, a strict workspace's `binaries:` rules match nothing
+        // and every flow they allow was closed here, unlogged.
         if host.lowercased() != OpenShellAdvisor.host, let policy = guardrailsProvider()?.egressPolicy,
-           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16) == .deny {
+           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity) == .deny {
             return
         }
         try await body()
@@ -478,7 +484,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func egressVerdict(host: String, port: Int) -> EgressPolicy.Verdict {
         guard let policy = guardrailsProvider()?.egressPolicy else { return .allow }
         let p16 = UInt16(truncatingIfNeeded: port)
-        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16)
+        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity)
         guard verdict == .deny else { return verdict }
         // Refused every time; reported once a minute per destination.
         guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
@@ -652,13 +658,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     private func rejectBeforePolicy(tls: MitmServerStream, status: Int, error: String, detail: String,
-                                    host: String, port: Int) {
+                                    host: String, port: Int, method: String? = nil, path: String? = nil) {
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny \(host):\(port) — \(detail) (\(profileID.uuidString.prefix(8)))")
-        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+        var data: [String: AnyJSON] = [
             "action": .string("deny"), "layer": .string("l7"), "proto": .string("tcp"),
-            "host": .string(host), "port": .int(port), "reason": .string(detail),
-        ])
+            "host": .string(host), "port": .int(port), "reason": .string(detail), "scheme": .string(flowScheme),
+        ]
+        if let method { data["method"] = .string(method) }
+        if let path { data["path"] = .string(path) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
         let body = "{\"error\":\"\(error)\",\"detail\":\(Self.jsonString(detail)),\"layer\":\"l7\"}"
         let reason = status == 403 ? "Forbidden" : "Bad Request"
         let resp = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\n"
@@ -757,6 +766,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    (the forward-proxy path). Everything downstream is identical; only
         //    the upstream scheme differs (http vs https).
         let tls: MitmServerStream
+        flowScheme = cleartext ? "http" : "https"
         if cleartext {
             tls = PlaintextServerStream(fd: fd, prefix: prefix)
         } else {
@@ -792,7 +802,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
                 rejectBeforePolicy(tls: tls, status: 403, error: "request_authority_mismatch",
                                    detail: "HTTP request authority does not match the authorized tunnel endpoint",
-                                   host: host, port: port)
+                                   host: host, port: port, method: head.method, path: head.target)
+                return
+            }
+            // An upgrade the inspected route can't follow (h2c anywhere; any
+            // Upgrade on JSON-RPC / MCP / GraphQL) is refused whatever the
+            // enforcement mode — after it, no rule would see the traffic.
+            if let detail = openShell.unsupportedUpgradeDetail(
+                host: host, port: UInt16(truncatingIfNeeded: port), target: head.target,
+                headerBlock: head.headerString, identity: binaryIdentity,
+                enforceBinaries: guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false) {
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                rejectBeforePolicy(tls: tls, status: 403, error: "unsupported_l7_protocol", detail: detail,
+                                   host: host, port: port, method: head.method, path: head.target)
                 return
             }
             if let canonical = openShell.canonicalRequestTarget(host: host, port: UInt16(truncatingIfNeeded: port),
@@ -857,6 +879,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
                 "proto": .string("tcp"), "host": .string(host), "port": .int(port),
                 "method": .string(reqMethod), "path": .string(reqPath), "reason": .string(reason),
+                "scheme": .string(flowScheme),
             ]
             if let rule { data["rule"] = .string(rule) }
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
@@ -1628,6 +1651,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
             let pid = profileID
             let wsPath = reqPath
+            let wsScheme = flowScheme == "http" ? "ws" : "wss"
             let onViolation: @Sendable (String, Bool) -> Void = { reason, enforced in
                 SupplyChainLog.shared.record(
                     "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
@@ -1635,6 +1659,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
                     "proto": .string("tcp"), "host": .string(host), "port": .int(port),
                     "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
+                    "scheme": .string(wsScheme),
                 ])
             }
             // PII protection / prompt-injection detection on a model
