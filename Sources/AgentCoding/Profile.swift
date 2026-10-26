@@ -3867,9 +3867,11 @@ public final class ProfileStore {
         return false
     }
 
-    public func save(_ profile: Profile) throws {
+    @discardableResult
+    public func save(_ profile: Profile) throws -> Profile {
         let dir = profileDirectory(for: profile)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let profile = carryingStoredMinted(profile, dir: dir)
 
         // Split secrets out. The Profile in memory keeps every field;
         // on disk we write profile.json (no secrets) + secrets.enc
@@ -3881,6 +3883,29 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
+        return profile
+    }
+
+    /// `profile` with the minted credentials already stored kept. Only the
+    /// process whose VM minted one records it, while every other copy in
+    /// memory -- the other Bromure process's, loaded at its startup, an
+    /// editor's, a launch's -- still has the older list: a save from one of
+    /// those dropped the record and its secret, and the access key the guest
+    /// still holds was then signed with the workspace's own key (Finding
+    /// CWE-284, "The other Bromure process's launch rewrites a workspace and
+    /// drops minted keys"). A stored credential the copy doesn't have is
+    /// kept; the copy's own version of one wins; long-expired ones go.
+    func carryingStoredMinted(_ profile: Profile, dir: URL) -> Profile {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("profile.json")),
+              var stored = try? JSONDecoder.iso8601().decode(Profile.self, from: data),
+              stored.id == profile.id else { return profile }
+        let have = Set(profile.mintedCredentials.map(\.id))
+        guard stored.mintedCredentials.contains(where: { !have.contains($0.id) }) else { return profile }
+        mergeSecrets(into: &stored, dir: dir)
+        var out = profile
+        out.mintedCredentials = MintedCredential.pruned(
+            profile.mintedCredentials + stored.mintedCredentials.filter { !have.contains($0.id) })
+        return out
     }
 
     /// Drop the encrypted blob (and best-effort delete any plaintext
@@ -3952,16 +3977,21 @@ public final class ProfileStore {
 
     /// Save a change to a workspace that is already saved -- from a copy
     /// held in memory, which may outlive the directory. Never recreates it.
-    public func update(_ profile: Profile) throws {
+    /// Returns what was written: `profile` with the stored minted
+    /// credentials it lacked (see `carryingStoredMinted`).
+    @discardableResult
+    public func update(_ profile: Profile) throws -> Profile {
         guard exists(profile) else { throw ProfileGone(name: profile.name) }
-        try save(profile)
+        return try save(profile)
     }
 
     /// Stamp a launch on a saved workspace; never recreates a deleted one.
-    public func touch(_ profile: Profile) throws {
+    /// Returns what was written, minted credentials as stored.
+    @discardableResult
+    public func touch(_ profile: Profile) throws -> Profile {
         var p = profile
         p.lastUsedAt = Date()
-        try update(p)
+        return try update(p)
     }
 
     public func delete(_ profile: Profile) throws {

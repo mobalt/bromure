@@ -4314,3 +4314,5 @@
 
 /* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
 "for %@ (SigV4 signing on the host)" = "pour %@ (signature SigV4 sur l'hôte)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "« %@ » est ouvert dans l’autre processus Bromure (l’app ou son agent de connexion). Utilisez-le là-bas, ou éteignez-le d’abord là-bas.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "L’espace de travail est ouvert dans l’autre processus Bromure, qui y exécute cette automatisation";

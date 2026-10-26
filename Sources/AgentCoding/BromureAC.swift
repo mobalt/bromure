@@ -1780,6 +1780,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { unattendedLaunchRefusals[id] }
 
+    /// The workspace is booting or running in the other Bromure process.
+    func workspaceOpenElsewhere(_ id: Profile.ID) -> Bool {
+        guard !diskInUse(id), let p = profiles.first(where: { $0.id == id }) else { return false }
+        return WorkspaceLease.heldElsewhere(id, dir: store.profileDirectory(for: p))
+    }
+
+    /// This process's VM of `id` is gone: let the other process have it.
+    func releaseLeaseIfIdle(_ id: Profile.ID) {
+        if !diskInUse(id) { WorkspaceLease.release(id) }
+    }
+
+    private func refuseOpenElsewhere(_ profile: Profile, unattended: Bool) {
+        let reason = String(format: NSLocalizedString(
+            "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first.",
+            comment: "launch refused: the workspace runs in the other process"), profile.name)
+        if unattended { refuseUnattendedLaunch(profile, reason); return }
+        FileHandle.standardError.write(Data("[launch] \(reason)\n".utf8))
+        let alert = NSAlert()
+        alert.messageText = reason
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
     private func refuseUnattendedLaunch(_ profile: Profile, _ reason: String) {
         unattendedLaunchRefusals[profile.id] = reason
         FileHandle.standardError.write(Data(
@@ -2754,6 +2778,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (its `deinit` then detaches the vmnet switch port).
     func unregisterSession(_ id: Profile.ID) {
         runningSessions.removeValue(forKey: id)
+        releaseLeaseIfIdle(id)
         updateStatusMenu()
         // "Until the workspace stops" firewall rules end here.
         endUntilStopFirewallRules(for: id)
@@ -12190,6 +12215,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Deleted by the other process (its `vm run --rm` sweep): the row
         // is stale. Booting it would save it back as a kept workspace.
         guard store.exists(profile) else { forgetDeletedProfile(profile, unattended: unattended); return }
+        // Open in the other Bromure process (the app, or its login agent):
+        // it runs there, and this process's copy of it is stale.
+        if workspaceOpenElsewhere(profile.id) {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -12346,9 +12377,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // Held from here until the VM is gone (or its boot fails): the other
+        // process sees it open and leaves it alone. Taken after the
+        // questions above, which wait on the user.
+        guard WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)) else {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
         // Again after the questions above: they wait on the user, and the
-        // other process may have deleted it meanwhile.
-        do { try store.touch(profile) } catch is ProfileStore.ProfileGone {
+        // other process may have deleted it meanwhile. The stamp keeps the
+        // minted credentials on disk, which this copy may predate (the other
+        // process's VM minted them): the boot registers those.
+        do {
+            let written = try store.touch(profile)
+            if written.mintedCredentials != profile.mintedCredentials {
+                profile.mintedCredentials = written.mintedCredentials
+                if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
+                    profiles[i].mintedCredentials = written.mintedCredentials
+                }
+            }
+        } catch is ProfileStore.ProfileGone {
+            releaseLeaseIfIdle(profile.id)
             forgetDeletedProfile(profile, unattended: unattended)
             return
         } catch {}
@@ -12536,6 +12585,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // its owner would delete the disk out from under this VM.
         if store.isEphemeral(profile), !store.claimEphemeral(profile) {
             bootsInFlight.end(profile.id)
+            releaseLeaseIfIdle(profile.id)
             refreshSidebar()
             FileHandle.standardError.write(Data(
                 "[launch] '\(profile.name)' is a vm run --rm workspace another Bromure process owns; not booting it here\n".utf8))
@@ -12586,6 +12636,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { @MainActor [self] in
             defer {
                 bootsInFlight.end(profile.id)
+                releaseLeaseIfIdle(profile.id)   // the boot failed: no VM holds it
                 refreshSidebar()
             }
             let sessionDisk = SessionDisk(
