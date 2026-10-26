@@ -59,3 +59,40 @@ enum WorkspaceLease {
         return fd
     }
 }
+
+/// Reboot pins on workspace leases (see `ACAppDelegate.pinLease`), kept on
+/// one monotonic clock. The deadline used to be a wall-clock `Date` judged
+/// after a monotonic `Task.sleep`: a clock set back past the sleep's slack
+/// left an abandoned reboot's pin "live" at its wake, nothing ran again, and
+/// the lease stayed for the life of the process -- the other Bromure process
+/// refused the workspace until then (Finding CWE-667, "A reboot's lease pin
+/// never lapses if the clock steps backward"). A clock set forward made a
+/// live pin look lapsed instead. `ContinuousClock` moves with neither.
+struct LeasePins {
+    typealias Instant = ContinuousClock.Instant
+    private var deadlines: [UUID: Instant] = [:]
+
+    /// Pin `id` until `seconds` from `now`; returns the deadline its wake
+    /// sleeps to.
+    mutating func pin(_ id: UUID, for seconds: Double, now: Instant = .now) -> Instant {
+        let until = now.advanced(by: .seconds(seconds))
+        deadlines[id] = until
+        return until
+    }
+
+    /// Pinned and not yet lapsed.
+    func isLive(_ id: UUID, now: Instant = .now) -> Bool {
+        deadlines[id].map { $0 > now } ?? false
+    }
+
+    /// Taken over (a boot acquired) or given up: no pin.
+    mutating func clear(_ id: UUID) { deadlines[id] = nil }
+
+    /// The wake for `deadline`: clears the pin when it is still that one (not
+    /// re-pinned, not taken over) and says whether it did.
+    mutating func lapse(_ id: UUID, deadline: Instant) -> Bool {
+        guard deadlines[id] == deadline else { return false }
+        deadlines[id] = nil
+        return true
+    }
+}

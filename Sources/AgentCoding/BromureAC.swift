@@ -1789,8 +1789,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// This process's VM of `id` is gone: let the other process have it --
     /// unless a reboot is between its stop and its next boot.
     func releaseLeaseIfIdle(_ id: Profile.ID) {
-        if let until = leasePins[id], until > Date() { return }
-        leasePins[id] = nil
+        if leasePins.isLive(id) { return }
+        leasePins.clear(id)
         if !diskInUse(id) { WorkspaceLease.release(id) }
     }
 
@@ -1800,23 +1800,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// fat client's prompts, up to two minutes each; Kimi provisioning). The
     /// next boot's acquire takes the pin over (`launch`); an attempt that
     /// gives up lets it lapse at `pinLeaseSeconds`, and the lease goes then.
-    private var leasePins: [Profile.ID: Date] = [:]
+    /// Deadlines and the wake's sleep share one monotonic clock (`LeasePins`).
+    private var leasePins = LeasePins()
     static let pinLeaseSeconds: TimeInterval = 600
     func pinLease(_ id: Profile.ID) {
-        let until = Date().addingTimeInterval(Self.pinLeaseSeconds)
-        leasePins[id] = until
+        let until = leasePins.pin(id, for: Self.pinLeaseSeconds)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(Self.pinLeaseSeconds * 1_000_000_000) + 1_000_000_000)
-            guard let self, self.leasePins[id] == until else { return }   // taken over, or re-pinned
-            // Lapsed: cleared here, not left to releaseLeaseIfIdle's clock
-            // check, which a wall-clock step back would keep saying "live".
-            self.leasePins[id] = nil
+            try? await Task.sleep(until: until, clock: .continuous)
+            // Lapsed, unless re-pinned or taken over meanwhile: cleared here,
+            // so releaseLeaseIfIdle sees no pin.
+            guard let self, self.leasePins.lapse(id, deadline: until) else { return }
             self.releaseLeaseIfIdle(id)
         }
     }
     /// The reboot gave up before any boot (nothing left to launch).
     func unpinLease(_ id: Profile.ID) {
-        leasePins[id] = nil
+        leasePins.clear(id)
         releaseLeaseIfIdle(id)
     }
 
@@ -12424,7 +12423,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
             return
         }
-        leasePins[profile.id] = nil   // a reboot's pin: this boot holds it now
+        leasePins.clear(profile.id)   // a reboot's pin: this boot holds it now
         // Again after the questions above: they wait on the user, and the
         // other process may have deleted it meanwhile. The stamp keeps the
         // minted credentials on disk, which this copy may predate (the other
