@@ -150,11 +150,20 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// Bare host[:port] used as the proxy's routing key when
-    /// registering client identities or scoped token swaps.
+    /// registering client identities and cluster CAs (see `endpointKey`).
     public var hostPattern: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
         if let port = url.port { return "\(host):\(port)" }
         return host
+    }
+
+    /// The token swap's scope: host and the port kubectl dials, 443 (80 for
+    /// http) when the URL omits it, so a token meant for `h:6443` is never
+    /// handed to `h:443` or the other way round.
+    public var tokenScope: String {
+        guard let url = URL(string: serverURL), let host = url.host else { return "" }
+        let port = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
+        return "\(host):\(port)"
     }
 
     private enum CodingKeys: String, CodingKey {

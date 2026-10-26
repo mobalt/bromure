@@ -1166,7 +1166,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }()
         var swap = insecure
             ? SwapResult(modified: request, swaps: [])
-            : await swapper.swap(rawRequest: request, host: host, profileID: profileID,
+            : await swapper.swap(rawRequest: request, host: host, port: port, profileID: profileID,
                                  placeholderBody: placeholderBody)
         if !swap.swaps.isEmpty {
             for s in swap.swaps {
@@ -1586,7 +1586,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let wsPath = OpenShellPolicy.canonicalPath(ofTarget: reqPath)
                 let placeholders = swapper.entries(for: profileID).filter { e in
                     e.fake.hasPrefix(TokenSwapper.openShellPlaceholderPrefix)
-                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, scope: $0) } ?? true)
+                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, port: port, scope: $0) } ?? true)
                         && (e.paths.isEmpty || wsPath.map { p in
                             e.paths.contains { OpenShellPolicy.pathSelector($0, matches: p) } } ?? false)
                 }
