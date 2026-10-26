@@ -3165,6 +3165,7 @@
 "Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
 "Home folder size" = "Home folder size";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.";
 "Queued — sent when the agent is done" = "Queued — sent when the agent is done";
 "Queued — sent when %@ is done" = "Queued — sent when %@ is done";
 "Queued — the agent reads it next" = "Queued — the agent reads it next";

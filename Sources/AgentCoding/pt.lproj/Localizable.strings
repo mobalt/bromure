@@ -3131,6 +3131,7 @@
 "Erasing and restoring storage is done on the server Mac." = "Apagar e restaurar o armazenamento é feito no Mac servidor.";
 "Home folder size" = "Tamanho da pasta pessoal";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d GB (o tamanho atual — uma pasta pessoal não pode diminuir) até 1024 GB. Uma pasta maior entra em vigor na próxima vez que o espaço de trabalho iniciar. A imagem de disco só ocupa o espaço que seus arquivos usam.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "De %d GB até 1024 GB. A pasta pessoal é criada com este tamanho quando o espaço de trabalho inicia pela primeira vez; depois disso, pode crescer, mas não diminuir. A imagem de disco só ocupa o espaço que seus arquivos usam.";
 "Queued — sent when the agent is done" = "Na fila — enviado quando o agente terminar";
 "Queued — sent when %@ is done" = "Na fila — enviado quando %@ terminar";
 "Queued — the agent reads it next" = "Na fila — o agente lê em seguida";
