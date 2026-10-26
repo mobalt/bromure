@@ -140,4 +140,50 @@ struct HomeSizeAfterImageTests {
         #expect(try src("Sources/AgentCoding/BromureAC.swift")
             .contains("context.homeImageFile = editing.homeModel == .ext4 ? homeImage : nil"))
     }
+
+    /// Finding (CWE-362): "A slower home-size remeasure can drop the floor
+    /// back below the image". Two remeasures in flight (the pane showed, then
+    /// the workspace started): the older one, from before the image existed,
+    /// answered last and was applied over the newer one.
+    @Test("an older remeasure that answers last is dropped")
+    @MainActor
+    func staleRemeasureDropped() async {
+        let lands = ProfileEditorView.remeasureLands(asked:now:cancelled:)
+        #expect(lands(3, 3, false))
+        #expect(!lands(3, 4, false))                       // a newer one was asked for since
+        #expect(!lands(3, 3, true))                        // its view task was cancelled
+
+        // The race, the way the editor runs it: revision 1 (no image yet) is
+        // slow, revision 2 (image there) is fast.
+        let editor = RaceEditor()
+        let old = Task { await editor.remeasure(answer: nil, delay: .milliseconds(200)) }
+        try? await Task.sleep(for: .milliseconds(20))
+        let new = Task { await editor.remeasure(answer: 64, delay: .milliseconds(10)) }
+        await old.value
+        await new.value
+        #expect(editor.applied == 64)
+    }
+
+    /// The editor's remeasure, minus SwiftUI: the home capacity it applies.
+    @MainActor
+    final class RaceEditor {
+        var revision = 0
+        var applied: Int? = nil
+        func remeasure(answer: Int?, delay: Duration) async {
+            revision += 1
+            let asked = revision
+            try? await Task.sleep(for: delay)
+            guard ProfileEditorView.remeasureLands(asked: asked, now: revision, cancelled: Task.isCancelled) else { return }
+            applied = answer
+        }
+    }
+
+    @Test("the editor and the fat client's fetch both drop a superseded answer")
+    func staleRemeasureWiring() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        let views = try src("Sources/AgentCoding/ProfileViews.swift")
+        #expect(views.contains("Self.remeasureLands(asked: asked, now: storageRevision, cancelled: Task.isCancelled)"))
+        #expect(try src("Sources/AgentCoding/FatClientController.swift").contains("}).value, !Task.isCancelled,"))
+    }
 }

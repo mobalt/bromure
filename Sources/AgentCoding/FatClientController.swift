@@ -2080,7 +2080,8 @@ final class RemoteHostController {
         let path = "/profiles/\(seg(id))?storage=1"
         guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
             try RemoteTransport.client(for: host).request("GET", path)
-        }).value, resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
+        }).value, !Task.isCancelled,   // superseded while the request ran: its answer is stale
+              resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
         else { return nil }
         func bytes(_ k: String) -> Int64 {
             (resp.json[k] as? Int64) ?? (resp.json[k] as? Int).map(Int64.init) ?? 0
