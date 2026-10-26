@@ -65,6 +65,19 @@ struct CredentialMintTests {
         #expect(c(Self.request("POST", "/", body: "Action=AssumeRole"), "sts.us-iso-east-1.c2s.ic.gov")
                 == .mint(.awsTemporary(action: "sts:AssumeRole")))
         #expect(c(Self.request("POST", "/", body: "Action=AssumeRole"), "sts.example.com") == nil)
+        // Every partition's dual-stack name (botocore partitions.json): the
+        // China portal and STS resolve to the same hosts as their
+        // .amazonaws.com.cn names (Finding CWE-669).
+        #expect(c(Self.request("GET", "/federation/credentials?role_name=r&account_id=1"),
+                  "portal.sso.cn-north-1.api.amazonwebservices.com.cn") == .mint(.awsTemporary(action: "sso:GetRoleCredentials")))
+        #expect(c(Self.request("POST", "/", body: "Action=AssumeRoleWithWebIdentity"), "sts.cn-north-1.api.amazonwebservices.com.cn")
+                == .mint(.awsTemporary(action: "sts:AssumeRoleWithWebIdentity")))
+        for host in ["sts.eusc-de-east-1.api.amazonwebservices.eu", "sts.us-iso-east-1.api.aws.ic.gov",
+                     "sts.us-isob-east-1.api.aws.scloud", "sts.eu-isoe-west-1.api.cloud-aws.adc-e.uk",
+                     "sts.us-isof-south-1.api.aws.hci.ic.gov", "sts.us-gov-west-1.api.aws"] {
+            #expect(c(Self.request("POST", "/", body: "Action=AssumeRoleWithSAML"), host)
+                    == .mint(.awsTemporary(action: "sts:AssumeRoleWithSAML")), "\(host)")
+        }
         // Ordinary calls are left alone.
         #expect(c(Self.request("POST", "/", headers: [Self.signed("sts"), Self.form], body: "Action=GetCallerIdentity"), "sts.amazonaws.com") == nil)
         #expect(c(Self.request("GET", "/v2/droplets"), "api.digitalocean.com") == nil)
@@ -246,6 +259,27 @@ struct CredentialMintTests {
             Issue.record("not resigned"); return
         }
         #expect(String(decoding: p, as: UTF8.self).contains("Credential=AKIAPRIMARY/"))
+    }
+
+    @Test("one AWS host test: the resigner, the guardrail and the rewrite agree on every partition name")
+    func oneHostTest() async {
+        for suffix in AWSResigner.partitionDNSSuffixes {
+            let host = "sts.region-1.\(suffix)"
+            #expect(AWSResigner.isAWSHost(host) && GuardrailsConfig.isAWSHost(host) && CredentialMint.isAWSFamilyHost(host), "\(host)")
+        }
+        #expect(!AWSResigner.isAWSHost("evil-amazonaws.com") && !AWSResigner.isAWSHost("api.aws.evil.com"))
+        // A dual-stack call is re-signed, so the workspace key works there --
+        // and the read-only guardrail sees it.
+        let server = AWSCredentialServer(consent: ConsentBroker()), pid = UUID()
+        server.setCredentials(AWSCredentials(accessKeyID: "AKIAPRIMARY", secretAccessKey: "primarySecret"), for: pid)
+        guard case .resigned = await AWSResigner(credServer: server).resign(
+            rawRequest: Self.request("GET", "/", headers: [Self.signed("dynamodb")]),
+            host: "dynamodb.us-east-1.api.aws", profileID: pid) else {
+            Issue.record("dual-stack call not re-signed"); return
+        }
+        let g = GuardrailsConfig(kubernetes: .off, kubeHosts: [], aws: .readOnly)
+        #expect(g.awsBlockReason(host: "dynamodb.us-east-1.api.aws", method: "POST",
+                                 amzTarget: "DynamoDB_20120810.DeleteTable", formAction: nil) != nil)
     }
 
     @Test("an expired minted key is refused, never signed as the workspace's own")

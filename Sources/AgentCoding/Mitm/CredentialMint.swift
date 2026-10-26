@@ -199,15 +199,14 @@ public enum CredentialMint {
         return nil
     }
 
-    /// Every name an AWS endpoint answers on, not only the ones the resigner
-    /// signs for: dual-stack (`portal.sso.us-east-1.api.aws` resolves to the
-    /// same portal as `….amazonaws.com`), ECR Public, and the other
-    /// partitions' domains. A credential issued on any of them is rewritten.
+    /// Every name an AWS endpoint answers on: the resigner's partition table
+    /// (each partition's IPv4 and dual-stack suffix --
+    /// `portal.sso.cn-north-1.api.amazonwebservices.com.cn` is the same
+    /// portal as `….amazonaws.com.cn`), plus ECR Public. A credential issued
+    /// on any of them is rewritten.
     static func isAWSFamilyHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        if AWSResigner.isAWSHost(h) || h == "public.ecr.aws" { return true }
-        return ["api.aws", "amazonaws.eu", "c2s.ic.gov", "sc2s.sgov.gov", "cloud.adc-e.uk", "csp.hci.ic.gov"]
-            .contains { h.hasSuffix("." + $0) }
+        return AWSResigner.isAWSHost(h) || h == "public.ecr.aws"
     }
 
     /// "service:Action" for an AWS request: the JSON protocol's
