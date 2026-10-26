@@ -6338,7 +6338,12 @@ def _migrate_home_into(dev):
         total = [0]
 
         def _du():
-            out = _capture(["du", "-sb", HOME_MOUNT], timeout=600)
+            # Housekeeping, like the probes in `_grow_home_fs`: this runs
+            # before the OpenShell supervisor is up, where `_capture` refuses
+            # to route (SandboxRoutingError killed this thread, so the
+            # progress never got a total).
+            out = _sys_capture(["du", "-sb", HOME_MOUNT], "home size for the migration progress",
+                               timeout=600)
             try:
                 total[0] = int(out.split()[0])
             except (ValueError, IndexError):
