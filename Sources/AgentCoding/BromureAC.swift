@@ -1786,9 +1786,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return WorkspaceLease.heldElsewhere(id, dir: store.profileDirectory(for: p))
     }
 
-    /// This process's VM of `id` is gone: let the other process have it.
+    /// This process's VM of `id` is gone: let the other process have it --
+    /// unless a reboot is between its stop and its next boot.
     func releaseLeaseIfIdle(_ id: Profile.ID) {
-        if !diskInUse(id) { WorkspaceLease.release(id) }
+        if !diskInUse(id), !leasePins.contains(id) { WorkspaceLease.release(id) }
+    }
+
+    /// Workspaces whose lease outlives their VM for a moment: a reboot stops
+    /// the old one and boots the next, and the other process must not take
+    /// the workspace in between.
+    private var leasePins: Set<Profile.ID> = []
+    func pinLease(_ id: Profile.ID) { leasePins.insert(id) }
+    func unpinLease(_ id: Profile.ID) {
+        leasePins.remove(id)
+        releaseLeaseIfIdle(id)
     }
 
     private func refuseOpenElsewhere(_ profile: Profile, unattended: Bool) {
@@ -6988,6 +6999,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
         rebootingProfiles.insert(id)
+        // The lease stays with this process from the stop to the next boot.
+        pinLease(id)
+        defer { unpinLease(id) }
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -16113,6 +16127,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
             rebootingProfiles.insert(profileID)
+            pinLease(profileID)   // kept from this stop to the next boot
             handleSessionStopped(profileID: profileID)
             rebootingProfiles.remove(profileID)
             if let profile {
@@ -16125,12 +16140,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let stop = await self.whileHoldingDisk(profileID) {
                             await self.executeBootRemedy(remedy, profile: profile, pane: nil)
                         }
+                        defer { self.unpinLease(profileID) }
                         guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }
                         self.launch(profile, detached: true)
                     }
                 } else {
                     launch(profile, detached: true)
+                    unpinLease(profileID)
                 }
+            } else {
+                unpinLease(profileID)
             }
         }
     }

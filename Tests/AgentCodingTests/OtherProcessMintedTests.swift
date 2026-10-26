@@ -114,6 +114,18 @@ struct OtherProcessMintedTests {
         // A reboot holds the disk before the old VM leaves the registry, so the
         // lease never lapses while this process rebuilds the VM.
         #expect(ac.contains("let release = holdDiskForRelaunch(profile.id)\n        unregisterSession(profile.id)"))
+        // A reboot through a stop (rebootMachine, a detached guest reboot)
+        // pins the lease from the stop to the next boot.
+        let reboot = try #require(ac.range(of: "func rebootMachine(_ id: Profile.ID"))
+        let rb = ac[reboot.upperBound...].prefix(1800)
+        let pin = try #require(rb.range(of: "pinLease(id)"))
+        let stop = try #require(rb.range(of: "handleSessionStopped(profileID: id)"))
+        #expect(pin.lowerBound < stop.lowerBound && rb.contains("defer { unpinLease(id) }"))
+        let guestReboot = try #require(ac.range(of: "private func relaunchAfterGuestReboot("))
+        let gr = ac[guestReboot.upperBound...].prefix(2500)
+        let gpin = try #require(gr.range(of: "pinLease(profileID)"))
+        let gstop = try #require(gr.range(of: "handleSessionStopped(profileID: profileID)"))
+        #expect(gpin.lowerBound < gstop.lowerBound)
 
         let sa = try src("Sources/AgentCoding/ScheduledAutomations.swift")
         let skip = try #require(sa.range(of: "if delegate.workspaceOpenElsewhere(a.profileID)"))
