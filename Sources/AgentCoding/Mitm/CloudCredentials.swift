@@ -431,7 +431,7 @@ public final class KubeconfigMaterializer {
             case .bearerToken(let realToken):
                 let fake = makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: realToken,
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
@@ -469,16 +469,16 @@ public final class KubeconfigMaterializer {
                 // placeholder; the poller updates the real value
                 // before kubectl needs it.
                 let fake = reusingExec.first {
-                    $0.entryID == entry.id && $0.host == entry.hostPattern && $0.command == cmd && $0.args == args
+                    $0.entryID == entry.id && $0.host == entry.tokenScope && $0.command == cmd && $0.args == args
                 }?.fakeToken ?? makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: "",
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
                 execContexts.append(ExecContext(
                     entryID: entry.id,
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake,
                     command: cmd, args: args,
                     refreshSeconds: max(60, secs)))
