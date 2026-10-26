@@ -3734,19 +3734,27 @@ struct ProfileEditorView: View {
         #endif
     }
 
+    /// Smallest home a workspace can be created with, GiB (what
+    /// SessionDisk clamps a setting to).
+    private static let minHomeGB = 8
+
     /// Grow-only: a running VM can't see its disk grow, so a bigger size
     /// lands at the workspace's next start (the host grows the image, the
-    /// guest grows the filesystem).
+    /// guest grows the filesystem). Before the image exists (a new
+    /// workspace, or one whose home was erased) any size from 8 GB is
+    /// fine: it's created at that size on the next boot.
     private var homeSizeSection: some View {
-        let current = homeCapacityGB ?? Self.defaultHomeGB
-        let chosen = draft.homeImageGB.map { max($0, current) } ?? current
-        // Any whole GB from the current size up to 1 TB; below the current
-        // size it clamps (the image only grows — shrinking would cut the
-        // filesystem short).
+        let existing = homeCapacityGB
+        let current = existing ?? Self.defaultHomeGB
+        let floor = existing ?? Self.minHomeGB
+        let chosen = draft.homeImageGB.map { max($0, floor) } ?? current
+        // Any whole GB from the floor up to 1 TB; below an existing
+        // image's size it clamps (the image only grows — shrinking would
+        // cut the filesystem short).
         let size = Binding<Int>(
             get: { chosen },
             set: { v in
-                let gb = min(1024, max(current, v))
+                let gb = min(1024, max(floor, v))
                 draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
             })
         return VStack(alignment: .leading, spacing: 6) {
@@ -3758,10 +3766,12 @@ struct ProfileEditorView: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 72)
                 Text(verbatim: "GB")
-                Stepper("", value: size, in: current...1024, step: 8)
+                Stepper("", value: size, in: floor...1024, step: 8)
                     .labelsHidden()
             }
-            Text(String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
+            Text(existing == nil
+                 ? String(format: NSLocalizedString("From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.", comment: "home folder size, before the home exists"), floor)
+                 : String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

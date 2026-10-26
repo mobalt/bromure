@@ -3119,6 +3119,7 @@
 "Erasing and restoring storage is done on the server Mac." = "ストレージの消去と復元はサーバーの Mac で行います。";
 "Home folder size" = "ホームフォルダのサイズ";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "%d GB（現在のサイズ。ホームは縮小できません）から 1024 GB まで。大きくしたホームはワークスペースの次回起動時に反映されます。ディスクイメージはファイルが使う分だけ容量を消費します。";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "%d GB から 1024 GB まで。ホームはワークスペースの初回起動時にこのサイズで作成されます。その後は拡大できますが、縮小はできません。ディスクイメージはファイルが使う分だけ容量を消費します。";
 "Queued — sent when the agent is done" = "待機中 — エージェントの作業が終わると送信します";
 "Queued — sent when %@ is done" = "待機中 — %@ の作業が終わると送信します";
 "Queued — the agent reads it next" = "待機中 — エージェントが次に読みます";
