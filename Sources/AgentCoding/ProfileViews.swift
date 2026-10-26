@@ -476,6 +476,8 @@ struct ProfileEditorView: View {
     @State private var bgColor: Color
     @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
+    /// Bumped when an erase or reset in Resources changed the disks.
+    @State private var storageRevision = 0
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
@@ -3736,27 +3738,43 @@ struct ProfileEditorView: View {
 
     /// Smallest home a workspace can be created with, GiB (what
     /// SessionDisk clamps a setting to).
-    private static let minHomeGB = 8
+    static let minHomeGB = 8
 
     /// Grow-only: a running VM can't see its disk grow, so a bigger size
     /// lands at the workspace's next start (the host grows the image, the
     /// guest grows the filesystem). Before the image exists (a new
     /// workspace, or one whose home was erased) any size from 8 GB is
     /// fine: it's created at that size on the next boot.
+    /// The size field's numbers: `current` (the image's size, or the
+    /// default before it exists), the `floor` it can't go below (that size,
+    /// or 8 GB before it exists), and what a typed or stepped value becomes
+    /// (nil = keep following the default).
+    struct HomeSizeBounds: Equatable {
+        let current: Int
+        let floor: Int
+        init(existingGB: Int?, defaultGB: Int) {
+            current = existingGB ?? defaultGB
+            floor = existingGB ?? ProfileEditorView.minHomeGB
+        }
+        func shown(_ setting: Int?) -> Int { setting.map { max($0, floor) } ?? current }
+        func setting(for value: Int, saved: Int?) -> Int? {
+            let gb = min(1024, max(floor, value))
+            return (gb == current && saved == nil) ? nil : gb
+        }
+    }
+
     private var homeSizeSection: some View {
+        _ = storageRevision   // re-read the image after an erase or reset
         let existing = homeCapacityGB
-        let current = existing ?? Self.defaultHomeGB
-        let floor = existing ?? Self.minHomeGB
-        let chosen = draft.homeImageGB.map { max($0, floor) } ?? current
+        let bounds = HomeSizeBounds(existingGB: existing, defaultGB: Self.defaultHomeGB)
+        let (current, floor) = (bounds.current, bounds.floor)
+        let chosen = bounds.shown(draft.homeImageGB)
         // Any whole GB from the floor up to 1 TB; below an existing
         // image's size it clamps (the image only grows — shrinking would
         // cut the filesystem short).
         let size = Binding<Int>(
             get: { chosen },
-            set: { v in
-                let gb = min(1024, max(floor, v))
-                draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
-            })
+            set: { v in draft.homeImageGB = bounds.setting(for: v, saved: savedHomeImageGB) })
         return VStack(alignment: .leading, spacing: 6) {
             Text("Home folder size")
                 .font(.headline)
@@ -3791,7 +3809,8 @@ struct ProfileEditorView: View {
                 if let storageContext {
                     StorageStackView(
                         isNewProfile: isNew,
-                        context: storageContext
+                        context: storageContext,
+                        onStorageChanged: { storageRevision += 1 }
                     )
                 } else {
                     Text("Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one.")
@@ -5717,6 +5736,15 @@ private struct MCPServerRow: View {
 private struct StorageStackView: View {
     let isNewProfile: Bool
     let context: ProfileStorageContext
+    /// An erase or reset changed the disks under the editor: the home size
+    /// field's floor follows the image (gone after an erase, so a smaller
+    /// home can be picked), and nothing else would redraw it.
+    var onStorageChanged: () -> Void = {}
+
+    /// Run a storage action, then re-measure and tell the editor.
+    private func changing(_ action: @escaping () -> Void) -> () -> Void {
+        { action(); onStorageChanged(); Task { await refreshSizes() } }
+    }
 
     /// Computed asynchronously on view appear so a huge npm-global tree
     /// doesn't block the editor's first paint.
@@ -5753,7 +5781,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetHome
+                        handler: changing(context.onResetHome)
                       ),
                 // One slot, model-exclusive: legacy homes offer the upgrade,
                 // ext4 homes offer the checkpoint rollback.
@@ -5800,7 +5828,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetDisk
+                        handler: changing(context.onResetDisk)
                       )
             )
 
