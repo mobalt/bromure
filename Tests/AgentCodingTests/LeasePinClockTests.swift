@@ -47,3 +47,40 @@ struct LeasePinClockTests {
         #expect(pinCode.contains("leasePins.lapse(id, deadline: until)"))
     }
 }
+
+/// Finding (CWE-667): "Reboot pin drops the workspace lease while a local
+/// prompt is still up". The pin lapsed on a 600 s timer whatever the reboot's
+/// launch was doing; a local wipe or base-image alert has no timeout, so the
+/// lease went with the alert on screen and the other Bromure process booted
+/// its stale copy. Now the wake keeps the pin while a launch question is up
+/// for the workspace, or its disk is held, and looks again later.
+@Suite("A reboot's pin outlives the launch's questions")
+struct LeasePinWaitTests {
+    @Test("kept while asking or holding the disk; lapses once the launch gave up")
+    func decision() {
+        #expect(ACAppDelegate.pinOutlivesWait(questionUp: true, diskInUse: false))
+        #expect(ACAppDelegate.pinOutlivesWait(questionUp: false, diskInUse: true))
+        #expect(!ACAppDelegate.pinOutlivesWait(questionUp: false, diskInUse: false))
+    }
+
+    @Test("the wake re-arms instead of releasing while the launch waits")
+    func wiring() throws {
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let start = try #require(src.range(of: "    func pinLease(_ id: Profile.ID) {"))
+        let body = src[start.upperBound...].prefix(2000)
+        let check = try #require(body.range(of: "Self.pinOutlivesWait(questionUp: self.launchQuestions.isUp(id)"))
+        let release = try #require(body.range(of: "self.releaseLeaseIfIdle(id)"))
+        let rearm = try #require(body.range(of: "until = self.leasePins.pin(id, for: Self.pinRecheckSeconds)"))
+        #expect(check.lowerBound < release.lowerBound && release.lowerBound < rearm.lowerBound)
+        #expect(body.contains("while true {"))
+        // Every launch prompt before the lease is taken back sits in the gate.
+        let launch = try #require(src.range(of: "    func launch(_ profile: Profile, detached: Bool = false,"))
+        let toAcquire = src[launch.upperBound...]
+        let acquire = try #require(toAcquire.range(of: "WorkspaceLease.acquire(profile.id"))
+        let gated = toAcquire[..<acquire.lowerBound]
+        #expect(gated.contains("guard launchQuestions.begin(profile.id) else { return }\n            let wipe = confirmWipeAndProceed"))
+        #expect(gated.contains("guard launchQuestions.begin(profile.id) else { return }\n                let (title, message) = Self.driftPromptParts"))
+    }
+}

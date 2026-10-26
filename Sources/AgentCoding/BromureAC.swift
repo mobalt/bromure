@@ -1803,15 +1803,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Deadlines and the wake's sleep share one monotonic clock (`LeasePins`).
     private var leasePins = LeasePins()
     static let pinLeaseSeconds: TimeInterval = 600
+    /// How often a pin whose reboot is still waiting is looked at again.
+    static let pinRecheckSeconds: TimeInterval = 30
     func pinLease(_ id: Profile.ID) {
-        let until = leasePins.pin(id, for: Self.pinLeaseSeconds)
+        var until = leasePins.pin(id, for: Self.pinLeaseSeconds)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(until: until, clock: .continuous)
-            // Lapsed, unless re-pinned or taken over meanwhile: cleared here,
-            // so releaseLeaseIfIdle sees no pin.
-            guard let self, self.leasePins.lapse(id, deadline: until) else { return }
-            self.releaseLeaseIfIdle(id)
+            while true {
+                try? await Task.sleep(until: until, clock: .continuous)
+                // Lapsed, unless re-pinned or taken over meanwhile: cleared
+                // here, so releaseLeaseIfIdle sees no pin.
+                guard let self, self.leasePins.lapse(id, deadline: until) else { return }
+                // The reboot's launch may still be waiting: a local wipe or
+                // base-image alert has no timeout, and the lease went with
+                // it on screen -- the other process then booted its stale
+                // copy (Finding CWE-667, "Reboot pin drops the workspace lease
+                // while a local prompt is still up"). Kept while it asks or
+                // holds the disk; only a launch that gave up lets it go.
+                guard Self.pinOutlivesWait(questionUp: self.launchQuestions.isUp(id),
+                                           diskInUse: self.diskInUse(id)) else {
+                    self.releaseLeaseIfIdle(id)
+                    return
+                }
+                until = self.leasePins.pin(id, for: Self.pinRecheckSeconds)
+            }
         }
+    }
+
+    /// At a pin's deadline: keep it (true) while its reboot's launch still
+    /// asks a question or holds the disk (a boot under way, Kimi
+    /// provisioning), else let it lapse.
+    nonisolated static func pinOutlivesWait(questionUp: Bool, diskInUse: Bool) -> Bool {
+        questionUp || diskInUse
     }
     /// The reboot gave up before any boot (nothing left to launch).
     func unpinLease(_ id: Profile.ID) {
@@ -12024,6 +12046,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         /// False: this workspace already has one up — don't ask, don't boot.
         mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
         mutating func end(_ id: Profile.ID) { up.remove(id) }
+        func isUp(_ id: Profile.ID) -> Bool { up.contains(id) }
     }
 
     enum UpgradeAnswerOutcome: Equatable {
