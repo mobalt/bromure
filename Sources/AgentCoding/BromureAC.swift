@@ -1808,6 +1808,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.pinLeaseSeconds * 1_000_000_000) + 1_000_000_000)
             guard let self, self.leasePins[id] == until else { return }   // taken over, or re-pinned
+            // Lapsed: cleared here, not left to releaseLeaseIfIdle's clock
+            // check, which a wall-clock step back would keep saying "live".
+            self.leasePins[id] = nil
             self.releaseLeaseIfIdle(id)
         }
     }
