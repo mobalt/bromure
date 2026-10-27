@@ -2715,8 +2715,20 @@ static int sentry_flow_packet(struct pt_regs *regs,
 		if (ifindex > 0) {
 			struct net_device *dev;
 
+			/* The SENDING SOCKET's namespace, not `init_net`: an
+			 * `sll_ifindex` means nothing outside the namespace it
+			 * was issued in. A container's eth0 is usually index 2,
+			 * and index 2 in the guest's init netns is the virtio
+			 * NIC -- or whatever Docker created there. Resolving in
+			 * the wrong namespace names the wrong interface, or
+			 * drops `dev` when the index does not exist there, and
+			 * the timeline then says "raw frames on <some other
+			 * device>". The sender is still right; the place was
+			 * not. The kernel's own `packet_sendmsg_spkt` looks its
+			 * device up in `sock_net(sk)` for the same reason.
+			 */
 			rcu_read_lock();
-			dev = dev_get_by_index_rcu(&init_net, ifindex);
+			dev = dev_get_by_index_rcu(sock_net(sock->sk), ifindex);
 			if (dev)
 				strscpy(event->dev, dev->name,
 					sizeof(event->dev));
