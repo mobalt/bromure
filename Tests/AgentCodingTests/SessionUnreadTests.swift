@@ -244,9 +244,38 @@ struct SessionUnreadTests {
         let mark = ml.range(of: "func markRead(_ sid: UUID, upTo seen: Int) {")
         #expect(mark != nil)
         if let mark {
-            let body = ml[mark.upperBound...].prefix(900)
+            let body = ml[mark.upperBound...].prefix(1800)
             #expect(body.contains("guard Self.readFailed(r), let p = pendingReads[sid], p.seen == seen, p.at == sent else { return }"))
             #expect(body.contains("pendingReads[sid] = (seen, Date().addingTimeInterval(2 - Self.readHold))"))
         }
+    }
+
+    /// Finding (CWE-670): "A failed attached-machine read stays marked read
+    /// until /state succeeds". With the link down, the read and every poll
+    /// fail; the hold must still run out and show the session unread, and
+    /// the machine's own count -- not the read shown here -- decides whether
+    /// another read goes.
+    @Test("a read to a machine that can't be reached shows unread again in about 2 s")
+    func machineReadOnDeadLink() async throws {
+        let m = AttachedMachine(id: UUID(), name: "gone", makeServer: { _ in nil })   // no such link: every request fails
+        defer { m.stop() }
+        var s = AgentSession(profileID: m.id, tool: .claude, title: "t", cwd: "~")
+        s.replies = 2; s.readReplies = 1
+        m.machineSessions = [s]
+        m.reapplyReads()
+        #expect(m.sessionStore.session(s.id)?.isUnread == true)
+        var changed = 0
+        m.onChange = { changed += 1 }
+        m.markRead(s.id, upTo: 2)
+        #expect(m.sessionStore.session(s.id)?.isUnread == false)   // shown read at once
+        #expect(m.unreadOnMachine(s.id))                            // but the machine hasn't said so
+        for _ in 0..<60 where m.sessionStore.session(s.id)?.isUnread != true {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(m.sessionStore.session(s.id)?.isUnread == true)    // the failed read let go
+        #expect(changed >= 1)                                       // and the host was told
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }"))
     }
 }
