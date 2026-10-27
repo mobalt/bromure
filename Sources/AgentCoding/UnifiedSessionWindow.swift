@@ -2809,13 +2809,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))
         makeKeyAndOrderFront(nil)
-        // The chats on show are read, and so is each page or zoom shown next.
-        let markShown = { [weak self, weak controller] in
-            guard let self, let controller, self.isKeyWindow, NSApp.isActive else { return }
-            for sid in controller.onScreenIDs { delegate.markSessionRead(sid) }
+        // The chats on show are read, and so is each page or zoom shown next
+        // -- a turn later, once the view has said what its dock and 1×1 tab
+        // show (it calls this on appear).
+        controller.onShownChanged = { [weak self, weak controller] in
+            DispatchQueue.main.async {
+                guard let self, let controller, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in controller.onScreenIDs { delegate.markSessionRead(sid) }
+            }
         }
-        controller.onShownChanged = markShown
-        markShown()
     }
 
     /// Leave the room stage (its chat models stop polling).

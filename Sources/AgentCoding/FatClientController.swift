@@ -5988,13 +5988,15 @@ final class RemoteHostWindow: NSWindow {
         roomController = rc
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
-        // The chats on show are read, and so is each page or zoom shown next.
-        let markShown = { [weak self, weak rc] in
-            guard let self, let rc, self.isKeyWindow, NSApp.isActive else { return }
-            for sid in rc.onScreenIDs { c.markRead(sid) }
+        // The chats on show are read, and so is each page or zoom shown next
+        // -- a turn later, once the view has said what its dock and 1×1 tab
+        // show (it calls this on appear).
+        rc.onShownChanged = { [weak self, weak rc] in
+            DispatchQueue.main.async {
+                guard let self, let rc, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in rc.onScreenIDs { c.markRead(sid) }
+            }
         }
-        rc.onShownChanged = markShown
-        markShown()
     }
 
     /// Leave the room stage (its chat models stop polling).
