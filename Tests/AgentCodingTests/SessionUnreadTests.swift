@@ -159,7 +159,10 @@ struct SessionUnreadTests {
         #expect(ac.contains("if self.sessionsOnScreen.contains(id) { self.agentSessionStore.markRead(id) }"))
         // An attached machine's session on stage: read when its snapshot brings a reply.
         let refresh = try #require(ac.range(of: "func refreshHomeSessions() {"))
-        #expect(ac[refresh.upperBound...].prefix(700).contains("markSessionRead(id, upTo: n)"))
+        #expect(ac[refresh.upperBound...].prefix(900).contains("markSessionRead(id)"))
+        // ...shown read here at once, forwarded to the machine that counts.
+        let mark = try #require(ac.range(of: "func markSessionRead(_ id: UUID, upTo: Int? = nil) {"))
+        #expect(ac[mark.upperBound...].prefix(500).contains("m.markRead(id, upTo: min(upTo ?? n, n))"))
         // A dialog counts only inside a turn (hooks still working).
         let pane = try src("Sources/AgentCoding/SessionPane.swift")
         let dialog = try #require(pane.range(of: "m.dialogPromptChanged = {"))
@@ -184,5 +187,33 @@ struct SessionUnreadTests {
         #expect(ios.contains("if scenePhase == .active { controller.markRead(sessionID) }"))
         let iosRoom = try src("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift")
         #expect(iosRoom.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))
+    }
+
+    /// Finding (CWE-670): "A reply while watching an attached-machine session
+    /// stays unread". The Mac only forwarded the read; its copy of the
+    /// machine's sessions kept the orb until the machine's next poll -- and a
+    /// read sent once per count was never sent again if it got lost.
+    @Test("a machine session read here shows read at once, until the machine's count catches up or the read is lost")
+    func machineReadHeld() {
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "t", cwd: "~")
+        s.replies = 3; s.readReplies = 1
+        let t0 = Date()
+        var pending: [UUID: (seen: Int, at: Date)] = [s.id: (3, t0)]
+        // The machine hasn't caught up: held read.
+        var out = AttachedMachine.holdingReads([s], &pending, now: t0.addingTimeInterval(1))
+        #expect(out[0].isUnread == false && pending[s.id] != nil)
+        // It caught up: let go.
+        var caught = s; caught.readReplies = 3
+        out = AttachedMachine.holdingReads([caught], &pending, now: t0.addingTimeInterval(2))
+        #expect(out[0].isUnread == false && pending[s.id] == nil)
+        // Lost: after 10 s unread again (and sent again by the next refresh).
+        pending[s.id] = (3, t0)
+        out = AttachedMachine.holdingReads([s], &pending, now: t0.addingTimeInterval(11))
+        #expect(out[0].isUnread == true && pending[s.id] == nil)
+        // A newer reply than the read: still unread.
+        var newer = s; newer.replies = 4
+        pending[s.id] = (3, t0)
+        out = AttachedMachine.holdingReads([newer], &pending, now: t0.addingTimeInterval(1))
+        #expect(out[0].isUnread == true)
     }
 }

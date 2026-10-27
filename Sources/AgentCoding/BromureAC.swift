@@ -2634,18 +2634,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return w.sessionsOnStage
     }
 
-    /// Reply counts already sent as read to an attached machine (its next
-    /// snapshot catches up; until then, not sent again on every refresh).
-    private var machineReadsSent: [UUID: Int] = [:]
 
     /// The user read a session (here, or on a client: `upTo` is the reply
     /// count that client showed). Every client's mark goes with the next
     /// snapshot. A session on an attached machine is that machine's to keep.
     func markSessionRead(_ id: UUID, upTo: Int? = nil) {
         if let m = machine(forSession: id) {
-            var body: [String: Any] = [:]
-            if let upTo { body["seen"] = upTo }
-            m.hostSessionCommand(id, "read", body)
+            // Its count lives on the machine: shown read here at once, the
+            // read sent there (what this screen showed; nothing to read: none).
+            guard let s = m.sessionStore.session(id), s.isUnread, let n = s.replies else { return }
+            m.markRead(id, upTo: min(upTo ?? n, n))
             return
         }
         if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
@@ -2673,12 +2671,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func refreshHomeSessions() {
         homeSessionStore.applyMirror(allSessionRecords)
         // An attached machine's session on stage: a reply that came with its
-        // snapshot is read as it lands (ours are read in `onReply`).
-        for id in sessionsOnScreen {
-            guard machine(forSession: id) != nil, let s = sessionRecord(id), s.isUnread,
-                  let n = s.replies, machineReadsSent[id] != n else { continue }
-            machineReadsSent[id] = n
-            markSessionRead(id, upTo: n)
+        // snapshot is read as it lands (ours are read in `onReply`) -- once:
+        // the machine's mirror shows it read until its count catches up, and
+        // a read that never lands shows unread again and is sent again.
+        for id in sessionsOnScreen where machine(forSession: id) != nil && sessionRecord(id)?.isUnread == true {
+            markSessionRead(id)
         }
     }
 
