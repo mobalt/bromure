@@ -325,7 +325,7 @@ public struct GuardrailsConfig: Sendable {
     /// unlike kube — there's no per-profile host list to maintain.
     /// The resigner's test: a host it signs for is one the guardrail sees.
     public static func isAWSHost(_ host: String) -> Bool {
-        AWSResigner.isAWSHost(host)
+        AWSHosts.isAWSHost(host)
     }
 
     /// Classify an AWS action name by prefix. Read-ish prefixes mirror the

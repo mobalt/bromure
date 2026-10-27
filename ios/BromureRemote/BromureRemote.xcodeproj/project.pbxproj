@@ -67,8 +67,10 @@
 		10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD18B9BFD8961799C389C4D /* KubeCluster.swift */; };
 		C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */; };
 		E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 475294421C25AAB556D7138F /* MermaidFence.swift */; };
+		5B0B1C8FEBA226F85DDB0ADA /* Mitm__AWSHosts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */; };
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
+		43050C53A02DDF0CD1952B4D /* Mitm__MintedCredential.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */; };
 		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
 		4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */; };
 		FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */; };
@@ -218,8 +220,10 @@
 		8DD18B9BFD8961799C389C4D /* KubeCluster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeCluster.swift"; path = "Sources/BromureRemote/_shared/KubeCluster.swift"; sourceTree = "<group>"; };
 		8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeDashboard.swift"; path = "Sources/BromureRemote/_shared/KubeDashboard.swift"; sourceTree = "<group>"; };
 		475294421C25AAB556D7138F /* MermaidFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MermaidFence.swift"; path = "Sources/BromureRemote/_shared/MermaidFence.swift"; sourceTree = "<group>"; };
+		973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__AWSHosts.swift"; path = "Sources/BromureRemote/_shared/Mitm__AWSHosts.swift"; sourceTree = "<group>"; };
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
+		5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__MintedCredential.swift"; path = "Sources/BromureRemote/_shared/Mitm__MintedCredential.swift"; sourceTree = "<group>"; };
 		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
 		98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PIIPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PIIPolicy.swift"; sourceTree = "<group>"; };
 		973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PromptInjectionPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PromptInjectionPolicy.swift"; sourceTree = "<group>"; };
@@ -393,8 +397,10 @@
 				8DD18B9BFD8961799C389C4D /* KubeCluster.swift */,
 				8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */,
 				475294421C25AAB556D7138F /* MermaidFence.swift */,
+				973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */,
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
+				5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */,
 				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
 				98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */,
 				973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */,
@@ -622,8 +628,10 @@
 				10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */,
 				C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */,
 				E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */,
+				5B0B1C8FEBA226F85DDB0ADA /* Mitm__AWSHosts.swift in Sources */,
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
+				43050C53A02DDF0CD1952B4D /* Mitm__MintedCredential.swift in Sources */,
 				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,
 				4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */,
 				FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */,
@@ -902,8 +910,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.2.0;
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.20.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -48,7 +48,8 @@ PACKAGES = [
     ("swift-nio", "https://github.com/apple/swift-nio.git", "upToNextMajorVersion", "2.65.0"),
     ("swift-nio-ssh", "https://github.com/apple/swift-nio-ssh.git", "upToNextMajorVersion", "0.9.0"),
     ("swift-markdown-ui", "https://github.com/gonzalezreal/swift-markdown-ui.git", "upToNextMajorVersion", "2.4.0"),
-    ("SwiftTerm", "https://github.com/migueldeicaza/SwiftTerm.git", "upToNextMajorVersion", "1.2.0"),
+    # 1.20.x: 1.99 is SwiftTerm v2's pre-release (getTerminal() gone).
+    ("SwiftTerm", "https://github.com/migueldeicaza/SwiftTerm.git", "upToNextMinorVersion", "1.20.0"),
 ]
 # (product, package name)
 PRODUCTS = [
