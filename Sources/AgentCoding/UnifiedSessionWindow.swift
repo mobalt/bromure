@@ -2147,6 +2147,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedSessionID == id, !listModel.newSessionSelected {
             presentSession(s)
             makeKeyAndOrderFront(nil)
+            delegate.markSessionRead(id)
             return
         }
         guard clearAutomationEditor() else { return }   // dirty draft kept
@@ -2167,6 +2168,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionPresentationKey = nil   // a fresh surface on an explicit pick
         presentSession(s)
         makeKeyAndOrderFront(nil)
+        delegate.markSessionRead(id)
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        if let id = listModel.selectedSessionID, !listModel.newSessionSelected {
+            acDelegate?.markSessionRead(id)
+        }
     }
 
     /// The session behind a workspace's tmux window (a kanban run's tab, an
@@ -4320,6 +4330,7 @@ private struct CompactRail: View {
                             accentHex: model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888",
                             isActive: model.selectedSessionID == s.id
                                 && !model.gridSelected && !model.newSessionSelected,
+                            unread: SessionHome.showsUnread(s, in: model),
                             onSelect: { onSelectSession(s.id) })
                     }
                     Divider().padding(.horizontal, 10)
@@ -4406,6 +4417,7 @@ private struct RailSessionButton: View {
     let statusLine: String
     let accentHex: String
     let isActive: Bool
+    var unread = false
     let onSelect: () -> Void
     @State private var hovering = false
 
@@ -4422,6 +4434,9 @@ private struct RailSessionButton: View {
         Button(action: onSelect) {
             AgentAvatar(tool: session.tool, size: 22, status: dot)
                 .opacity(bucket == .ended || bucket == .asleep ? 0.55 : 1)
+                .overlay(alignment: .topTrailing) {
+                    if unread { UnreadMark(size: 7).offset(x: 3, y: -2) }
+                }
                 .frame(width: 30, height: 26)
                 .background(RoundedRectangle(cornerRadius: 6)
                     .fill(isActive ? Color(hex: accentHex).opacity(0.16)

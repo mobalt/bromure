@@ -4317,3 +4317,6 @@
 "for %@ (SigV4 signing on the host)" = "für %@ (SigV4-Signierung auf dem Host)";
 "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "„%@“ ist im anderen Bromure-Prozess geöffnet (der App oder ihrem Anmeldeagenten). Verwenden Sie es dort, oder fahren Sie es zuerst dort herunter.";
 "The workspace is open in the other Bromure process, which runs this automation there" = "Der Arbeitsbereich ist im anderen Bromure-Prozess geöffnet, der diese Automation dort ausführt";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Ungelesen";

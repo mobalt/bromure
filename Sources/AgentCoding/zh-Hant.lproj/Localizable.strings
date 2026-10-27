@@ -4320,3 +4320,6 @@
 "for %@ (SigV4 signing on the host)" = "用於 %@（SigV4 在主機端簽章）";
 "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "「%@」已在另一個 Bromure 程序（App 或其登入代理程式）中開啟。請在那裡使用它，或先在那裡將其關閉。";
 "The workspace is open in the other Bromure process, which runs this automation there" = "工作區已在另一個 Bromure 程序中開啟，此自動化將在那裡執行";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "未讀";

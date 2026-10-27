@@ -2387,6 +2387,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
         runningSessions[id]?.agentStatus[index] = status
+        // A turn that ended, or a question: the session's card shows unread
+        // on every client until someone looks.
+        let before = pane(for: id)?.model.tabs.first(where: { $0.index == index })?.agentStatus ?? recorded
+        if Self.isReply(from: before, to: status),
+           let s = agentSessionStore.session(profileID: id, windowIndex: index) {
+            agentSessionStore.noteReply(s.id)
+        }
         // A new turn (hook activity) means no dialog is waiting any more;
         // a chat still showing one re-asserts it on its next screen scan.
         if status == .working,
@@ -2608,6 +2615,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// A session by id, here or on an attached machine — synchronous, unlike
     /// `homeSessionStore` (which follows a change a runloop turn later).
+    /// A status change that leaves something for the user to read: a turn
+    /// that ended (working → done), or the agent stopping to ask. An unknown
+    /// "before" that is done says nothing (a replayed status at launch).
+    nonisolated static func isReply(from before: AgentStatus?, to now: AgentStatus) -> Bool {
+        switch now {
+        case .done:       return before == .working
+        case .needsInput: return before != .needsInput
+        case .working:    return false
+        }
+    }
+
+    /// The session the user is looking at on this Mac right now: on the
+    /// stage of the key window of the active app.
+    var sessionOnScreen: UUID? {
+        guard NSApp.isActive, let w = unifiedWindow, w.isKeyWindow, w.isVisible, !w.isMiniaturized,
+              !w.listModel.newSessionSelected else { return nil }
+        return w.listModel.selectedSessionID
+    }
+
+    /// The user read a session (here, or on a client: `upTo` is the reply
+    /// count that client showed). Every client's mark goes with the next
+    /// snapshot. A session on an attached machine is that machine's to keep.
+    func markSessionRead(_ id: UUID, upTo: Int? = nil) {
+        if let m = machine(forSession: id) {
+            var body: [String: Any] = [:]
+            if let upTo { body["seen"] = upTo }
+            m.hostSessionCommand(id, "read", body)
+            return
+        }
+        if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
+    }
+
     func sessionRecord(_ id: UUID) -> AgentSession? {
         agentSessionStore.session(id) ?? attachedMachines.values.lazy.compactMap { $0.sessionStore.session(id) }.first
     }
@@ -2662,6 +2701,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         refreshHomeSessions()
         trackHomeSessions()
+        // A reply on the session the user is watching is read already.
+        agentSessionStore.onReply = { [weak self] id in
+            guard let self else { return }
+            if self.sessionOnScreen == id { self.agentSessionStore.markRead(id) }
+            ACAutomationServer.noteMutation()
+        }
         machineLinksObserver = NotificationCenter.default.addObserver(
             forName: MachineLinkHub.machinesChanged, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
@@ -5855,6 +5900,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case (let sid?, "branch-keep"):
                     guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
                     self.agentSessionEngine.keepBranchQuietly(sid)
+                    return ["ok": true]
+                case (let sid?, "read"):
+                    // {seen?}: the reply count the client's screen showed.
+                    guard self.sessionRecord(sid) != nil else { return ["error": "unknown session"] }
+                    self.markSessionRead(sid, upTo: body["seen"] as? Int)
                     return ["ok": true]
                 case (let sid?, "rename"):
                     guard self.agentSessionStore.session(sid) != nil,

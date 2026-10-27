@@ -1447,7 +1447,38 @@ final class RemoteHostController {
                 mirrored[i].userTitled = true
             }
         }
+        // A read just sent: no unread mark flashing back for a round trip.
+        for (id, pending) in pendingReads {
+            guard let i = mirrored.firstIndex(where: { $0.id == id }) else { pendingReads[id] = nil; continue }
+            if (mirrored[i].readReplies ?? 0) >= pending.seen || Date().timeIntervalSince(pending.at) > 10 {
+                pendingReads[id] = nil
+            } else {
+                mirrored[i].readReplies = pending.seen
+            }
+        }
         sessionStore.applyMirror(mirrored)
+        // A reply on the session on screen: read as it arrives.
+        if let id = watching() { markRead(id) }
+    }
+
+    /// Reads sent to the server and not yet in a snapshot: the reply count.
+    private var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
+
+    /// The session the user is looking at now (the window is key, the app
+    /// active; on iOS the screen marks its own). nil: none.
+    var watching: () -> UUID? = { nil }
+
+    /// The user saw a session's replies: the mark goes at once, here and —
+    /// through the server — on every other client.
+    func markRead(_ id: UUID) {
+        guard let s = sessionStore.session(id), s.isUnread, let n = s.replies else { return }
+        pendingReads[id] = (n, Date())
+        var list = sessionStore.sessions
+        if let i = list.firstIndex(where: { $0.id == id }) {
+            list[i].readReplies = n
+            sessionStore.applyMirror(list)
+        }
+        sessionCommand(id, "read", body: ["seen": n])
     }
 
     /// Renames sent to the server and not yet in a snapshot.
@@ -3443,6 +3474,7 @@ final class RemoteHostWindow: NSWindow {
         buildToolbar()
         observeSending()
         showGrid()
+        controller.watching = { [weak self] in self?.sessionOnScreen }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
@@ -5642,6 +5674,7 @@ final class RemoteHostWindow: NSWindow {
         let model = controller.listModel
         if selectedSessionID == id, !model.newSessionSelected {
             presentSession(s)
+            controller.markRead(id)
             return
         }
         gridView?.removeFromSuperview()
@@ -5661,6 +5694,21 @@ final class RemoteHostWindow: NSWindow {
         UserDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
         sessionPresentationKey = nil
         presentSession(s)
+        controller.markRead(id)
+    }
+
+    /// The session on this window's stage while the user can see it (the
+    /// window key, the app active): its replies are read as they come.
+    var sessionOnScreen: UUID? {
+        let model = controller.listModel
+        guard NSApp.isActive, isKeyWindow, isVisible, !isMiniaturized, !model.newSessionSelected else { return nil }
+        return model.selectedSessionID
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        if let id = sessionOnScreen { controller.markRead(id) }
     }
 
     private func sessionStageDidChange() {

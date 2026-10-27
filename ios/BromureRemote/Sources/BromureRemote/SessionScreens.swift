@@ -97,8 +97,15 @@ struct MobileSessionScreen: View {
     @State private var worktreeSheet = false
     /// The session's machine settings (the workspace editor).
     @State private var machineSettings = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private var model: SessionListModel { controller.listModel }
+
+    /// On screen in the foreground: its replies are read -- here and, through
+    /// the server, on every other client.
+    private func markRead() {
+        if scenePhase == .active { controller.markRead(sessionID) }
+    }
     private var session: AgentSession? { controller.sessionStore.session(sessionID) }
 
     var body: some View {
@@ -116,8 +123,10 @@ struct MobileSessionScreen: View {
                 ToolbarItem(placement: .primaryAction) { menu(s) }
             }
         }
-        .onAppear(perform: select)
-        .onChange(of: sessionID) { _, _ in select() }
+        .onAppear { select(); markRead() }
+        .onChange(of: sessionID) { _, _ in select(); markRead() }
+        .onChange(of: session?.replies) { _, _ in markRead() }
+        .onChange(of: scenePhase) { _, _ in markRead() }
         .onChange(of: controller.revision) { _, _ in
             // A session's folder resolves after launch (a clone target, a
             // fresh folder): keep the shared context in step.
@@ -707,9 +716,12 @@ struct MobileSessionsSection: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
+                let unread = SessionHome.showsUnread(s, in: model)
                 if let when = MobileSessions.when(s) {
-                    Text(when).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                    Text(when).font(.caption2.monospacedDigit().weight(unread ? .semibold : .regular))
+                        .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                 }
+                if unread { UnreadMark(size: 10) }
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
                     .foregroundStyle(urgent ? Color.red.opacity(0.55) : Color.secondary.opacity(0.5))
             }
@@ -953,11 +965,14 @@ struct PadSessionSections<Boards: View>: View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(s.title).lineLimit(1)
+                    let unread = SessionHome.showsUnread(s, in: model)
+                    Text(s.title).lineLimit(1).fontWeight(unread ? .semibold : nil)
                     Spacer(minLength: 0)
                     if let when = MobileSessions.when(s) {
-                        Text(when).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                        Text(when).font(.caption2.monospacedDigit())
+                            .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                     }
+                    if unread { UnreadMark(size: 8) }
                 }
                 HStack(spacing: 4) {
                     if !MobileSessions.workspaceName(model, s).isEmpty {

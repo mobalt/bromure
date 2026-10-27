@@ -296,6 +296,13 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// beautified view. Its hooks still say "done", so without this the
     /// sidebar read "Ready" while the chat said the agent was asking.
     var awaitingAnswer: Bool?
+    /// How many times the agent finished a turn or stopped to ask -- counted
+    /// on the server, where the hooks land. `readReplies` is how far anyone
+    /// has read: the session shows unread on every client while it's behind
+    /// (a count, not a date, so no client's clock or the wire's whole-second
+    /// dates can make a reply look read).
+    var replies: Int?
+    var readReplies: Int?
     /// The user put the conversation away: it leaves the session list for
     /// the Archived fold, still readable, and comes back the moment it is
     /// resumed. Archiving ends the agent (a running one, or one found
@@ -383,6 +390,8 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
+    /// A reply nobody has read yet (see `replies`).
+    var isUnread: Bool { (replies ?? 0) > (readReplies ?? 0) }
     var isArchived: Bool { archivedAt != nil }
     var isDeleted: Bool { deletedAt != nil }
     /// A session the store made from a tab it found (no launch of ours, no
@@ -732,6 +741,31 @@ final class AgentSessionStore {
         if p.title == title { return true }
         if let m = p.openingMessage, !m.isEmpty, AgentSession.title(fromMessage: m) == title { return true }
         return false
+    }
+
+    /// The agent finished a turn, or stopped to ask: one more reply to read.
+    func noteReply(_ id: UUID) {
+        guard !isMirror, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].replies = (sessions[i].replies ?? 0) + 1
+        save()
+        onReply?(id)
+    }
+
+    /// Told after each `noteReply` (the app reads it at once if the session
+    /// is on screen, and tells its clients).
+    var onReply: ((UUID) -> Void)?
+
+    /// Someone read the session, up to `seen` replies (what their screen
+    /// showed; nil: all of them). Never goes back, never past the count.
+    /// False when nothing changed.
+    @discardableResult
+    func markRead(_ id: UUID, upTo seen: Int? = nil) -> Bool {
+        guard let i = sessions.firstIndex(where: { $0.id == id }), let n = sessions[i].replies else { return false }
+        let upTo = min(seen ?? n, n)
+        guard upTo > (sessions[i].readReplies ?? 0) else { return false }
+        sessions[i].readReplies = upTo
+        save()
+        return true
     }
 
     func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {
@@ -1599,6 +1633,8 @@ final class AgentSessionStore {
               (sessions[i].awaitingAnswer == true) != waiting else { return }
         sessions[i].awaitingAnswer = waiting ? true : nil
         save()
+        // A dialog waiting on the user is the agent asking: a reply to read.
+        if waiting { noteReply(id) }
     }
 
     /// The agent named its session (its terminal title, read by the
@@ -1976,6 +2012,18 @@ enum SessionHome {
             if s.transcriptWorking == true { return .working }
             // A dialog on its screen waits for the user's answer.
             return s.awaitingAnswer == true ? .needsYou : .idle
+        }
+    }
+
+    /// The card's unread mark: a reply not yet read, while the agent isn't
+    /// working on the next one (a new turn hides it; it comes back when
+    /// that turn's reply does). Archived and ended sessions don't nag.
+    @MainActor
+    static func showsUnread(_ s: AgentSession, in model: SessionListModel) -> Bool {
+        guard s.isUnread, !s.isArchived else { return false }
+        switch bucket(for: s, in: model) {
+        case .idle, .needsYou, .asleep: return true
+        case .working, .ended: return false
         }
     }
 
@@ -3062,6 +3110,8 @@ struct SessionRowView: View {
     /// Runs on a native machine (not sandboxed): its ring is dashed orange,
     /// with the badge.
     var native = false
+    /// The agent said something nobody has read (`SessionHome.showsUnread`).
+    var unread = false
     @State private var hovering = false
 
     private var mergeTint: Color? {
@@ -3105,7 +3155,7 @@ struct SessionRowView: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title ?? session.title)
-                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .font(.system(size: 13, weight: selected || unread ? .semibold : .medium))
                         .foregroundStyle(session.hasEnded && !selected ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -3118,10 +3168,15 @@ struct SessionRowView: View {
                             .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.12)))
                     } else if let when {
                         Text(when)
-                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 10.5, weight: unread ? .semibold : .medium).monospacedDigit())
+                            .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    }
+                    if unread && shortcut == nil {
+                        UnreadMark()
+                            .transition(.scale(scale: 0.2).combined(with: .opacity))
                     }
                 }
+                .animation(.spring(response: 0.35, dampingFraction: 0.7), value: unread)
                 HStack(spacing: 5) {
                     if let nick = session.nickname, !nick.isEmpty {
                         Text("@" + nick)
@@ -3646,7 +3701,8 @@ struct SessionSectionsView: View {
             shortcut: model.commandHeld ? shortcutNumbers[s.id] : nil,
             snippet: filter.isEmpty || s.title.localizedCaseInsensitiveContains(filter) ? nil : contentHits[s.id],
             preview: lastReply(s.id),
-            native: model.machineIDs.contains(s.profileID))
+            native: model.machineIDs.contains(s.profileID),
+            unread: SessionHome.showsUnread(s, in: model))
         .overlay {
             if dropSession == s.id {
                 RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
