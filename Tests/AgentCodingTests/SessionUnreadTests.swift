@@ -182,5 +182,7 @@ struct SessionUnreadTests {
         let ios = try src("ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift")
         #expect(ios.contains(".onChange(of: session?.replies) { _, _ in markRead() }"))
         #expect(ios.contains("if scenePhase == .active { controller.markRead(sessionID) }"))
+        let iosRoom = try src("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift")
+        #expect(iosRoom.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))
     }
 }

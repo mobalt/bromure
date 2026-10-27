@@ -324,6 +324,20 @@ struct MobileRoomScreen: View {
     }
     private var pages: [[AgentSession]] { layout.pages(members) }
     private var focused: AgentSession? { focusedID.flatMap { id in members.first { $0.id == id } } }
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// The chats on screen: the zoomed one, else the page.
+    private var onScreen: [AgentSession] {
+        if let z = zoomedID, let s = members.first(where: { $0.id == z }) { return [s] }
+        return pages.indices.contains(page) ? pages[page] : []
+    }
+
+    /// In the foreground, what's on screen is read -- here and, through the
+    /// server, on every other client.
+    private func markShownRead() {
+        guard scenePhase == .active else { return }
+        for s in onScreen where s.isUnread { controller.markRead(s.id) }
+    }
 
     var body: some View {
         Group {
@@ -339,7 +353,9 @@ struct MobileRoomScreen: View {
         .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
                               renaming: $renaming, deleting: $deleting))
         .onChange(of: controller.roomStore.room(roomID) == nil) { _, gone in if gone { onGone() } }
-        .onAppear(perform: settleFocus)
+        .onAppear { settleFocus(); markShownRead() }
+        .onChange(of: onScreen.map { "\($0.id):\($0.replies ?? 0)" }) { _, _ in markShownRead() }
+        .onChange(of: scenePhase) { _, _ in markShownRead() }
         #if DEBUG
         // Headless check of the composer's attachments:
         // `BROMURE_DEBUG_ROOM_ATTACH=1` stages a sample image + text file;
