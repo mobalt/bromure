@@ -4892,12 +4892,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         }
                         let page = (params["override"] as? Bool) == true
                             ? LoopbackCallbackForwarder.registrationSuccessResponse(provider: "ace2e") : nil
-                        guard let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev,
-                                                                  browserResponse: page) else {
+                        guard LoopbackCallbackForwarder.forPort(port, socketDevice: dev, browserResponse: page,
+                                                                in: &self.loopbackForwarders) != nil else {
                             return ["error": "couldn't bind 127.0.0.1:\(port)"]
                         }
-                        self.loopbackForwarders.removeAll { !$0.isRunning }
-                        self.loopbackForwarders.append(fwd)
                         return ["ok": true, "port": Int(port)]
                     }
                 case "start-session":
@@ -15699,9 +15697,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let self, let sandbox,
                    let port = Self.loopbackCallbackPort(from: url),
                    let dev = sandbox.socketDevice,
-                   let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
+                   LoopbackCallbackForwarder.forPort(port, socketDevice: dev, in: &self.loopbackForwarders) != nil {
                     FileHandle.standardError.write(Data(
                         "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
                 }

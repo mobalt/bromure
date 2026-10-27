@@ -400,16 +400,15 @@ extension ACAppDelegate {
                 }
                 if let self, let sandbox,
                    let port = ACAppDelegate.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   // Registration answers the browser itself with a clean
-                   // success page — the CLI callback servers otherwise leave
-                   // Safari on an error even though login succeeded.
-                   let fwd = LoopbackCallbackForwarder(
-                        port: port, socketDevice: dev,
+                   let dev = sandbox.socketDevice {
+                    // Registration answers the browser itself with a clean
+                    // success page — the CLI callback servers otherwise leave
+                    // Safari on an error even though login succeeded.
+                    _ = LoopbackCallbackForwarder.forPort(
+                        port, socketDevice: dev,
                         browserResponse: LoopbackCallbackForwarder
-                            .registrationSuccessResponse(provider: providerName)) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
+                            .registrationSuccessResponse(provider: providerName),
+                        in: &self.loopbackForwarders)
                 }
                 self?.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
