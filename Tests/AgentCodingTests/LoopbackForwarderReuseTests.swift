@@ -82,4 +82,40 @@ struct LoopbackForwarderReuseTests {
         let fwd = try Self.src("Sources/AgentCoding/LoopbackCallbackForwarder.swift")
         #expect(fwd.contains("for f in forwarders where f.isRunning && !f.hasWorkspace { f.stop() }"))
     }
+
+    /// Finding (CWE-441): "A one-family loopback bind is treated as owning
+    /// the OAuth port, so the page still opens". Another program on
+    /// 127.0.0.1:<port> left ::1 free; the forwarder took ::1 and the gate
+    /// opened the page -- the browser's 127.0.0.1 redirect went to the other.
+    @Test("a port held on one loopback family isn't ours, even with the other free")
+    func oneFamilyTakenIsNotOwned() throws {
+        typealias F = LoopbackCallbackForwarder
+        // Someone else listens on 127.0.0.1:<free port>.
+        let other = socket(AF_INET, SOCK_STREAM, 0)
+        #expect(other >= 0)
+        defer { close(other) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                bind(other, sa, len) == 0 && listen(other, 1) == 0 && getsockname(other, sa, &len) == 0
+            }
+        }
+        #expect(bound)
+        let port = UInt16(bigEndian: addr.sin_port)
+
+        let v4 = F.listenLoopback(family: AF_INET, port: port)
+        let v6 = F.listenLoopback(family: AF_INET6, port: port)
+        #expect(v4 == .taken)
+        if case .bound(let fd) = v6 { close(fd) }                  // ::1 was free (dual-stack host)
+        #expect(!F.owns([v4, v6]))                                 // one family taken: not ours
+
+        #expect(F.owns([.bound(3), .bound(4)]))
+        #expect(F.owns([.bound(3), .unavailable]))                 // an IPv4- or IPv6-only host
+        #expect(!F.owns([.unavailable, .unavailable]))
+        #expect(!F.owns([.taken, .unavailable]))
+    }
 }
