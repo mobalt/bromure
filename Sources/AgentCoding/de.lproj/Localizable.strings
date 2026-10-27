@@ -4320,3 +4320,6 @@
 
 /* session list: the agent replied and the user hasn't looked */
 "Unread" = "Ungelesen";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Anmeldung nicht geöffnet: Port %d wird von einer anderen Anmeldung verwendet. Schließe diese ab oder brich sie ab und versuche es dann erneut.";

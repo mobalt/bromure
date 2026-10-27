@@ -398,19 +398,25 @@ extension ACAppDelegate {
                     }
                     return
                 }
-                if let self, let sandbox,
-                   let port = ACAppDelegate.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice {
-                    // Registration answers the browser itself with a clean
-                    // success page — the CLI callback servers otherwise leave
-                    // Safari on an error even though login succeeded.
-                    _ = LoopbackCallbackForwarder.forPort(
-                        port, socketDevice: dev,
-                        browserResponse: LoopbackCallbackForwarder
-                            .registrationSuccessResponse(provider: providerName),
-                        in: &self.loopbackForwarders)
+                guard let self else { return }
+                // Registration answers the browser itself with a clean
+                // success page — the CLI callback servers otherwise leave
+                // Safari on an error even though login succeeded. A port
+                // another sign-in holds: the page is never opened (its
+                // redirect would go to that one), the registration fails.
+                if let refused = self.loopbackCallbackRefusal(
+                    for: url, device: sandbox?.socketDevice,
+                    browserResponse: LoopbackCallbackForwarder.registrationSuccessResponse(provider: providerName)) {
+                    if let ev = self.claudeRegistration?.onEvent {
+                        ev(.finished(success: false, message: refused))
+                        self.claudeRegistration?.onEvent = nil
+                    } else {
+                        self.unifiedWindow?.showNotice(refused)
+                    }
+                    self.teardownClaudeRegistration(reason: .failure)
+                    return
                 }
-                self?.claudeRegistration?.onEvent?(.status(NSLocalizedString(
+                self.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
                 ACAppDelegate.openGuestRelayedURL(url)
             }

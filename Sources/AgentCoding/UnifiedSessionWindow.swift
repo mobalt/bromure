@@ -1891,6 +1891,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     func debugToast(_ text: String) { toasts.show(text) {} }
+    /// A passing notice at the bottom of the window (no Undo).
+    func showNotice(_ text: String) { toasts.show(text, undo: nil) }
     func debugBranchAction(_ action: String, _ id: UUID) {
         let a = sessionStageActions
         switch action {

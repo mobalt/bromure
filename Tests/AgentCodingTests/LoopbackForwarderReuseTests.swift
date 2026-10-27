@@ -34,7 +34,8 @@ struct LoopbackForwarderReuseTests {
             let s = try Self.src(file)
             #expect(!s.contains("LoopbackCallbackForwarder(port"), "\(file) binds its own forwarder")
             #expect(!s.contains("LoopbackCallbackForwarder(\n"), "\(file) binds its own forwarder")
-            #expect(s.contains("LoopbackCallbackForwarder.forPort("))
+            // Through forPort -- directly, or the app's refusal gate.
+            #expect(s.contains("LoopbackCallbackForwarder.forPort(") || s.contains("loopbackCallbackRefusal("))
         }
     }
 
@@ -48,5 +49,37 @@ struct LoopbackForwarderReuseTests {
         #expect(LoopbackCallbackForwarder.owns(a, a))
         #expect(!LoopbackCallbackForwarder.owns(a, b))          // another workspace
         #expect(!LoopbackCallbackForwarder.owns(nil, b))        // its workspace is gone: not adopted
+    }
+
+    /// Finding (CWE-441): "A refused loopback port still opens the sign-in,
+    /// so another workspace receives the OAuth code". forPort refused, but the
+    /// callers opened the authorize page anyway: the browser's redirect then
+    /// reached the listener that holds the port -- another workspace's.
+    @Test("a refused port never opens the sign-in page; a stopped VM lets its port go")
+    func refusalBlocksTheOpen() throws {
+        let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
+        let reg = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
+        // Every guest-page open asks first, and returns when refused.
+        for (name, text, open) in [("workspace", ac, "Self.openGuestRelayedURL(url)"),
+                                   ("registration", reg, "ACAppDelegate.openGuestRelayedURL(url)")] {
+            let gate = try #require(text.range(of: "loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice")
+                                    ?? text.range(of: "loopbackCallbackRefusal(\n                    for: url, device: sandbox?.socketDevice"),
+                                    "\(name) doesn't ask")
+            let after = text[gate.upperBound...]
+            let ret = try #require(after.range(of: "return\n"))
+            let opened = try #require(after.range(of: open))
+            #expect(ret.lowerBound < opened.lowerBound, "\(name) opens before it gives up")
+        }
+        // Nobody else binds or reuses a callback listener (the debug sim aside).
+        #expect(!reg.contains("LoopbackCallbackForwarder.forPort("))
+        #expect(ac.components(separatedBy: "LoopbackCallbackForwarder.forPort(").count == 3)   // the gate + loopback-sim
+        // A stopped VM's listeners stop with it; a workspace-less one frees its port.
+        let unreg = try #require(ac.range(of: "func unregisterSession(_ id: Profile.ID) {"))
+        let body = ac[unreg.upperBound...].prefix(500)
+        let stop = try #require(body.range(of: "stopLoopbackForwarders(of: dev)"))
+        let remove = try #require(body.range(of: "runningSessions.removeValue(forKey: id)"))
+        #expect(stop.lowerBound < remove.lowerBound)
+        let fwd = try Self.src("Sources/AgentCoding/LoopbackCallbackForwarder.swift")
+        #expect(fwd.contains("for f in forwarders where f.isRunning && !f.hasWorkspace { f.stop() }"))
     }
 }

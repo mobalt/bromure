@@ -4323,3 +4323,6 @@
 
 /* session list: the agent replied and the user hasn't looked */
 "Unread" = "未讀";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未開啟登入：連接埠 %d 正被另一個登入使用。請先完成或取消該登入，然後再試一次。";

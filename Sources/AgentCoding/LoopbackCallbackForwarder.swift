@@ -124,6 +124,14 @@ final class LoopbackCallbackForwarder {
         armExpiry()
     }
 
+    /// Whether this listener relays into `device`'s VM.
+    func relays(into device: VZVirtioSocketDevice?) -> Bool {
+        device.map { Self.owns(socketDevice, $0) } ?? false
+    }
+
+    /// Its VM is still there (the device is held weakly).
+    var hasWorkspace: Bool { socketDevice != nil }
+
     /// Whether `caller` is the workspace a listener relays into (`owner`):
     /// identity, not equality -- one VM's socket device.
     nonisolated static func owns(_ owner: AnyObject?, _ caller: AnyObject) -> Bool {
@@ -142,6 +150,9 @@ final class LoopbackCallbackForwarder {
     /// expiry; the other one's callback can't be relayed until it ends.
     static func forPort(_ port: UInt16, socketDevice: VZVirtioSocketDevice, browserResponse: String? = nil,
                         in forwarders: inout [LoopbackCallbackForwarder]) -> LoopbackCallbackForwarder? {
+        // A listener whose VM is gone relays nowhere: let the port go (its
+        // fds close on main, so this request may still find it busy).
+        for f in forwarders where f.isRunning && !f.hasWorkspace { f.stop() }
         forwarders.removeAll { !$0.isRunning }
         if let live = forwarders.first(where: { $0.port == port }) {
             guard owns(live.socketDevice, socketDevice) else {

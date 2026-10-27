@@ -2650,6 +2650,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
     }
 
+    /// The host half of a guest page whose OAuth redirect is a loopback port:
+    /// that port's forwarder into this VM. nil: open the page (no loopback
+    /// redirect, or the forwarder is up). Else why it must NOT be opened:
+    /// another workspace's sign-in holds the port (or another program, or the
+    /// VM has no socket) -- the browser's redirect, code and all, would land
+    /// on that listener, not this sign-in (Finding CWE-441, "A refused
+    /// loopback port still opens the sign-in, so another workspace receives
+    /// the OAuth code").
+    func loopbackCallbackRefusal(for url: URL, device: VZVirtioSocketDevice?,
+                                 browserResponse: String? = nil) -> String? {
+        guard let port = Self.loopbackCallbackPort(from: url) else { return nil }
+        if let device, LoopbackCallbackForwarder.forPort(port, socketDevice: device, browserResponse: browserResponse,
+                                                         in: &loopbackForwarders) != nil {
+            FileHandle.standardError.write(Data("[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+            return nil
+        }
+        FileHandle.standardError.write(Data("[ac] sign-in page not opened: 127.0.0.1:\(port) is taken\n".utf8))
+        return String(format: NSLocalizedString(
+            "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.",
+            comment: "sign-in: a guest's OAuth callback port is held by another workspace's sign-in"), Int(port))
+    }
+
+    /// Stop the OAuth callback listeners that relay into `device` (its VM is
+    /// going), and any whose VM is already gone.
+    func stopLoopbackForwarders(of device: VZVirtioSocketDevice?) {
+        loopbackForwarders.removeAll { fwd in
+            guard fwd.relays(into: device) || !fwd.hasWorkspace else { return false }
+            fwd.stop()
+            return true
+        }
+    }
+
     func sessionRecord(_ id: UUID) -> AgentSession? {
         agentSessionStore.session(id) ?? attachedMachines.values.lazy.compactMap { $0.sessionStore.session(id) }.first
     }
@@ -2892,6 +2924,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// deallocates once any in-flight stop/suspend task also releases it
     /// (its `deinit` then detaches the vmnet switch port).
     func unregisterSession(_ id: Profile.ID) {
+        // Its OAuth callback listeners go with it: a stopped VM must not keep
+        // a sign-in's port (the next one couldn't bind it, and the browser's
+        // redirect would be reset or relayed into a VM shutting down).
+        if let dev = runningSessions[id]?.sandbox.socketDevice { stopLoopbackForwarders(of: dev) }
         runningSessions.removeValue(forKey: id)
         releaseLeaseIfIdle(id)
         updateStatusMenu()
@@ -15751,18 +15787,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                guard let self else { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
-                // browser's callback reaches the in-VM CLI before we open it.
-                if let self, let sandbox,
-                   let port = Self.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   LoopbackCallbackForwarder.forPort(port, socketDevice: dev, in: &self.loopbackForwarders) != nil {
-                    FileHandle.standardError.write(Data(
-                        "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+                // browser's callback reaches the in-VM CLI before we open it
+                // -- and when this workspace can't have that port, never open it.
+                if let refused = self.loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice) {
+                    if let signIn = self.proxySignIns[pid], !signIn.finished {
+                        signIn.onEvent?(.finished(success: false, message: refused))
+                    } else {
+                        self.unifiedWindow?.showNotice(refused)
+                    }
+                    return
                 }
                 // A sign-in card is waiting on this very page.
-                if let self, let signIn = self.proxySignIns[pid], !signIn.finished {
+                if let signIn = self.proxySignIns[pid], !signIn.finished {
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
