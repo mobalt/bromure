@@ -3,6 +3,7 @@ import AppKit
 #endif
 import SwiftUI
 import Charts
+import MarkdownUI
 
 /// A professional dashboard for a single workspace VM, shown in the stage when
 /// its name is selected in the source list (mirrors `DockerDashboardView`'s look
@@ -12,8 +13,10 @@ import Charts
 struct VMDashboardView: View {
     /// nil when the VM isn't running (no live vitals available).
     let model: TabsModel?
-    let profile: Profile
-    let accentHex: String
+    /// `var`: the host swaps in a saved copy (`refreshVMDashboard`) without
+    /// rebuilding the view, so the vitals history keeps.
+    var profile: Profile
+    var accentHex: String
     let state: SessionListModel.RunState
     let vCPUs: Int
     let diskAllocatedBytes: Int64
@@ -25,6 +28,10 @@ struct VMDashboardView: View {
     let onShutdown: () -> Void
     /// Start (off) / Resume (suspended).
     let onResume: () -> Void
+    /// Save the notes edited in place (markdown); nil hides "Edit".
+    var onSaveNotes: ((String) -> Void)? = nil
+    /// Open with the notes already in their editor (the `vm-notes:` shot).
+    var startsEditingNotes = false
 
     @State private var cpuHistory: [Double] = []
     @State private var now = Date()
@@ -43,10 +50,13 @@ struct VMDashboardView: View {
                 statStrip
                 configCard
                 if isRunning && !externalPorts.isEmpty { portsCard }
+                notesCard
             }
             .padding(18)
         }
         .background(.background)
+        .onChange(of: profile.comments) { notesSaved = nil }
+        .onAppear { if startsEditingNotes, onSaveNotes != nil, !editingNotes { beginEditingNotes() } }
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
             now = Date()
             cpuHistory.append(model?.vmCPU ?? 0)
@@ -245,6 +255,101 @@ struct VMDashboardView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             if copiedEndpoint == text { copiedEndpoint = nil }
         }
+    }
+
+    // MARK: Notes
+
+    /// The raw markdown while the notes are edited in place; nil otherwise.
+    @State private var notesDraft: String?
+    /// What the editor last saved, shown until `profile` carries it.
+    @State private var notesSaved: String?
+#if os(macOS)
+    @State private var notesEditorHeight: CGFloat = 0
+    @State private var notesEditorFocused = false
+#endif
+
+    private var notesText: String { notesSaved ?? profile.comments }
+    private var hasNotes: Bool {
+        !notesText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var editingNotes: Bool { notesDraft != nil }
+
+    private func beginEditingNotes() { notesDraft = notesText }
+    private func cancelNotesEdit() { notesDraft = nil }
+
+    /// Return, "Save", or the focus leaving: the draft becomes the notes
+    /// (trailing blank lines dropped; all blank clears them).
+    private func commitNotes() {
+        guard var text = notesDraft else { return }
+        notesDraft = nil
+        while text.last?.isWhitespace == true { text.removeLast() }
+        guard text != notesText else { return }
+        notesSaved = text
+        onSaveNotes?(text)
+    }
+
+    private var notesCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Notes")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                    .textCase(.uppercase).tracking(0.6)
+                Spacer()
+                if onSaveNotes != nil {
+                    Button {
+                        if editingNotes { commitNotes() } else { beginEditingNotes() }
+                    } label: {
+                        Label(editingNotes ? "Save" : "Edit",
+                              systemImage: editingNotes ? "checkmark" : "pencil")
+                    }
+                    .buttonStyle(.borderless).controlSize(.small)
+                    .help(editingNotes ? "Save the notes (Return)" : "Edit the notes as markdown")
+                }
+            }
+            if editingNotes {
+                notesEditor
+            } else if hasNotes {
+                Markdown(notesText)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(NSLocalizedString("(empty)", comment: "VM dashboard: the workspace has no notes"))
+                    .font(.system(size: 13)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.primary.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.06)))
+    }
+
+    /// The notes as editable markdown. Return saves, Shift-Return (and
+    /// Option-Return) add a line, Escape drops the edit.
+    @ViewBuilder private var notesEditor: some View {
+        let draft = Binding(get: { notesDraft ?? "" }, set: { notesDraft = $0 })
+#if os(macOS)
+        ComposerTextView(text: draft,
+                         placeholder: NSLocalizedString("Add a note about this workspace",
+                                                        comment: "Profile notes field placeholder"),
+                         font: .systemFont(ofSize: 13), lineSpacing: 2, maxLines: 40,
+                         takesFocus: true,
+                         height: $notesEditorHeight, focused: $notesEditorFocused,
+                         onKey: { key in
+                             guard key == .escape else { return false }
+                             cancelNotesEdit()
+                             return true
+                         },
+                         onSubmit: { commitNotes() })
+            .frame(height: max(notesEditorHeight, 20))
+            .onChange(of: notesEditorFocused) { if !notesEditorFocused { commitNotes() } }
+        Text("Return saves · Shift-Return adds a line · Esc cancels")
+            .font(.system(size: 10)).foregroundStyle(.tertiary)
+#else
+        TextEditor(text: draft)
+            .font(.system(size: 13))
+            .frame(minHeight: 80)
+#endif
     }
 
     private var portsCard: some View {

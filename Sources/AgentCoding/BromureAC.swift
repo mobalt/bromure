@@ -2073,7 +2073,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store),
                 squelch: p.squelch.enabled,
-                squelchSummary: SquelchLedger.shared.summary(p.id))
+                squelchSummary: SquelchLedger.shared.summary(p.id),
+                notes: p.comments)
         } + machines.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
@@ -2102,6 +2103,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The new-session screen holds the workspaces by value: rebuild it
         // when they changed (the first one just saved from the editor).
         w.workspacesDidChange()
+        // So does the VM dashboard on the stage (its notes, name, color).
+        w.refreshVMDashboard()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
         agentSessionStore.reconcile(entries: sessionEntries(for: w.listModel))
@@ -2189,6 +2192,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if lastStagedProfiles[profileID] != nil {
             lastStagedProfiles[profileID]?.mintedCredentials = p.mintedCredentials
         }
+    }
+
+    /// The workspace's notes (markdown), saved: the dashboard's in-place
+    /// editor. Nothing in the guest changes.
+    func setNotes(_ id: Profile.ID, _ text: String) {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return }
+        var p = profiles[i]
+        guard p.comments != text else { return }
+        p.comments = text
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] notes: couldn't save profile: \(error)")
+            return
+        }
+        profiles[i] = p
+        runningSessions[id]?.profile.comments = text
+        refreshSidebar()   // the row's tooltip carries the notes
     }
 
     @discardableResult
@@ -4645,6 +4664,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = self.branchesWindows.window(for: pid)
                 case let w where w.hasPrefix("session-review:"):
                     window = UUID(uuidString: String(w.dropFirst(15))).flatMap { self.sessionReviews.window(for: $0) }
+                case let w where w.hasPrefix("vm:"):
+                    // A workspace's VM dashboard ("vm:<name or id>") as the
+                    // stage surface, then the unified window.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(3))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id)
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("vm-notes:"):
+                    // The same dashboard with its notes open in their editor.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(9))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id, editingNotes: true)
+                    window = self.unifiedWindow
                 case "grid":
                     // The Grid as the stage surface (side panes fold for it).
                     self.ensureUnifiedWindow().showGrid()
@@ -6922,6 +6956,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
                 "squelch": p.squelch.enabled,
+                // Its notes: the fat client's dashboard card and row tooltip.
+                "comments": p.comments,
             ]
             if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides

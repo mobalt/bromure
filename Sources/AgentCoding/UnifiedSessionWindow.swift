@@ -3191,7 +3191,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
     /// Shown for any run state: a running VM gets live vitals; a suspended/off
     /// one shows the spec + config (more useful than a black framebuffer).
-    func showVMDashboard(_ id: Profile.ID) {
+    func showVMDashboard(_ id: Profile.ID, editingNotes: Bool = false) {
         guard let profile = acDelegate?.profile(for: id) else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         clearAutomationBoard()
@@ -3218,7 +3218,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSuspend:     { [weak self] in self?.acDelegate?.suspendProfile(id) },
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
-            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
+            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() },
+            onSaveNotes:   { [weak self] text in self?.acDelegate?.setNotes(id, text) },
+            startsEditingNotes: editingNotes)
         let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
@@ -3230,6 +3232,19 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         ])
         vmDashboardHosting = host
         updateVMOverlay()
+    }
+
+    /// The shown workspace's profile changed (a settings save, the sidebar
+    /// refresh): the dashboard shows the new copy — notes, name, color —
+    /// without being rebuilt, so its vitals history keeps.
+    func refreshVMDashboard() {
+        guard let id = vmDashboardSelectedID, let host = vmDashboardHosting,
+              let profile = pane(id)?.profile ?? acDelegate?.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
     }
 
     func clearVMDashboard() {
@@ -4979,6 +4994,7 @@ private struct VMSection: View {
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                             .foregroundStyle(isSelected ? .primary : .secondary)
+                            .help(row.notesExcerpt)   // its notes' opening; none: no tooltip
                         if row.compromised {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 9))
