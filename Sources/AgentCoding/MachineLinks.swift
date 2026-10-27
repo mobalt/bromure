@@ -621,6 +621,9 @@ final class AttachedMachine {
     let sessionStore = AgentSessionStore(mirror: true)
     /// Reads sent to the machine and not yet in its snapshot: the reply count.
     var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
+    /// The sessions as the machine last listed them, before any read held
+    /// here is laid over them (`sessionStore` shows them with it).
+    var machineSessions: [AgentSession] = []
     /// Its tmux roster, as the local window's sidebar and session buckets
     /// read a VM's (fed from the machine's /state like a fat client's mirror).
     let tabsModel = TabsModel()
@@ -680,6 +683,9 @@ final class AttachedMachine {
         let r = await Task.detached { MachineLinkHub.shared.request(id, "GET", "/state", timeout: 10) }.value
         guard let r, r.status == 200 else {
             failedPolls += 1
+            // A read the machine never confirmed doesn't outlive its hold
+            // because the link is down too.
+            reapplyReads()
             if connected, failedPolls >= Self.failuresBeforeOffline {
                 // Gone for real: off, but its sessions stay listed (asleep)
                 // rather than vanishing from every client's stage.
@@ -718,9 +724,10 @@ final class AttachedMachine {
         tabsModel.applyRoster(roster)
         if tabsModel.rosterLive != !roster.isEmpty { tabsModel.rosterLive = !roster.isEmpty }
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        sessionStore.applyMirror(Self.holdingReads(sessions.compactMap { d in
+        machineSessions = sessions.compactMap { d in
             (try? JSONSerialization.data(withJSONObject: d)).flatMap { try? dec.decode(AgentSession.self, from: $0) }
-        }, &pendingReads))
+        }
+        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
         MachineLinkHub.shared.setFragment(id, .init(
             workspace: ws, vm: vm, sessions: sessions,
             sessionIDs: Set(sessions.compactMap { ($0["id"] as? String)?.uppercased() }),
@@ -811,16 +818,36 @@ extension AttachedMachine: AgentHostLink {
     func markRead(_ sid: UUID, upTo seen: Int) {
         let sent = Date()
         pendingReads[sid] = (seen, sent)
-        sessionStore.applyMirror(Self.holdingReads(sessionStore.sessions, &pendingReads))
+        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
+        // The hold ends on its own -- not only when a snapshot comes in, which
+        // a dead link never brings.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.readHold + 0.1) { [weak self] in self?.reapplyReads() }
         Task {
             let r = await call("POST", "/agent-sessions/\(sid.uuidString)/read", ["seen": seen])
             // Refused or unanswered (Finding CWE-670, "Attached-machine read is
             // latched before the command finishes"): the hold ends 2 s on, not
-            // 10 -- the next snapshot shows it unread and a watched session's
-            // read goes again. At most one retry per 2 s, however the machine answers.
+            // 10 -- then the session shows unread again and a watched
+            // session's read goes again. At most one retry per 2 s.
             guard Self.readFailed(r), let p = pendingReads[sid], p.seen == seen, p.at == sent else { return }
             pendingReads[sid] = (seen, Date().addingTimeInterval(2 - Self.readHold))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in self?.reapplyReads() }
         }
+    }
+
+    /// Whether the MACHINE has the session unread (its own count, not the
+    /// read shown here while it's on its way): a read to send.
+    func unreadOnMachine(_ sid: UUID) -> Bool {
+        machineSessions.first { $0.id == sid }?.isUnread == true
+    }
+
+    /// Recompute what's shown from the machine's last word and the reads
+    /// still held, and tell the host when that changed -- a hold that ran out
+    /// shows unread again (Finding CWE-670, "A failed attached-machine read
+    /// stays marked read until /state succeeds").
+    func reapplyReads() {
+        let before = sessionStore.sessions
+        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
+        if sessionStore.sessions != before { onChange?() }
     }
 
     /// How long a read sent is shown before the machine has to agree.

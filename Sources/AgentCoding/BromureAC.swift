@@ -2642,7 +2642,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let m = machine(forSession: id) {
             // Its count lives on the machine: shown read here at once, the
             // read sent there (what this screen showed; nothing to read: none).
-            guard let s = m.sessionStore.session(id), s.isUnread, let n = s.replies else { return }
+            // Unread on the MACHINE (not as shown here, where a read on its
+            // way already reads as read): until it confirms, another read goes.
+            guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }
             m.markRead(id, upTo: min(upTo ?? n, n))
             homeSessionStore.applyMirror(allSessionRecords)   // the sidebar's copy, now
             return
