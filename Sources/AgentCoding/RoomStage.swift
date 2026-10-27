@@ -239,6 +239,16 @@ final class RoomStageController {
         self.backend = backend
         self.hideEnded = UserDefaults.standard.bool(forKey: Self.hideEndedKey(roomID))
         self.listModel = listModel
+        // What the stage opens on, until its view says otherwise: at 1×1 the
+        // Switchboard's tab (the composer aims there first), else the grid
+        // with the Switchboard docked open. A read before the view settles --
+        // the window becoming key as the room opens -- then can't mark the
+        // cell behind the tab, or miss the Switchboard (Finding CWE-670,
+        // "Room read-state marks the hidden 1×1 session and skips the
+        // Switchboard").
+        let single = layout.size == 1
+        cellsHidden = single && target == .switchboard
+        switchboardOnScreen = single ? target == .switchboard : true
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }

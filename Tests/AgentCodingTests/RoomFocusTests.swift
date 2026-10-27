@@ -83,10 +83,12 @@ struct RoomFocusTests {
         c.zoomedID = nil
         c.cellsHidden = true                       // the 1x1 Switchboard tab is up
         #expect(c.onScreenIDs.isEmpty && told == 3)
-        c.switchboardOnScreen = true               // a sleeping Switchboard (no chat): nothing read
-        #expect(c.onScreenIDs.isEmpty && told == 4)
-        c.switchboardOnScreen = true               // no change, no call
-        #expect(told == 4)
+        #expect(c.switchboardOnScreen)              // a grid opens with the dock open
+        c.switchboardOnScreen = false               // folded
+        c.switchboardOnScreen = true                // a sleeping Switchboard (no chat): nothing read
+        #expect(c.onScreenIDs.isEmpty && told == 5)
+        c.switchboardOnScreen = true                // no change, no call
+        #expect(told == 5)
         // A member joins the page on show: a refresh says so (once).
         c.cellsHidden = false
         told = 0
@@ -108,5 +110,31 @@ struct RoomFocusTests {
         let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift"), encoding: .utf8)
         #expect(ios.contains("if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }"))
         #expect(ios.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))
+    }
+
+    /// Finding (CWE-670): "Room read-state marks the hidden 1×1 session and
+    /// skips the Switchboard". Before the view reports its tab and dock, the
+    /// controller already reads what the stage opens on.
+    @Test("a room opens reading what it shows: the 1x1 Switchboard tab (not the cell), else the grid and the dock")
+    func opensOnWhatItShows() {
+        let store = AgentRoomStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-\(UUID().uuidString).json"))
+        let room = store.create(name: "R")
+        let ws = UUID()
+        var a = AgentSession(profileID: ws, tool: .claude, title: "a"); a.roomID = room.id
+        let backend = FakeRoomBackend(store: store)
+        backend.roomSessions = [a]
+        let one = RoomStageController(roomID: room.id, backend: backend, listModel: SessionListModel())
+        #expect(one.layout.size == 1 && one.target == .switchboard)
+        #expect(one.cellsHidden && one.switchboardOnScreen)
+        #expect(!one.onScreenIDs.contains(a.id))                 // the cell is behind the tab
+        one.stop()
+        var b = AgentSession(profileID: ws, tool: .codex, title: "b"); b.roomID = room.id
+        b.createdAt = a.createdAt.addingTimeInterval(10)
+        backend.roomSessions = [a, b]
+        let grid = RoomStageController(roomID: room.id, backend: backend, listModel: SessionListModel())
+        #expect(grid.layout.size > 1 && !grid.cellsHidden && grid.switchboardOnScreen)
+        #expect(Set(grid.onScreenIDs) == [a.id, b.id])
+        grid.stop()
     }
 }
