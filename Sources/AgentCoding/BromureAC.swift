@@ -2626,13 +2626,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// The session the user is looking at on this Mac right now: on the
-    /// stage of the key window of the active app.
-    var sessionOnScreen: UUID? {
-        guard NSApp.isActive, let w = unifiedWindow, w.isKeyWindow, w.isVisible, !w.isMiniaturized,
-              !w.listModel.newSessionSelected else { return nil }
-        return w.listModel.selectedSessionID
+    /// The sessions the user is looking at on this Mac right now: on the
+    /// stage of the key window of the active app (one, or a room's page).
+    var sessionsOnScreen: [UUID] {
+        guard NSApp.isActive, let w = unifiedWindow, w.isKeyWindow, w.isVisible, !w.isMiniaturized
+        else { return [] }
+        return w.sessionsOnStage
     }
+
+    /// Reply counts already sent as read to an attached machine (its next
+    /// snapshot catches up; until then, not sent again on every refresh).
+    private var machineReadsSent: [UUID: Int] = [:]
 
     /// The user read a session (here, or on a client: `upTo` is the reply
     /// count that client showed). Every client's mark goes with the next
@@ -2668,6 +2672,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func refreshHomeSessions() {
         homeSessionStore.applyMirror(allSessionRecords)
+        // An attached machine's session on stage: a reply that came with its
+        // snapshot is read as it lands (ours are read in `onReply`).
+        for id in sessionsOnScreen {
+            guard machine(forSession: id) != nil, let s = sessionRecord(id), s.isUnread,
+                  let n = s.replies, machineReadsSent[id] != n else { continue }
+            machineReadsSent[id] = n
+            markSessionRead(id, upTo: n)
+        }
     }
 
     private func trackHomeSessions() {
@@ -2704,7 +2716,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // A reply on the session the user is watching is read already.
         agentSessionStore.onReply = { [weak self] id in
             guard let self else { return }
-            if self.sessionOnScreen == id { self.agentSessionStore.markRead(id) }
+            if self.sessionsOnScreen.contains(id) { self.agentSessionStore.markRead(id) }
             ACAutomationServer.noteMutation()
         }
         machineLinksObserver = NotificationCenter.default.addObserver(

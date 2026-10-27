@@ -1628,13 +1628,14 @@ final class AgentSessionStore {
 
     /// The beautified view's verdict on whether the agent's screen shows a
     /// dialog waiting on the user. Persisted only on change.
-    func setAwaitingAnswer(_ id: UUID, _ waiting: Bool) {
+    /// True when it changed.
+    @discardableResult
+    func setAwaitingAnswer(_ id: UUID, _ waiting: Bool) -> Bool {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
-              (sessions[i].awaitingAnswer == true) != waiting else { return }
+              (sessions[i].awaitingAnswer == true) != waiting else { return false }
         sessions[i].awaitingAnswer = waiting ? true : nil
         save()
-        // A dialog waiting on the user is the agent asking: a reply to read.
-        if waiting { noteReply(id) }
+        return true
     }
 
     /// The agent named its session (its terminal title, read by the

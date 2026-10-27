@@ -166,9 +166,19 @@ final class RoomStageController {
     @ObservationIgnored let listModel: SessionListModel
 
     var focusedID: UUID?
-    var zoomedID: UUID?
+    var zoomedID: UUID? { didSet { if zoomedID != oldValue { onShownChanged?() } } }
     /// The tab on show (a page of `layout.size` sessions).
-    var page = 0
+    var page = 0 { didSet { if page != oldValue { onShownChanged?() } } }
+    /// Told when the sessions on screen change (a page, a zoom): what's on
+    /// show is read.
+    @ObservationIgnored var onShownChanged: (() -> Void)?
+
+    /// The sessions whose chats are on screen: the zoomed one, else the page.
+    var onScreenIDs: [UUID] {
+        if let z = zoomedID { return [z] }
+        let p = pages
+        return p.indices.contains(page) ? p[page].map(\.id) : []
+    }
     /// +1 / −1: which way the last page change went (the slide's direction).
     var pageDirection = 1
     /// Who the one composer under the grid talks to: the room's

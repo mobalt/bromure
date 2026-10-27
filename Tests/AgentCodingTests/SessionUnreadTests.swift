@@ -51,16 +51,21 @@ struct SessionUnreadTests {
         #expect(store.markRead(s.id, upTo: 9))                 // never past the count
         #expect(store.session(s.id)?.readReplies == 2)
         #expect(store.session(s.id)?.isUnread == false)
-        // A dialog waiting on the user is the agent asking.
+        // The app hears each reply (to read it at once if it's on screen).
         var heard: [UUID] = []
         store.onReply = { heard.append($0) }
-        store.setAwaitingAnswer(s.id, true)
+        store.noteReply(s.id)
         #expect(store.session(s.id)?.isUnread == true && heard == [s.id])
-        store.setAwaitingAnswer(s.id, true)                    // no change, no reply
-        #expect(store.session(s.id)?.replies == 3)
+        // A dialog is no reply by itself (its hook counted the question):
+        // flagging it after a client read the question must not bring the
+        // mark back. The pane counts it only for a dialog inside a turn.
+        store.markRead(s.id)
+        #expect(store.setAwaitingAnswer(s.id, true))
+        #expect(!store.setAwaitingAnswer(s.id, true))          // no change
+        #expect(store.session(s.id)?.isUnread == false && store.session(s.id)?.replies == 3)
         // Persisted with the session; an old file without them reads as read.
         let relaunched = AgentSessionStore(fileURL: url)
-        #expect(relaunched.session(s.id)?.replies == 3 && relaunched.session(s.id)?.readReplies == 2)
+        #expect(relaunched.session(s.id)?.replies == 3 && relaunched.session(s.id)?.readReplies == 3)
         let old = try? JSONDecoder().decode(AgentSession.self, from: Data(
             #"{"id":"\#(UUID().uuidString)","profileID":"\#(UUID().uuidString)","tool":"claude","title":"t","cwd":"~","createdAt":0}"#.utf8))
         #expect(old?.isUnread == false)
@@ -136,7 +141,7 @@ struct SessionUnreadTests {
         a.applyPushedSnapshot(Self.snapshot(s))
         #expect(a.sessionStore.session(s.id)?.isUnread == true)
         // The session on screen is read as the reply arrives.
-        a.watching = { s.id }
+        a.watching = { [s.id] }
         s.replies = 4
         a.applyPushedSnapshot(Self.snapshot(s))
         #expect(a.sessionStore.session(s.id)?.isUnread == false)
@@ -151,13 +156,29 @@ struct SessionUnreadTests {
         #expect(ac[set.upperBound...].prefix(1200).contains("agentSessionStore.noteReply(s.id)"))
         #expect(ac.contains("case (let sid?, \"read\"):"))
         #expect(ac.contains("self.markSessionRead(sid, upTo: body[\"seen\"] as? Int)"))
-        #expect(ac.contains("if self.sessionOnScreen == id { self.agentSessionStore.markRead(id) }"))
+        #expect(ac.contains("if self.sessionsOnScreen.contains(id) { self.agentSessionStore.markRead(id) }"))
+        // An attached machine's session on stage: read when its snapshot brings a reply.
+        let refresh = try #require(ac.range(of: "func refreshHomeSessions() {"))
+        #expect(ac[refresh.upperBound...].prefix(700).contains("markSessionRead(id, upTo: n)"))
+        // A dialog counts only inside a turn (hooks still working).
+        let pane = try src("Sources/AgentCoding/SessionPane.swift")
+        let dialog = try #require(pane.range(of: "m.dialogPromptChanged = {"))
+        let body = pane[dialog.upperBound...].prefix(1100)
+        #expect(body.contains("if delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting), waiting,"))
+        #expect(body.contains("?.agentStatus == .working {"))
+        // A room's chats on screen are read: on show, and per page or zoom.
+        let room = try src("Sources/AgentCoding/RoomStage.swift")
+        #expect(room.contains("var page = 0 { didSet { if page != oldValue { onShownChanged?() } } }"))
+        #expect(room.contains("var zoomedID: UUID? { didSet { if zoomedID != oldValue { onShownChanged?() } } }"))
         let host = try src("Sources/AgentCoding/UnifiedSessionWindow.swift")
         #expect(host.components(separatedBy: "delegate.markSessionRead(id)").count == 3)   // both select paths
-        #expect(host.contains("acDelegate?.markSessionRead(id)"))                           // becomeKey
+        #expect(host.contains("for id in sessionsOnStage { acDelegate?.markSessionRead(id) }"))   // becomeKey
+        #expect(host.contains("if let rc = roomController { return rc.onScreenIDs }"))
+        #expect(host.contains("controller.onShownChanged = markShown"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.components(separatedBy: "controller.markRead(id)").count >= 4)           // selects + becomeKey
-        #expect(fc.contains("controller.watching = { [weak self] in self?.sessionOnScreen }"))
+        #expect(fc.contains("controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }"))
+        #expect(fc.contains("rc.onShownChanged = markShown"))
         let ios = try src("ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift")
         #expect(ios.contains(".onChange(of: session?.replies) { _, _ in markRead() }"))
         #expect(ios.contains("if scenePhase == .active { controller.markRead(sessionID) }"))

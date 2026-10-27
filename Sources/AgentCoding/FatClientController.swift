@@ -1457,16 +1457,16 @@ final class RemoteHostController {
             }
         }
         sessionStore.applyMirror(mirrored)
-        // A reply on the session on screen: read as it arrives.
-        if let id = watching() { markRead(id) }
+        // A reply on a session on screen: read as it arrives.
+        for id in watching() { markRead(id) }
     }
 
     /// Reads sent to the server and not yet in a snapshot: the reply count.
     private var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
 
-    /// The session the user is looking at now (the window is key, the app
-    /// active; on iOS the screen marks its own). nil: none.
-    var watching: () -> UUID? = { nil }
+    /// The sessions the user is looking at now (the window is key, the app
+    /// active; on iOS the screen marks its own).
+    var watching: () -> [UUID] = { [] }
 
     /// The user saw a session's replies: the mark goes at once, here and —
     /// through the server — on every other client.
@@ -3474,7 +3474,7 @@ final class RemoteHostWindow: NSWindow {
         buildToolbar()
         observeSending()
         showGrid()
-        controller.watching = { [weak self] in self?.sessionOnScreen }
+        controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
@@ -5697,18 +5697,20 @@ final class RemoteHostWindow: NSWindow {
         controller.markRead(id)
     }
 
-    /// The session on this window's stage while the user can see it (the
-    /// window key, the app active): its replies are read as they come.
-    var sessionOnScreen: UUID? {
+    /// The sessions on this window's stage while the user can see them (the
+    /// window key, the app active): one, or a room's page. Their replies are
+    /// read as they come.
+    var sessionsOnScreen: [UUID] {
         let model = controller.listModel
-        guard NSApp.isActive, isKeyWindow, isVisible, !isMiniaturized, !model.newSessionSelected else { return nil }
-        return model.selectedSessionID
+        guard NSApp.isActive, isKeyWindow, isVisible, !isMiniaturized, !model.newSessionSelected else { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return model.selectedSessionID.map { [$0] } ?? []
     }
 
     /// Back to this window (or to the app): what's on its stage is seen.
     override func becomeKey() {
         super.becomeKey()
-        if let id = sessionOnScreen { controller.markRead(id) }
+        for id in sessionsOnScreen { controller.markRead(id) }
     }
 
     private func sessionStageDidChange() {
@@ -5986,6 +5988,13 @@ final class RemoteHostWindow: NSWindow {
         roomController = rc
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
+        // The chats on show are read, and so is each page or zoom shown next.
+        let markShown = { [weak self, weak rc] in
+            guard let self, let rc, self.isKeyWindow, NSApp.isActive else { return }
+            for sid in rc.onScreenIDs { c.markRead(sid) }
+        }
+        rc.onShownChanged = markShown
+        markShown()
     }
 
     /// Leave the room stage (its chat models stop polling).

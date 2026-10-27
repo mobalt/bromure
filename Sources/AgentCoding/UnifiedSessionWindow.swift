@@ -2171,12 +2171,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         delegate.markSessionRead(id)
     }
 
+    /// The sessions whose chats this window's stage shows: the selected one,
+    /// or a room's page (its zoomed cell).
+    var sessionsOnStage: [UUID] {
+        if listModel.newSessionSelected { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return listModel.selectedSessionID.map { [$0] } ?? []
+    }
+
     /// Back to this window (or to the app): what's on its stage is seen.
     override func becomeKey() {
         super.becomeKey()
-        if let id = listModel.selectedSessionID, !listModel.newSessionSelected {
-            acDelegate?.markSessionRead(id)
-        }
+        for id in sessionsOnStage { acDelegate?.markSessionRead(id) }
     }
 
     /// The session behind a workspace's tmux window (a kanban run's tab, an
@@ -2803,6 +2809,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))
         makeKeyAndOrderFront(nil)
+        // The chats on show are read, and so is each page or zoom shown next.
+        let markShown = { [weak self, weak controller] in
+            guard let self, let controller, self.isKeyWindow, NSApp.isActive else { return }
+            for sid in controller.onScreenIDs { delegate.markSessionRead(sid) }
+        }
+        controller.onShownChanged = markShown
+        markShown()
     }
 
     /// Leave the room stage (its chat models stop polling).
