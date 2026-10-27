@@ -991,7 +991,8 @@ final class RemoteHostController {
                 squelchSummary: (w["squelchSummary"] as? [String: Any]).flatMap {
                     (try? JSONSerialization.data(withJSONObject: $0))
                         .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
-                }))
+                },
+                notes: w["comments"] as? String ?? ""))
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
@@ -1007,6 +1008,7 @@ final class RemoteHostController {
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
             p.squelch.enabled = (w["squelch"] as? Bool) ?? false
+            p.comments = w["comments"] as? String ?? ""
             p.memoryGB = spec.memoryGB
             p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
@@ -3478,6 +3480,7 @@ final class RemoteHostWindow: NSWindow {
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
+            self.refreshDashboardProfile()
             // Re-attempt the browser-MCP relay dial for the selected
             // workspace and any with an open/remembered browser: the
             // dial is guarded on a live VM, so a workspace selected
@@ -7281,13 +7284,28 @@ final class RemoteHostWindow: NSWindow {
             onSuspend:     { c.suspendWorkspace(id) },
             onReboot:      { [weak self] in self?.confirmReboot(id) },
             onShutdown:    { c.shutdownWorkspace(id) },
-            onResume:      { c.startWorkspace(id) })
+            onResume:      { c.startWorkspace(id) },
+            // A partial document: the host overlays the one field it names.
+            onSaveNotes:   { text in (try? await c.saveProfileDoc(id, ["comments": text])) != nil })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window
         dashboardHost = host
         shownDashboard = (id, state)
         mount(host)
+    }
+
+    /// A snapshot changed the shown workspace's profile (notes saved in its
+    /// settings, a rename): the dashboard shows the new copy without being
+    /// rebuilt, so its vitals history keeps.
+    private func refreshDashboardProfile() {
+        guard let id = shownDashboard?.id, let host = dashboardHost,
+              let profile = controller.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
     }
 
     /// A deleted workspace leaves the stage, the selection, its pop-out and

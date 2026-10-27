@@ -1483,12 +1483,18 @@ struct ProfileEditorView: View {
                 // A grouped Form draws an empty TextField borderless and
                 // right-aligned — invisible until typed into. The prompt
                 // makes the field visible.
-                TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                          text: $draft.comments,
-                          prompt: Text(NSLocalizedString("Add a note about this workspace",
-                                                         comment: "Profile notes field placeholder")),
-                          axis: .vertical)
+                let notes = TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
+                                      text: $draft.comments,
+                                      prompt: Text(NSLocalizedString("Add a note about this workspace",
+                                                                     comment: "Profile notes field placeholder")),
+                                      axis: .vertical)
                     .lineLimit(2...6)
+                #if os(macOS)
+                // Markdown wants its lines: Shift-Return adds one.
+                notes.shiftReturnInsertsNewline()
+                #else
+                notes
+                #endif
             }
 
             // Delegation / @nickname reach: one machine's own policy.
