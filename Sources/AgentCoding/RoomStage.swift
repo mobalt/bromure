@@ -166,19 +166,37 @@ final class RoomStageController {
     @ObservationIgnored let listModel: SessionListModel
 
     var focusedID: UUID?
-    var zoomedID: UUID? { didSet { if zoomedID != oldValue { onShownChanged?() } } }
+    var zoomedID: UUID? { didSet { if zoomedID != oldValue { shownChanged() } } }
     /// The tab on show (a page of `layout.size` sessions).
-    var page = 0 { didSet { if page != oldValue { onShownChanged?() } } }
+    var page = 0 { didSet { if page != oldValue { shownChanged() } } }
     /// Told when the sessions on screen change (a page, a zoom): what's on
     /// show is read.
     @ObservationIgnored var onShownChanged: (() -> Void)?
     @ObservationIgnored private var lastShown: [UUID] = []
 
+    /// What's on show changed (a page, a zoom, the dock, the 1×1 tab).
+    private func shownChanged() {
+        lastShown = onScreenIDs
+        onShownChanged?()
+    }
+
+    /// Tell the owner when the chats on show changed without a page or zoom
+    /// change: a member joining or leaving the page on show, the auto layout
+    /// growing (a fifth session turns 2×2 into 3×2 on the same page), a new
+    /// layout, ended members shown or hidden, a tail loaded (Finding CWE-670,
+    /// "A room page that gains a session is not marked read").
+    func noteShown() {
+        let shown = onScreenIDs
+        guard shown != lastShown else { return }
+        lastShown = shown
+        onShownChanged?()
+    }
+
     /// The Switchboard's chat is on show (the dock open, or its own tab at
     /// 1×1) -- kept by the view, which owns the dock.
-    var switchboardOnScreen = false { didSet { if switchboardOnScreen != oldValue { onShownChanged?() } } }
+    var switchboardOnScreen = false { didSet { if switchboardOnScreen != oldValue { shownChanged() } } }
     /// At 1×1 the Switchboard's tab is up: the page's cell isn't on show.
-    var cellsHidden = false { didSet { if cellsHidden != oldValue { onShownChanged?() } } }
+    var cellsHidden = false { didSet { if cellsHidden != oldValue { shownChanged() } } }
 
     /// The sessions whose chats are on screen: the zoomed one, else the page
     /// -- and the Switchboard when its chat shows (not while it sleeps).
@@ -235,7 +253,10 @@ final class RoomStageController {
 
     /// Ended sessions leave the grid and the tabs (per room, remembered).
     var hideEnded: Bool {
-        didSet { UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID)) }
+        didSet {
+            UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))
+            noteShown()
+        }
     }
     private static func hideEndedKey(_ id: UUID) -> String { "room.hideEnded.\(id.uuidString)" }
 
@@ -299,6 +320,7 @@ final class RoomStageController {
         } else {
             page = 0
         }
+        noteShown()   // same page, different cells
     }
 
     /// Auto: the grid sized to fit the room's sessions.
@@ -363,8 +385,7 @@ final class RoomStageController {
         page = min(page, max(0, pages.count - 1))
         // A member joined the page on show, or the Switchboard woke under an
         // open dock: what's on screen changed, so it's read.
-        let shown = onScreenIDs
-        if shown != lastShown { lastShown = shown; onShownChanged?() }
+        noteShown()
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }
         // Failed resting reads, due again.

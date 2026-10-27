@@ -183,4 +183,43 @@ struct RoomFocusTests {
         let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift"), encoding: .utf8)
         #expect(ios.contains("shown = shown.filter { MobileRooms.isLive($0, controller) && zoomMoving != $0.id }"))
     }
+
+    /// Finding (CWE-670): "A room page that gains a session is not marked
+    /// read". A fifth session turns the auto 2×2 into 3×2: same page index,
+    /// one more chat on it -- the owner is told.
+    @Test("a session that joins the page on show (auto layout growing) is reported once")
+    func pageGainsASession() async throws {
+        let store = AgentRoomStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-\(UUID().uuidString).json"))
+        let room = store.create(name: "R")
+        let ws = UUID()
+        var all: [AgentSession] = []
+        for i in 0..<5 {
+            var m = AgentSession(profileID: ws, tool: .claude, title: "m\(i)"); m.roomID = room.id
+            m.createdAt = Date(timeIntervalSince1970: 1_000 + Double(i))
+            all.append(m)
+        }
+        let backend = FakeRoomBackend(store: store)
+        backend.transcript = Self.reply
+        backend.roomSessions = Array(all.prefix(4))
+        let c = RoomStageController(roomID: room.id, backend: backend, listModel: SessionListModel())
+        for m in all { c.loadResting(m) }
+        try await Self.until { all.allSatisfy { c.resting[$0.id]?.isEmpty == false } }
+        c.refresh()
+        #expect(c.layout.size == 4 && c.page == 0 && c.onScreenIDs.count == 4)
+        var told = 0
+        c.onShownChanged = { told += 1 }
+        backend.roomSessions = all
+        c.refresh()
+        #expect(c.layout.size >= 5 && c.page == 0)
+        #expect(c.onScreenIDs.contains(all[4].id) && told == 1)
+        c.refresh()
+        #expect(told == 1)                                // nothing new: no call
+        c.stop()
+
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/RoomStage.swift"), encoding: .utf8)
+        #expect(src.contains("noteShown()   // same page, different cells"))
+        #expect(src.contains("UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))\n            noteShown()"))
+    }
 }

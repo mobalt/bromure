@@ -168,8 +168,8 @@ struct SessionUnreadTests {
         #expect(body.contains("?.agentStatus == .working {"))
         // A room's chats on screen are read: on show, and per page or zoom.
         let room = try src("Sources/AgentCoding/RoomStage.swift")
-        #expect(room.contains("var page = 0 { didSet { if page != oldValue { onShownChanged?() } } }"))
-        #expect(room.contains("var zoomedID: UUID? { didSet { if zoomedID != oldValue { onShownChanged?() } } }"))
+        #expect(room.contains("var page = 0 { didSet { if page != oldValue { shownChanged() } } }"))
+        #expect(room.contains("var zoomedID: UUID? { didSet { if zoomedID != oldValue { shownChanged() } } }"))
         let host = try src("Sources/AgentCoding/UnifiedSessionWindow.swift")
         #expect(host.components(separatedBy: "delegate.markSessionRead(id)").count == 3)   // both select paths
         #expect(host.contains("for id in sessionsOnStage { acDelegate?.markSessionRead(id) }"))   // becomeKey
