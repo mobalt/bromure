@@ -92,7 +92,8 @@ struct LoopbackForwarderReuseTests {
                       "http://[0:0:0:0:0:0:0:1]:1455/cb", "http://[::ffff:127.0.0.1]:1455/cb",
                       "http://127.1:1455/cb", "http://2130706433:1455/cb", "http://0x7f000001:1455/cb",
                       "http://127.0.0.2:1455/cb", "http://0.0.0.0:1455/cb", "http://[::]:1455/cb",
-                      "http://LOCALHOST.:1455/cb", "http://app.localhost:1455/cb"])
+                      "http://LOCALHOST.:1455/cb", "http://app.localhost:1455/cb",
+                      "http://[::1%25lo0]:1455/cb"])
     @MainActor
     func loopbackRedirects(redirect: String) throws {
         var c = URLComponents(string: "https://auth.openai.com/oauth/authorize")!
@@ -110,5 +111,20 @@ struct LoopbackForwarderReuseTests {
         c.queryItems = [URLQueryItem(name: "redirect_uri", value: redirect)]
         #expect(ACAppDelegate.loopbackCallbackPort(from: try #require(c.url)) == nil, "\(redirect)")
         #expect(ACAppDelegate.loopbackCallbackPort(from: URL(string: "https://auth.openai.com/oauth/authorize")!) == nil)
+    }
+
+    /// The same narrow parsing guarded the guest-URL open itself: a direct
+    /// `http://0x7f000001:…` (no redirect) is this Mac's loopback too.
+    @Test("a guest URL to loopback in any spelling never opens in the real browser",
+          arguments: ["http://0x7f000001:8080/", "http://127.1:8080/", "http://2130706433/", "http://[::1%25lo0]:8080/",
+                      "http://[::ffff:127.0.0.1]/", "http://0.0.0.0:8080/", "http://10.1/"])
+    func directLoopbackOpenRefused(url: String) throws {
+        #expect(!ACAppDelegate.opensInRealBrowser(try #require(URL(string: url))), "\(url)")
+    }
+
+    @Test("a public page still opens")
+    func publicOpens() throws {
+        #expect(ACAppDelegate.opensInRealBrowser(try #require(URL(string: "https://auth.openai.com/oauth/authorize?x=1"))))
+        #expect(ACAppDelegate.opensInRealBrowser(try #require(URL(string: "https://8.8.8.8/"))))
     }
 }

@@ -3503,6 +3503,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return UInt16(port)
     }
 
+    /// A URL host as an address parser wants it: lowercased, without IPv6
+    /// brackets, an IPv6 zone (`%lo0`, `%25lo0`) or a trailing dot.
+    nonisolated static func bareHost(_ rawHost: String) -> String {
+        var host = rawHost.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if host.contains(":"), let pct = host.firstIndex(of: "%") { host = String(host[..<pct]) }
+        if host.hasSuffix(".") { host.removeLast() }
+        return host
+    }
+
     /// Whether a browser handed this URL host connects to this Mac's
     /// loopback: `localhost` and `*.localhost` (browsers resolve those
     /// themselves), any IPv4 spelling of 127/8 or 0.0.0.0 (`127.1`,
@@ -3510,9 +3520,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// IPv6 `::1`, `::` and the v4-mapped loopback (`::ffff:127.0.0.1`),
     /// bracketed or not, with or without a trailing dot.
     nonisolated static func reachesLoopback(_ rawHost: String) -> Bool {
-        var host = rawHost.lowercased()
-        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
-        if host.hasSuffix(".") { host.removeLast() }
+        let host = bareHost(rawHost)
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
         // IPv4, every form a URL parser accepts (inet_aton's: shorthand,
         // octal, hex, a single number).
@@ -3562,16 +3570,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `localhost` name). A plain public DNS name returns false. Pure — no
     /// actor state — so callers on any executor (and tests) can use it.
     nonisolated static func hostIsLocalOrPrivate(_ rawHost: String) -> Bool {
-        var host = rawHost.lowercased()
-        if host.hasPrefix("["), host.hasSuffix("]") {
-            host = String(host.dropFirst().dropLast())   // IPv6 literal brackets
-        }
+        // Every loopback spelling first (`127.1`, `0x7f000001`, `[::1%lo0]`
+        // -- inet_pton below takes none of them, and a browser goes there).
+        if reachesLoopback(rawHost) { return true }
+        let host = bareHost(rawHost)
         // Named loopback / mDNS.
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
         if host == "local" || host.hasSuffix(".local") { return true }
-        // IPv4 literal.
+        // IPv4 literal, in any spelling a URL parser accepts (inet_aton's).
         var v4 = in_addr()
-        if inet_pton(AF_INET, host, &v4) == 1 {
+        if !host.contains(":"), inet_aton(host, &v4) != 0 {
             let o = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
             switch (o[0], o[1]) {
             case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
