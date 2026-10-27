@@ -38,19 +38,20 @@ struct AttestorDeletedSuffixTests {
     @Test("a live file named '<x> (deleted)' keeps its name; an unlinked image loses the annotation")
     func liveVersusUnlinked() throws {
         let out = try Self.python("""
+            fixed = lambda text: (lambda: text)
             live = os.path.join(d, "curl (deleted)")
             open(live, "w").write("forged")
             real = os.path.join(d, "curl")
             open(real, "w").write("real")
             gone = os.path.join(d, "old")
             open(gone, "w").write("old"); gone_st = os.stat(gone); os.unlink(gone)
-            print(a.reported_path(live, os.stat(live)))                     # live: kept
-            print(a.reported_path(gone + " (deleted)", gone_st))            # unlinked: cut
-            print(a.reported_path(live, os.stat(real)))                     # raw is another file: cut
-            print(a.reported_path(real, os.stat(real)))                     # no suffix: as is
+            print(a.reported_path(fixed(live), os.stat(live)))                # live: kept
+            print(a.reported_path(fixed(gone + " (deleted)"), gone_st))       # unlinked: cut
+            print(a.reported_path(fixed(live), os.stat(real)))                # raw is another file: cut
+            print(a.reported_path(fixed(real), os.stat(real)))                # no suffix: as is
             nested = os.path.join(d, "x (deleted)")
             open(nested, "w").write("n"); n_st = os.stat(nested); os.unlink(nested)
-            print(a.reported_path(nested + " (deleted)", n_st))             # unlinked real name: one cut
+            print(a.reported_path(fixed(nested + " (deleted)"), n_st))        # unlinked real name: one cut
             """)
         let lines = out.split(separator: "\n").map(String.init)
         #expect(lines.count == 5)
@@ -61,13 +62,41 @@ struct AttestorDeletedSuffixTests {
         #expect(lines[4].hasSuffix("/x (deleted)"))
     }
 
+    @Test("a live '<x> (deleted)' unlinked between the read and the stat is still not '<x>'")
+    func unlinkRace() throws {
+        let out = try Self.python("""
+            live = os.path.join(d, "curl (deleted)")
+            open(live, "w").write("forged")
+            st = os.stat(live)
+            # The kernel's view: the name, plus " (deleted)" once it's unlinked.
+            link = lambda: live if os.path.exists(live) else live + " (deleted)"
+            raced = []
+            def stat(p):
+                if not raced:
+                    raced.append(1); os.unlink(live)       # the workload's unlink lands here
+                return os.stat(p)
+            print(a.reported_path(link, st, stat))
+            # A link that never holds still: no answer at all.
+            n = iter(range(100))
+            try:
+                a.reported_path(lambda: live + str(next(n)), st)
+                print("answered")
+            except OSError:
+                print("refused")
+            """)
+        let lines = out.split(separator: "\n").map(String.init)
+        #expect(lines.count == 2)
+        #expect(lines.first?.hasSuffix("/curl (deleted)") == true)
+        #expect(lines.last == "refused")
+    }
+
     @Test("exe_identity decides from the open exe's own inode")
     func wiring() throws {
         let src = try String(contentsOf: Self.script, encoding: .utf8)
         let fn = try #require(src.range(of: "def exe_identity(pid):"))
-        let read = try #require(src[fn.upperBound...].range(of: "raw = os.readlink(\"/proc/%d/exe\" % pid)"))
+        let read = try #require(src[fn.upperBound...].range(of: "link = \"/proc/%d/exe\" % pid"))
         let code = src[read.upperBound...].prefix(300)
-        #expect(code.contains("path = reported_path(raw, st)"))
+        #expect(code.contains("path = reported_path(lambda: os.readlink(link), st)"))
         #expect(!code.contains("[: -len(_DELETED)]"))
     }
 }

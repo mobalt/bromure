@@ -155,8 +155,8 @@ def pids_for_inode(inode):
 _DELETED = " (deleted)"
 
 
-def reported_path(raw, exe_st, stat=os.stat):
-    """The path to report for an exe link that reads `raw`.
+def reported_path(read, exe_st, stat=os.stat):
+    """The path to report for an exe link; `read()` reads the link afresh.
 
     The kernel's " (deleted)" is only an annotation when nothing lives at the
     raw text: a LIVE file the workload named `curl (deleted)` reads exactly
@@ -167,16 +167,27 @@ def reported_path(raw, exe_st, stat=os.stat):
     path"). So: when the raw path is the running image itself (same device
     and inode as the open exe), the name really ends that way and is kept;
     missing, or some other file, it's the annotation and is cut.
+
+    The answer stands only if the link still reads the same afterwards:
+    unlinking (or renaming) that live `curl (deleted)` between the read and
+    the stat would make it look missing, but the kernel then reads
+    `curl (deleted) (deleted)` -- a changed link, so it is looked at again.
+    Never steady: OSError, and the host fails closed.
     """
-    if not raw.endswith(_DELETED):
-        return raw
-    try:
-        here = stat(raw)
-    except OSError:
-        return raw[: -len(_DELETED)]
-    if (here.st_dev, here.st_ino) == (exe_st.st_dev, exe_st.st_ino):
-        return raw
-    return raw[: -len(_DELETED)]
+    for _ in range(4):
+        raw = read()
+        path = raw
+        if raw.endswith(_DELETED):
+            try:
+                here = stat(raw)
+                live = (here.st_dev, here.st_ino) == (exe_st.st_dev, exe_st.st_ino)
+            except OSError:
+                live = False
+            if not live:
+                path = raw[: -len(_DELETED)]
+        if read() == raw:
+            return path
+    raise OSError("exe link kept changing")
 
 
 def exe_identity(pid):
@@ -210,10 +221,10 @@ def exe_identity(pid):
     refused as changed -- which is what TOFU is for, but it means an in-place
     upgrade needs the old processes gone before the new one is attested.
     """
-    raw = os.readlink("/proc/%d/exe" % pid)
-    with open("/proc/%d/exe" % pid, "rb") as f:
+    link = "/proc/%d/exe" % pid
+    with open(link, "rb") as f:
         st = os.fstat(f.fileno())
-        path = reported_path(raw, st)
+        path = reported_path(lambda: os.readlink(link), st)
         key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
         digest = _hash_cache.get(key)
         if digest is None:
