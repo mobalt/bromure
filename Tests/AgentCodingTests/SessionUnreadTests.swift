@@ -162,7 +162,8 @@ struct SessionUnreadTests {
         #expect(ac[refresh.upperBound...].prefix(900).contains("markSessionRead(id)"))
         // ...shown read here at once, forwarded to the machine that counts.
         let mark = try #require(ac.range(of: "func markSessionRead(_ id: UUID, upTo: Int? = nil) {"))
-        #expect(ac[mark.upperBound...].prefix(500).contains("m.markRead(id, upTo: min(upTo ?? n, n))"))
+        let machineBranch = ac[mark.upperBound...].prefix(600)
+        #expect(machineBranch.contains("m.markRead(id, upTo: min(upTo ?? n, n))\n            homeSessionStore.applyMirror(allSessionRecords)"))
         // A dialog counts only inside a turn (hooks still working).
         let pane = try src("Sources/AgentCoding/SessionPane.swift")
         let dialog = try #require(pane.range(of: "m.dialogPromptChanged = {"))

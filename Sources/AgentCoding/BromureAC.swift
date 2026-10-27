@@ -2644,6 +2644,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // read sent there (what this screen showed; nothing to read: none).
             guard let s = m.sessionStore.session(id), s.isUnread, let n = s.replies else { return }
             m.markRead(id, upTo: min(upTo ?? n, n))
+            homeSessionStore.applyMirror(allSessionRecords)   // the sidebar's copy, now
             return
         }
         if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
