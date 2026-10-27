@@ -5986,17 +5986,19 @@ final class RemoteHostWindow: NSWindow {
         rc.onResumeAll = { ids in for sid in ids { c.sessionCommand(sid, "resume") } }
         rc.onEndAll = { ids in for sid in ids { c.sessionCommand(sid, "close") } }
         roomController = rc
-        setSessionHeader(visible: false)
-        showSessionOverlay(RoomStageView(controller: rc))
-        // The chats on show are read, and so is each page or zoom shown next
-        // -- a turn later, once the view has said what its dock and 1×1 tab
-        // show (it calls this on appear).
+        // As the host's showRoom: wired before the view goes in, marked at
+        // once, and called once after the room opens (CWE-670, "Opening a
+        // room in the focused window never marks the chats on screen").
         rc.onShownChanged = { [weak self, weak rc] in
+            guard let ids = rc?.onScreenIDs, !ids.isEmpty else { return }
             DispatchQueue.main.async {
-                guard let self, let rc, self.isKeyWindow, NSApp.isActive else { return }
-                for sid in rc.onScreenIDs { c.markRead(sid) }
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in ids { c.markRead(sid) }
             }
         }
+        setSessionHeader(visible: false)
+        showSessionOverlay(RoomStageView(controller: rc))
+        rc.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).

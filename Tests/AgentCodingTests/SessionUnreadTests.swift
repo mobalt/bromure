@@ -178,11 +178,9 @@ struct SessionUnreadTests {
         #expect(host.components(separatedBy: "delegate.markSessionRead(id)").count == 3)   // both select paths
         #expect(host.contains("for id in sessionsOnStage { acDelegate?.markSessionRead(id) }"))   // becomeKey
         #expect(host.contains("if let rc = roomController { return rc.onScreenIDs }"))
-        #expect(host.contains("controller.onShownChanged = { [weak self, weak controller] in\n            DispatchQueue.main.async {"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.components(separatedBy: "controller.markRead(id)").count >= 4)           // selects + becomeKey
         #expect(fc.contains("controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }"))
-        #expect(fc.contains("rc.onShownChanged = { [weak self, weak rc] in\n            DispatchQueue.main.async {"))
         let ios = try src("ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift")
         #expect(ios.contains(".onChange(of: session?.replies) { _, _ in markRead() }"))
         #expect(ios.contains("if scenePhase == .active { controller.markRead(sessionID) }"))
@@ -277,5 +275,31 @@ struct SessionUnreadTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
         #expect(ac.contains("guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }"))
+    }
+
+    /// Finding (CWE-670): "Opening a room in the focused window never marks
+    /// the chats on screen". The view's appear fired during the overlay's
+    /// layout, before showRoom wired the callback; a window already key got
+    /// no becomeKey. Wire first, mark at once, call once after opening.
+    @Test("a room marks what it opens on: wired before the view, called after, marked at once")
+    func roomOpensMarked() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        for (file, cb, view) in [("Sources/AgentCoding/UnifiedSessionWindow.swift", "controller.onShownChanged",
+                                  "showSessionOverlay(RoomStageView(controller: controller))"),
+                                 ("Sources/AgentCoding/FatClientController.swift", "rc.onShownChanged",
+                                  "showSessionOverlay(RoomStageView(controller: rc))")] {
+            let text = try src(file)
+            let wire = try #require(text.range(of: cb + " = { [weak self"), "\(file)")
+            let show = try #require(text.range(of: view), "\(file)")
+            let call = try #require(text[show.upperBound...].range(of: cb + "?()"), "\(file)")
+            #expect(wire.lowerBound < show.lowerBound, "\(file): wired after the view went in")
+            #expect(text[show.upperBound..<call.lowerBound].count < 80, "\(file): not called right after opening")
+            // The set is captured when it changes (not re-read a turn later).
+            let body = text[wire.upperBound..<show.lowerBound]
+            let capture = try #require(body.range(of: "?.onScreenIDs, !ids.isEmpty else { return }"), "\(file)")
+            let hop = try #require(body.range(of: "DispatchQueue.main.async"), "\(file)")
+            #expect(capture.lowerBound < hop.lowerBound, "\(file): the set is read after the hop")
+        }
     }
 }

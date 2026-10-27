@@ -2808,18 +2808,29 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self?.roomController?.refresh()
         }
         roomController = controller
+        // The chats on show are read, and so is each page, zoom, dock or tab
+        // shown next. Wired BEFORE the view goes in (its appear and initial
+        // onChange fire during showSessionOverlay's layout), marked at once
+        // with the set that changed, and called once after the room opens:
+        // the controller already knows what the stage opens on. A window
+        // that isn't key reads them when it becomes key (`becomeKey`) --
+        // opening a room in the window already focused got no becomeKey and
+        // the assign-after-show missed the appear, so nothing was read
+        // (Finding CWE-670, "Opening a room in the focused window never
+        // marks the chats on screen").
+        // The set is taken now, the store written a turn later: this runs
+        // inside the view's onAppear/onChange too, mid view update.
+        controller.onShownChanged = { [weak self, weak controller] in
+            guard let ids = controller?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }   // else becomeKey reads them
+                for sid in ids { delegate.markSessionRead(sid) }
+            }
+        }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))
         makeKeyAndOrderFront(nil)
-        // The chats on show are read, and so is each page or zoom shown next
-        // -- a turn later, once the view has said what its dock and 1×1 tab
-        // show (it calls this on appear).
-        controller.onShownChanged = { [weak self, weak controller] in
-            DispatchQueue.main.async {
-                guard let self, let controller, self.isKeyWindow, NSApp.isActive else { return }
-                for sid in controller.onScreenIDs { delegate.markSessionRead(sid) }
-            }
-        }
+        controller.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).
