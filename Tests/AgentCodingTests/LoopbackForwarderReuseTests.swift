@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import bromure_ac
 
 /// A sign-in's loopback forwarder holds its host port until its relay closes
 /// (or, abandoned, for its whole lifetime). A second sign-in on that port --
@@ -17,17 +18,35 @@ struct LoopbackForwarderReuseTests {
         let fwd = try Self.src("Sources/AgentCoding/LoopbackCallbackForwarder.swift")
         let forPort = try #require(fwd.range(of: "static func forPort("))
         let body = fwd[forPort.upperBound...].prefix(900)
-        let retarget = try #require(body.range(of: "live.retarget(socketDevice: socketDevice, browserResponse: browserResponse)"))
+        let owner = try #require(body.range(of: "guard owns(live.socketDevice, socketDevice) else {"))
+        let retarget = try #require(body.range(of: "live.retarget(browserResponse: browserResponse)"))
+        #expect(owner.lowerBound < retarget.lowerBound)
         let bind = try #require(body.range(of: "LoopbackCallbackForwarder(port: port"))
         #expect(retarget.lowerBound < bind.lowerBound)
         #expect(fwd.contains("if gen == generation { stop() }"))
         #expect(fwd.contains("let gen = generation, response = browserResponseOverride"))
         #expect(!fwd.contains("self?.relayFinished()"))
+        // The workspace is fixed for the listener's life: retarget can't move it.
+        #expect(!fwd.contains("self.socketDevice = socketDevice\n        browserResponseOverride"))
+        #expect(!fwd.contains("func retarget(socketDevice"))
+        #expect(fwd.components(separatedBy: "self.socketDevice = ").count == 2)   // init only
         for file in ["Sources/AgentCoding/BromureAC.swift", "Sources/AgentCoding/ClaudeRegistrationCoordinator.swift"] {
             let s = try Self.src(file)
             #expect(!s.contains("LoopbackCallbackForwarder(port"), "\(file) binds its own forwarder")
             #expect(!s.contains("LoopbackCallbackForwarder(\n"), "\(file) binds its own forwarder")
             #expect(s.contains("LoopbackCallbackForwarder.forPort("))
         }
+    }
+
+    /// Finding (CWE-441): "A guest URL retargets another workspace's OAuth
+    /// loopback forwarder". Any guest names a loopback port in a URL it opens;
+    /// `forPort` handed it the live listener another workspace's sign-in was
+    /// waiting on. Only the owning VM's own device may reuse it.
+    @Test("only the workspace a listener relays into may reuse it")
+    func ownership() {
+        let a = NSObject(), b = NSObject()
+        #expect(LoopbackCallbackForwarder.owns(a, a))
+        #expect(!LoopbackCallbackForwarder.owns(a, b))          // another workspace
+        #expect(!LoopbackCallbackForwarder.owns(nil, b))        // its workspace is gone: not adopted
     }
 }

@@ -26,6 +26,9 @@ final class LoopbackCallbackForwarder {
     private static let lifetimeSeconds = 180.0
 
     let port: UInt16
+    /// The workspace this listener relays into -- fixed for its life: only
+    /// that workspace may reuse it (`forPort`), and every connection it
+    /// accepts goes there.
     private weak var socketDevice: VZVirtioSocketDevice?
     /// One listener per loopback family (IPv4 127.0.0.1 + IPv6 ::1). Browsers
     /// resolve `localhost` to `::1` first on macOS, so an IPv4-only listener
@@ -108,28 +111,44 @@ final class LoopbackCallbackForwarder {
         if gen == generation { stop() }
     }
 
-    /// Hand this listener to a new sign-in on the same port: its workspace,
-    /// its browser page, a fresh lifetime. A forwarder from a sign-in that
-    /// hasn't let go yet (an abandoned one holds the port for
-    /// `lifetimeSeconds`; a finished one until its relay closes) made the
-    /// new one's bind fail -- and a fixed-port CLI (Codex's 1455) then had
-    /// its callback relayed into the OLD workspace. Rebinding can't be done
-    /// in place: the old listen fds close asynchronously, on main.
-    func retarget(socketDevice: VZVirtioSocketDevice, browserResponse: String?) {
-        self.socketDevice = socketDevice
+    /// Hand this listener to the same workspace's next sign-in on the port
+    /// (a retried login): its browser page, a fresh lifetime. A forwarder
+    /// that hasn't let go yet (an abandoned sign-in holds the port for
+    /// `lifetimeSeconds`, a finished one until its relay closes) made the
+    /// retry's bind fail. Rebinding can't be done in place: the old listen
+    /// fds close asynchronously, on main. Never another workspace's: see
+    /// `forPort`.
+    func retarget(browserResponse: String?) {
         browserResponseOverride = browserResponse.map { Array($0.utf8) }
         generation += 1
         armExpiry()
     }
 
-    /// The one forwarder for `port` in `forwarders`: a running one is
-    /// retargeted, else a new one is bound and added. Nil when the port
-    /// can't be bound (another program holds it).
+    /// Whether `caller` is the workspace a listener relays into (`owner`):
+    /// identity, not equality -- one VM's socket device.
+    nonisolated static func owns(_ owner: AnyObject?, _ caller: AnyObject) -> Bool {
+        owner.map { $0 === caller } ?? false
+    }
+
+    /// The one forwarder for `port` in `forwarders`: the same workspace's live
+    /// one is reused, else a new one is bound and added. Nil when the port
+    /// can't be bound -- another program holds it, or ANOTHER workspace's
+    /// sign-in does. Any guest can name a loopback port in a URL it opens
+    /// (Codex always uses 1455), and handing it a live listener sent the
+    /// browser's OAuth redirect -- the code another workspace's sign-in was
+    /// waiting for -- into that guest, and re-armed the port's lifetime for
+    /// it (Finding CWE-441, "A guest URL retargets another workspace's OAuth
+    /// loopback forwarder"). That sign-in keeps the port, its page and its
+    /// expiry; the other one's callback can't be relayed until it ends.
     static func forPort(_ port: UInt16, socketDevice: VZVirtioSocketDevice, browserResponse: String? = nil,
                         in forwarders: inout [LoopbackCallbackForwarder]) -> LoopbackCallbackForwarder? {
         forwarders.removeAll { !$0.isRunning }
         if let live = forwarders.first(where: { $0.port == port }) {
-            live.retarget(socketDevice: socketDevice, browserResponse: browserResponse)
+            guard owns(live.socketDevice, socketDevice) else {
+                log("127.0.0.1:\(port) is another workspace's sign-in: not handed over")
+                return nil
+            }
+            live.retarget(browserResponse: browserResponse)
             return live
         }
         guard let fwd = LoopbackCallbackForwarder(port: port, socketDevice: socketDevice,
@@ -240,7 +259,10 @@ final class LoopbackCallbackForwarder {
             // capturing it in this @Sendable background closure: VZ types
             // aren't Sendable, and VZ calls must happen on the main thread
             // anyway. `self` is @MainActor (so Sendable); the device may have
-            // gone away while we were reading, hence the re-check.
+            // gone away while we were reading, hence the re-check. It is the
+            // one this connection was accepted for: a listener's workspace
+            // never changes (`forPort`), so bytes read for one sign-in can't
+            // be dialed into another guest.
             DispatchQueue.main.async { [weak self] in
                 guard let dev = self?.socketDevice else { Darwin.close(cfd); return }
                 Self.log("browser sent \(n)B on 127.0.0.1:\(target); dialing guest relay (vsock \(Self.relayVsockPort))")
