@@ -2818,9 +2818,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // the assign-after-show missed the appear, so nothing was read
         // (Finding CWE-670, "Opening a room in the focused window never
         // marks the chats on screen").
+        // The set is taken now, the store written a turn later: this runs
+        // inside the view's onAppear/onChange too, mid view update.
         controller.onShownChanged = { [weak self, weak controller] in
-            guard let self, let controller, self.isKeyWindow, NSApp.isActive else { return }
-            for sid in controller.onScreenIDs { delegate.markSessionRead(sid) }
+            guard let ids = controller?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }   // else becomeKey reads them
+                for sid in ids { delegate.markSessionRead(sid) }
+            }
         }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))

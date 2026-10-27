@@ -266,7 +266,11 @@ struct SessionUnreadTests {
             let call = try #require(text[show.upperBound...].range(of: cb + "?()"), "\(file)")
             #expect(wire.lowerBound < show.lowerBound, "\(file): wired after the view went in")
             #expect(text[show.upperBound..<call.lowerBound].count < 80, "\(file): not called right after opening")
-            #expect(!text[wire.upperBound..<show.lowerBound].contains("DispatchQueue.main.async"), "\(file): marks later")
+            // The set is captured when it changes (not re-read a turn later).
+            let body = text[wire.upperBound..<show.lowerBound]
+            let capture = try #require(body.range(of: "?.onScreenIDs, !ids.isEmpty else { return }"), "\(file)")
+            let hop = try #require(body.range(of: "DispatchQueue.main.async"), "\(file)")
+            #expect(capture.lowerBound < hop.lowerBound, "\(file): the set is read after the hop")
         }
     }
 }

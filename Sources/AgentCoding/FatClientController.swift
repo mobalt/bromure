@@ -5990,8 +5990,11 @@ final class RemoteHostWindow: NSWindow {
         // once, and called once after the room opens (CWE-670, "Opening a
         // room in the focused window never marks the chats on screen").
         rc.onShownChanged = { [weak self, weak rc] in
-            guard let self, let rc, self.isKeyWindow, NSApp.isActive else { return }
-            for sid in rc.onScreenIDs { c.markRead(sid) }
+            guard let ids = rc?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in ids { c.markRead(sid) }
+            }
         }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
