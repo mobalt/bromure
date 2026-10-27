@@ -7225,7 +7225,7 @@ final class RemoteHostWindow: NSWindow {
             onShutdown:    { c.shutdownWorkspace(id) },
             onResume:      { c.startWorkspace(id) },
             // A partial document: the host overlays the one field it names.
-            onSaveNotes:   { text in Task { @MainActor in _ = try? await c.saveProfileDoc(id, ["comments": text]) } })
+            onSaveNotes:   { text in (try? await c.saveProfileDoc(id, ["comments": text])) != nil })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window

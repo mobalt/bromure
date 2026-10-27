@@ -2881,6 +2881,11 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ 無法使用 %2$@ 的模型，因此改用它自己的供應商。請選擇其他模型。";
 "%d sessions whose machine or folder is gone" = "%d 個工作階段的機器或檔案夾已不存在";
 "(empty)" = "（空白）";
+/* VM dashboard: workspace notes */
+"Notes" = "備註";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return 儲存 · Shift-Return 換行 · Esc 取消";
+"Save the notes (Return)" = "儲存備註（Return）";
+"Edit the notes as markdown" = "以 Markdown 編輯備註";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";

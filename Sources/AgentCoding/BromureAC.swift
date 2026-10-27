@@ -2196,18 +2196,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The workspace's notes (markdown), saved: the dashboard's in-place
     /// editor. Nothing in the guest changes.
-    func setNotes(_ id: Profile.ID, _ text: String) {
-        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    func setNotes(_ id: Profile.ID, _ text: String) -> Bool {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
         var p = profiles[i]
-        guard p.comments != text else { return }
+        guard p.comments != text else { return true }
         p.comments = text
         do { try store.update(p) } catch {
             NSLog("[bromure-ac] notes: couldn't save profile: \(error)")
-            return
+            return false
         }
         profiles[i] = p
         runningSessions[id]?.profile.comments = text
         refreshSidebar()   // the row's tooltip carries the notes
+        return true
     }
 
     @discardableResult

@@ -3219,7 +3219,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
             onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() },
-            onSaveNotes:   { [weak self] text in self?.acDelegate?.setNotes(id, text) },
+            onSaveNotes:   { [weak self] text in self?.acDelegate?.setNotes(id, text) ?? false },
             startsEditingNotes: editingNotes)
         let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -3238,8 +3238,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// refresh): the dashboard shows the new copy — notes, name, color —
     /// without being rebuilt, so its vitals history keeps.
     func refreshVMDashboard() {
+        // The saved copy, never the pane's: a pane keeps the profile it
+        // booted with, and would turn a running workspace's dashboard back
+        // to its notes from before the save.
         guard let id = vmDashboardSelectedID, let host = vmDashboardHosting,
-              let profile = pane(id)?.profile ?? acDelegate?.profile(for: id) else { return }
+              let profile = acDelegate?.profile(for: id) else { return }
         var view = host.rootView
         guard view.profile != profile else { return }
         view.profile = profile

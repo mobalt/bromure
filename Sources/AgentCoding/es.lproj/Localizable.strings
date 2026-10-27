@@ -2880,6 +2880,11 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ no puede usar modelos de %2$@, así que usa su propio proveedor. Elige otro modelo.";
 "%d sessions whose machine or folder is gone" = "%d sesiones cuya máquina o carpeta ya no existe";
 "(empty)" = "(vacío)";
+/* VM dashboard: workspace notes */
+"Notes" = "Notas";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Retorno guarda · Mayús-Retorno añade una línea · Esc cancela";
+"Save the notes (Return)" = "Guardar las notas (Retorno)";
+"Edit the notes as markdown" = "Editar las notas en markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";

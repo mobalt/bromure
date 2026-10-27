@@ -28,8 +28,9 @@ struct VMDashboardView: View {
     let onShutdown: () -> Void
     /// Start (off) / Resume (suspended).
     let onResume: () -> Void
-    /// Save the notes edited in place (markdown); nil hides "Edit".
-    var onSaveNotes: ((String) -> Void)? = nil
+    /// Save the notes edited in place (markdown); false when the save
+    /// failed. nil hides "Edit".
+    var onSaveNotes: (@MainActor (String) async -> Bool)? = nil
     /// Open with the notes already in their editor (the `vm-notes:` shot).
     var startsEditingNotes = false
 
@@ -283,9 +284,14 @@ struct VMDashboardView: View {
         guard var text = notesDraft else { return }
         notesDraft = nil
         while text.last?.isWhitespace == true { text.removeLast() }
-        guard text != notesText else { return }
+        guard text != notesText, let save = onSaveNotes else { return }
         notesSaved = text
-        onSaveNotes?(text)
+        Task { @MainActor in
+            // A failed save shows the notes as they are, and the edit again.
+            guard !(await save(text)), notesSaved == text else { return }
+            notesSaved = nil
+            if notesDraft == nil { notesDraft = text }
+        }
     }
 
     private var notesCard: some View {
