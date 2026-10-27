@@ -155,6 +155,30 @@ def pids_for_inode(inode):
 _DELETED = " (deleted)"
 
 
+def reported_path(raw, exe_st, stat=os.stat):
+    """The path to report for an exe link that reads `raw`.
+
+    The kernel's " (deleted)" is only an annotation when nothing lives at the
+    raw text: a LIVE file the workload named `curl (deleted)` reads exactly
+    the same, and stripping it reported the sibling `curl` -- a path the
+    guest user picks, in any directory it can write, matched by `binaries:`
+    and pinned to the forged image's digest on first use (Finding CWE-807,
+    "Attestor strips a real ' (deleted)' filename into an allowlisted binary
+    path"). So: when the raw path is the running image itself (same device
+    and inode as the open exe), the name really ends that way and is kept;
+    missing, or some other file, it's the annotation and is cut.
+    """
+    if not raw.endswith(_DELETED):
+        return raw
+    try:
+        here = stat(raw)
+    except OSError:
+        return raw[: -len(_DELETED)]
+    if (here.st_dev, here.st_ino) == (exe_st.st_dev, exe_st.st_ino):
+        return raw
+    return raw[: -len(_DELETED)]
+
+
 def exe_identity(pid):
     """(real path, sha256) of a process's executable, hashing the live object.
 
@@ -178,18 +202,18 @@ def exe_identity(pid):
     swapped after launch. Measured: a 291 MB deleted claude.exe hashes fine
     through its own /proc link.
 
-    The path is reported without the kernel's " (deleted)" decoration, because
+    The path is reported without the kernel's " (deleted)" decoration (and
+    only that: see `reported_path`, a real name can end the same way), because
     the path is the identity the policy matches on. The consequence, which is
     the host's to weigh: that path gets pinned (trust-on-first-use) to the
     OLD image's digest, so a new binary later appearing at the same path is
     refused as changed -- which is what TOFU is for, but it means an in-place
     upgrade needs the old processes gone before the new one is attested.
     """
-    path = os.readlink("/proc/%d/exe" % pid)
-    if path.endswith(_DELETED):
-        path = path[: -len(_DELETED)]
+    raw = os.readlink("/proc/%d/exe" % pid)
     with open("/proc/%d/exe" % pid, "rb") as f:
         st = os.fstat(f.fileno())
+        path = reported_path(raw, st)
         key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
         digest = _hash_cache.get(key)
         if digest is None:
