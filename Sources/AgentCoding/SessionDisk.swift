@@ -152,9 +152,18 @@ public final class SessionDisk {
     /// later is an online truncate + resize2fs, shrinking is not supported.
     /// Override: defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
     public static func resolvedHomeImageGB() -> Int {
-        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? 64
+        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? defaultHomeImageGB
         return min(1024, max(8, raw))
     }
+
+    /// A new workspace's home, GiB, unless `vm.homeImageGB` says otherwise.
+    public static let defaultHomeImageGB = 16
+    /// A legacy (virtiofs) home is copied into a fresh image on its next
+    /// boot, and that home can hold far more than a new one starts with: a
+    /// workspace with no size of its own migrates into the size the image
+    /// default had before it dropped to 16 GB (a copy that doesn't fit fails
+    /// and retries every boot).
+    public static let migrationHomeImageGB = 64
 
     /// Create the sparse home image if missing. ftruncate on APFS makes an
     /// all-holes file — apparent size fixed, allocated size ~0. The guest
@@ -174,9 +183,12 @@ public final class SessionDisk {
     }
 
     /// The home image's guest-visible size: the workspace's own setting,
-    /// else the app-wide default.
+    /// else the app-wide default (at least `migrationHomeImageGB` for a
+    /// legacy home's migration).
     public var homeImageTargetBytes: UInt64 {
-        let gb = profile.homeImageGB.map { min(1024, max(8, $0)) } ?? Self.resolvedHomeImageGB()
+        let gb = profile.homeImageGB.map { min(1024, max(8, $0)) }
+            ?? (migrateHomeThisBoot ? max(Self.migrationHomeImageGB, Self.resolvedHomeImageGB())
+                                    : Self.resolvedHomeImageGB())
         return UInt64(gb) * 1024 * 1024 * 1024
     }
 
