@@ -6869,6 +6869,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// All workspaces (running or not) as sidebar rows — the exact shape
     /// `refreshSidebar()` builds `ProfileRow` from, so a fat client renders the
     /// source list 1:1.
+    /// home.img's size, or NSNull when there is none (the row says so, rather
+    /// than leaving the key out like a server too old to report it).
+    nonisolated static func homeImageBytes(_ url: URL) -> Any {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? NSNull()
+    }
+
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
@@ -6894,6 +6900,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,
                 "diskCapacityBytes": dash.diskCapacity,
+                // A fat client's editor remeasures when this moves (a wipe,
+                // reset or rollback leaves the run state as it was).
+                "homeImageBytes": Self.homeImageBytes(store.homeImageURL(for: p)),
                 // Which credentials it holds (never the values): a fat client's
                 // automation and code-review editors gate on them, and its
                 // mirrored profile carries no credentials at all.

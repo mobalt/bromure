@@ -220,8 +220,32 @@ final class RemoteHostController {
         var cpus = 0
         var diskAllocatedBytes: Int64 = 0
         var diskCapacityBytes: Int64 = 0
+        /// home.img's size on the server (nil: none, or a server that
+        /// doesn't say) -- what an open editor's home-size floor is.
+        var homeImageBytes: Int64? = nil
     }
     private(set) var specs: [Profile.ID: WorkspaceSpec] = [:]
+
+    /// Workspaces whose open editor should measure the server's storage
+    /// again: one booting (its prepare creates the home image), running,
+    /// stopped or back off after a failed boot -- and one whose home.img
+    /// changed with no run-state change at all (a compromise wipe deletes it
+    /// and the row stays off, a reset or a checkpoint rollback rewrites it;
+    /// the server's own notification never reaches this process). Finding
+    /// (CWE-670): "Compromise wipe deletes the home image without updating
+    /// an open editor's size floor".
+    nonisolated static func storageChanged(
+        rows: (was: [SessionListModel.ProfileRow], now: [SessionListModel.ProfileRow]),
+        specs: (was: [Profile.ID: WorkspaceSpec], now: [Profile.ID: WorkspaceSpec])
+    ) -> [Profile.ID] {
+        let was = Dictionary(rows.was.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return rows.now.compactMap { r in
+            guard let old = was[r.id] else { return nil }
+            let moved = old.state != r.state || old.compromised != r.compromised
+                || specs.was[r.id]?.homeImageBytes != specs.now[r.id]?.homeImageBytes
+            return moved ? r.id : nil
+        }
+    }
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
@@ -974,6 +998,7 @@ final class RemoteHostController {
             spec.cpus = w["cpuCount"] as? Int ?? 0
             spec.diskAllocatedBytes = Int64((w["diskAllocatedBytes"] as? Int) ?? 0)
             spec.diskCapacityBytes = Int64((w["diskCapacityBytes"] as? Int) ?? 0)
+            spec.homeImageBytes = (w["homeImageBytes"] as? Int).map(Int64.init)
             newSpecs[id] = spec
 
             var p = Profile(
@@ -1013,17 +1038,11 @@ final class RemoteHostController {
         }
         profilesByID = newProfiles
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
+        let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
-        if listModel.profileRows != rows {
-            // A workspace that is booting (its prepare creates the home
-            // image), running, stopped, or back off after a failed boot: its
-            // open editor measures the server's storage again.
-            let was = Dictionary(listModel.profileRows.map { ($0.id, $0.state) },
-                                 uniquingKeysWith: { a, _ in a })
-            listModel.profileRows = rows
-            for r in rows where was[r.id] != nil && was[r.id] != r.state {
-                NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: r.id)
-            }
+        if listModel.profileRows != rows { listModel.profileRows = rows }
+        for id in storageMoved {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
         }
 
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.

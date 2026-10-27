@@ -82,7 +82,7 @@ struct HomeSizeAfterImageTests {
         #expect(ac[unregister.upperBound...].prefix(500).contains("post(name: .bromureWorkspaceStorageChanged, object: id)"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }"))
-        #expect(fc.contains("post(name: .bromureWorkspaceStorageChanged, object: r.id)"))
+        #expect(fc.contains("post(name: .bromureWorkspaceStorageChanged, object: id)"))
     }
 
     /// Finding (CWE-670): "Home-size floor stays at 8 GB after prepare() has
@@ -129,12 +129,42 @@ struct HomeSizeAfterImageTests {
         #expect(heard == 5)
     }
 
+    /// Finding (CWE-670): "Compromise wipe deletes the home image without
+    /// updating an open editor's size floor". On a fat client a wipe leaves
+    /// the row off (only `compromised` clears), and a reset or rollback
+    /// changes nothing in the row at all: only a run-state change remeasured.
+    @Test("a fat client remeasures when the server's home image or compromised flag changes, not only its run state")
+    func fatClientHomeImageMoves() throws {
+        typealias Row = SessionListModel.ProfileRow
+        let a = UUID(), b = UUID(), c = UUID()
+        func row(_ id: UUID, _ s: SessionListModel.RunState = .off, compromised: Bool = false) -> Row {
+            Row(id: id, name: "w", accentHex: "#888888", state: s, compromised: compromised)
+        }
+        func spec(_ bytes: Int64?) -> RemoteHostController.WorkspaceSpec {
+            var s = RemoteHostController.WorkspaceSpec(); s.homeImageBytes = bytes; return s
+        }
+        let moved = RemoteHostController.storageChanged
+        let g64: Int64 = 64 << 30
+        // Wipe: still off, compromised clears, home.img gone.
+        #expect(moved(([row(a, compromised: true)], [row(a)]), ([a: spec(g64)], [a: spec(nil)])) == [a])
+        // Reset/rollback/grow: the row is identical, only the image moved.
+        #expect(moved(([row(a)], [row(a)]), ([a: spec(g64)], [a: spec(16 << 30)])) == [a])
+        // Only the flag (a server that doesn't report the image).
+        #expect(moved(([row(a, compromised: true)], [row(a)]), ([:], [:])) == [a])
+        // Run state, as before; nothing moved; a new row is no change.
+        #expect(moved(([row(a)], [row(a, .booting)]), ([:], [:])) == [a])
+        #expect(moved(([row(a), row(b)], [row(a), row(b), row(c)]), ([a: spec(g64)], [a: spec(g64)])).isEmpty)
+        // The server reports a missing image as null, not by leaving it out.
+        #expect(ACAppDelegate.homeImageBytes(URL(fileURLWithPath: "/nonexistent/home.img")) is NSNull)
+    }
+
     @Test("a fat client remeasures on every run-state change, booting and a failed boot included; the local field stats the file itself")
     func everyStateChange() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("for r in rows where was[r.id] != nil && was[r.id] != r.state {"))
+        #expect(fc.contains("let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))"))
+        #expect(fc.contains("for id in storageMoved {\n            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)"))
         #expect(try src("Sources/AgentCoding/ProfileViews.swift")
             .contains("guard let u = currentStorage?.profileHomeImageURL ?? currentStorage?.homeImageFile,"))
         #expect(try src("Sources/AgentCoding/BromureAC.swift")
