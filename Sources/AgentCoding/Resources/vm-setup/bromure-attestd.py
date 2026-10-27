@@ -155,39 +155,40 @@ def pids_for_inode(inode):
 _DELETED = " (deleted)"
 
 
-def reported_path(read, exe_st, stat=os.stat):
-    """The path to report for an exe link; `read()` reads the link afresh.
+def reported_path(read, nlink):
+    """The path to report for an exe link; `read()` reads the link,
+    `nlink()` the open exe's link count, each afresh.
 
-    The kernel's " (deleted)" is only an annotation when nothing lives at the
-    raw text: a LIVE file the workload named `curl (deleted)` reads exactly
-    the same, and stripping it reported the sibling `curl` -- a path the
-    guest user picks, in any directory it can write, matched by `binaries:`
-    and pinned to the forged image's digest on first use (Finding CWE-807,
-    "Attestor strips a real ' (deleted)' filename into an allowlisted binary
-    path"). So: when the raw path is the running image itself (same device
-    and inode as the open exe), the name really ends that way and is kept;
-    missing, or some other file, it's the annotation and is cut.
+    The kernel's " (deleted)" is only an annotation when the running image
+    is unlinked: a LIVE file the workload named `curl (deleted)` reads
+    exactly the same, and stripping it reported the sibling `curl` -- a path
+    the guest user picks, in any directory it can write, matched by
+    `binaries:` and pinned to the forged image's digest on first use
+    (Finding CWE-807, "Attestor strips a real ' (deleted)' filename into an
+    allowlisted binary path").
 
-    The answer stands only if the link still reads the same afterwards:
-    unlinking (or renaming) that live `curl (deleted)` between the read and
-    the stat would make it look missing, but the kernel then reads
-    `curl (deleted) (deleted)` -- a changed link, so it is looked at again.
-    Never steady: OSError, and the host fails closed.
+    Whether it is unlinked is asked of the open exe itself, never of the
+    path text: a stat of the name can be fooled by renaming it aside and
+    back around the stat, which the link reads before and after never see
+    (Finding CWE-367, "Attestor strips a live '(deleted)' binary when its
+    name is restored around the stat"). Link count 0 is an unlinked inode
+    -- it can't get a name back (that takes linkat with AT_EMPTY_PATH, i.e.
+    CAP_DAC_READ_SEARCH) -- so the one trailing suffix is the kernel's and
+    is cut. Any other count is a file with a name, kept as read: a binary
+    unlinked here but hard-linked elsewhere keeps its " (deleted)" and
+    matches nothing, which fails closed. The count must be the same on both
+    sides of the read, or the read raced an unlink; never steady: OSError,
+    and the host fails closed.
     """
     for _ in range(4):
+        before = nlink()
         raw = read()
-        path = raw
-        if raw.endswith(_DELETED):
-            try:
-                here = stat(raw)
-                live = (here.st_dev, here.st_ino) == (exe_st.st_dev, exe_st.st_ino)
-            except OSError:
-                live = False
-            if not live:
-                path = raw[: -len(_DELETED)]
-        if read() == raw:
-            return path
-    raise OSError("exe link kept changing")
+        if nlink() != before:
+            continue
+        if before == 0 and raw.endswith(_DELETED):
+            return raw[: -len(_DELETED)]
+        return raw
+    raise OSError("exe link count kept changing")
 
 
 def exe_identity(pid):
@@ -224,7 +225,7 @@ def exe_identity(pid):
     link = "/proc/%d/exe" % pid
     with open(link, "rb") as f:
         st = os.fstat(f.fileno())
-        path = reported_path(lambda: os.readlink(link), st)
+        path = reported_path(lambda: os.readlink(link), lambda: os.fstat(f.fileno()).st_nlink)
         key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
         digest = _hash_cache.get(key)
         if digest is None:
