@@ -327,7 +327,11 @@ struct MobileRoomScreen: View {
     @Environment(\.scenePhase) private var scenePhase
 
     /// The chats on screen: the zoomed one, else the page -- and the
-    /// Switchboard's, while its dock is open (as `dock` shows it).
+    /// Switchboard's, while its dock is open (as `dock` shows it). Only cells
+    /// that show the conversation: an asleep, unstarted or tab-less member's
+    /// cell is a placeholder with no transcript, and reading it cleared the
+    /// mark on every client for replies never shown (Finding CWE-670, "iOS
+    /// room marks asleep sessions read without showing the replies").
     private var onScreen: [AgentSession] {
         var shown: [AgentSession]
         if let z = zoomedID, let s = members.first(where: { $0.id == z }) {
@@ -335,6 +339,7 @@ struct MobileRoomScreen: View {
         } else {
             shown = pages.indices.contains(page) ? pages[page] : []
         }
+        shown = shown.filter { MobileRooms.isLive($0, controller) && zoomMoving != $0.id }
         if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }
         return shown
     }

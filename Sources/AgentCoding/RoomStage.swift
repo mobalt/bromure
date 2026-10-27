@@ -190,6 +190,11 @@ final class RoomStageController {
             let p = pages
             ids = cellsHidden || !p.indices.contains(page) ? [] : p[page].map(\.id)
         }
+        // Only cells that show the conversation: a live chat, or an asleep
+        // member's transcript tail -- not the placeholder an unloaded one
+        // shows (CWE-670, "iOS room marks asleep sessions read without
+        // showing the replies": the same here).
+        ids = ids.filter { models[$0] != nil || !(resting[$0] ?? []).isEmpty }
         if switchboardOnScreen, let sb = switchboard, models[sb.id] != nil { ids.append(sb.id) }
         return ids
     }
