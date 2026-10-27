@@ -4010,7 +4010,7 @@ struct ProfileEditorView: View {
         #if os(macOS)
         SessionDisk.resolvedHomeImageGB()
         #else
-        64
+        16
         #endif
     }
 

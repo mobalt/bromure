@@ -45,7 +45,10 @@ final class LoopbackCallbackForwarder {
     /// registration, where some CLIs' local callback servers close the
     /// connection without a clean response, leaving Safari on "can't open the
     /// page" even though the code was delivered and login succeeded.
-    private let browserResponseOverride: [UInt8]?
+    private var browserResponseOverride: [UInt8]?
+    /// Bumped by `retarget`: a relay accepted for an earlier sign-in ends
+    /// without taking the listener down from under the current one.
+    private var generation = 0
 
     /// Returns nil if the host loopback port can't be bound (already in use,
     /// etc.) — in that case the caller just opens the URL and lets the native
@@ -100,9 +103,39 @@ final class LoopbackCallbackForwarder {
     /// port-squat window to the callback itself. Any in-flight splice keeps its
     /// own already-accepted fds and is unaffected by `stop()`; registration's
     /// teardown still waits on `activeRelays` hitting zero.
-    private func relayFinished() {
+    private func relayFinished(_ gen: Int) {
         activeRelays -= 1
-        stop()
+        if gen == generation { stop() }
+    }
+
+    /// Hand this listener to a new sign-in on the same port: its workspace,
+    /// its browser page, a fresh lifetime. A forwarder from a sign-in that
+    /// hasn't let go yet (an abandoned one holds the port for
+    /// `lifetimeSeconds`; a finished one until its relay closes) made the
+    /// new one's bind fail -- and a fixed-port CLI (Codex's 1455) then had
+    /// its callback relayed into the OLD workspace. Rebinding can't be done
+    /// in place: the old listen fds close asynchronously, on main.
+    func retarget(socketDevice: VZVirtioSocketDevice, browserResponse: String?) {
+        self.socketDevice = socketDevice
+        browserResponseOverride = browserResponse.map { Array($0.utf8) }
+        generation += 1
+        armExpiry()
+    }
+
+    /// The one forwarder for `port` in `forwarders`: a running one is
+    /// retargeted, else a new one is bound and added. Nil when the port
+    /// can't be bound (another program holds it).
+    static func forPort(_ port: UInt16, socketDevice: VZVirtioSocketDevice, browserResponse: String? = nil,
+                        in forwarders: inout [LoopbackCallbackForwarder]) -> LoopbackCallbackForwarder? {
+        forwarders.removeAll { !$0.isRunning }
+        if let live = forwarders.first(where: { $0.port == port }) {
+            live.retarget(socketDevice: socketDevice, browserResponse: browserResponse)
+            return live
+        }
+        guard let fwd = LoopbackCallbackForwarder(port: port, socketDevice: socketDevice,
+                                                  browserResponse: browserResponse) else { return nil }
+        forwarders.append(fwd)
+        return fwd
     }
 
     // MARK: - Listener
@@ -115,10 +148,15 @@ final class LoopbackCallbackForwarder {
         let v6 = bindOne(family: AF_INET6)
         guard v4 || v6 else { return false }
         isRunning = true
+        armExpiry()
+        return true
+    }
+
+    private func armExpiry() {
+        expiry?.cancel()
         let exp = DispatchWorkItem { [weak self] in self?.stop() }
         expiry = exp
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifetimeSeconds, execute: exp)
-        return true
     }
 
     /// Bind + listen on the loopback address of one family; registers an accept
@@ -176,6 +214,8 @@ final class LoopbackCallbackForwarder {
         guard cfd >= 0 else { return }
         guard socketDevice != nil else { Darwin.close(cfd); return }
         let target = port
+        // The sign-in this connection belongs to, as of its accept.
+        let gen = generation, response = browserResponseOverride
 
         // Don't bridge to the guest until the browser actually sends its
         // request. Safari (and others) open speculative *preconnect* sockets
@@ -232,7 +272,7 @@ final class LoopbackCallbackForwarder {
                             return Darwin.write(vfd, base, head.count)
                         }
                         DispatchQueue.main.async { [weak self] in self?.activeRelays += 1 }
-                        if let response = self?.browserResponseOverride {
+                        if let response {
                             // Answer the browser ourselves with a clean page,
                             // and drain the guest's own response into the void
                             // so the CLI's write succeeds and it proceeds to the
@@ -240,12 +280,12 @@ final class LoopbackCallbackForwarder {
                             Self.log("relay connected; answering browser directly on 127.0.0.1:\(target)")
                             Self.respondAndDrain(browser: cfd, guest: vfd, response: response) {
                                 [weak self] in
-                                DispatchQueue.main.async { self?.relayFinished() }
+                                DispatchQueue.main.async { self?.relayFinished(gen) }
                             }
                         } else {
                             Self.log("relay connected; splicing to guest 127.0.0.1:\(target)")
                             Self.splice(cfd, vfd) { [weak self] in
-                                DispatchQueue.main.async { self?.relayFinished() }
+                                DispatchQueue.main.async { self?.relayFinished(gen) }
                             }
                         }
                     case .failure(let err):
