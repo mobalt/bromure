@@ -59,4 +59,43 @@ struct RoomFocusTests {
         #expect(c.zoomedID == nil)
         c.stop()
     }
+
+    /// Finding (CWE-670): "Reading a session inside a room never clears its
+    /// unread mark". What a room shows is what's read: the page's cells (or
+    /// the zoomed one), and the Switchboard while its chat is on show.
+    @Test("a room's on-screen chats: the page, the zoomed cell, none behind the 1x1 Switchboard tab")
+    func onScreen() throws {
+        let store = AgentRoomStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("rooms-\(UUID().uuidString).json"))
+        let room = store.create(name: "R")
+        let ws = UUID()
+        var a = AgentSession(profileID: ws, tool: .claude, title: "a"); a.roomID = room.id
+        var b = AgentSession(profileID: ws, tool: .codex, title: "b"); b.roomID = room.id
+        b.createdAt = a.createdAt.addingTimeInterval(10)
+        let backend = FakeRoomBackend(store: store)
+        backend.roomSessions = [a, b]
+        let c = RoomStageController(roomID: room.id, backend: backend, listModel: SessionListModel())
+        var told = 0
+        c.onShownChanged = { told += 1 }
+        #expect(Set(c.onScreenIDs) == [a.id, b.id])
+        c.zoomedID = b.id
+        #expect(c.onScreenIDs == [b.id] && told == 1)
+        c.zoomedID = nil
+        c.cellsHidden = true                       // the 1x1 Switchboard tab is up
+        #expect(c.onScreenIDs.isEmpty && told == 3)
+        c.switchboardOnScreen = true               // a sleeping Switchboard (no chat): nothing read
+        #expect(c.onScreenIDs.isEmpty && told == 4)
+        c.switchboardOnScreen = true               // no change, no call
+        #expect(told == 4)
+        c.stop()
+
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let stage = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/RoomStage.swift"), encoding: .utf8)
+        #expect(stage.contains("if switchboardOnScreen, let sb = switchboard, models[sb.id] != nil { ids.append(sb.id) }"))
+        #expect(stage.contains(".onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }"))
+        #expect(stage.contains(".onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }"))
+        let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift"), encoding: .utf8)
+        #expect(ios.contains("if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }"))
+        #expect(ios.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))
+    }
 }

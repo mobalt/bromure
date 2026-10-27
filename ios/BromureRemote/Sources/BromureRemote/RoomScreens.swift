@@ -326,10 +326,17 @@ struct MobileRoomScreen: View {
     private var focused: AgentSession? { focusedID.flatMap { id in members.first { $0.id == id } } }
     @Environment(\.scenePhase) private var scenePhase
 
-    /// The chats on screen: the zoomed one, else the page.
+    /// The chats on screen: the zoomed one, else the page -- and the
+    /// Switchboard's, while its dock is open (as `dock` shows it).
     private var onScreen: [AgentSession] {
-        if let z = zoomedID, let s = members.first(where: { $0.id == z }) { return [s] }
-        return pages.indices.contains(page) ? pages[page] : []
+        var shown: [AgentSession]
+        if let z = zoomedID, let s = members.first(where: { $0.id == z }) {
+            shown = [s]
+        } else {
+            shown = pages.indices.contains(page) ? pages[page] : []
+        }
+        if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }
+        return shown
     }
 
     /// In the foreground, what's on screen is read -- here and, through the

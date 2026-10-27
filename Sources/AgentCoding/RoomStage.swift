@@ -173,11 +173,24 @@ final class RoomStageController {
     /// show is read.
     @ObservationIgnored var onShownChanged: (() -> Void)?
 
-    /// The sessions whose chats are on screen: the zoomed one, else the page.
+    /// The Switchboard's chat is on show (the dock open, or its own tab at
+    /// 1×1) -- kept by the view, which owns the dock.
+    var switchboardOnScreen = false { didSet { if switchboardOnScreen != oldValue { onShownChanged?() } } }
+    /// At 1×1 the Switchboard's tab is up: the page's cell isn't on show.
+    var cellsHidden = false { didSet { if cellsHidden != oldValue { onShownChanged?() } } }
+
+    /// The sessions whose chats are on screen: the zoomed one, else the page
+    /// -- and the Switchboard when its chat shows (not while it sleeps).
     var onScreenIDs: [UUID] {
-        if let z = zoomedID { return [z] }
-        let p = pages
-        return p.indices.contains(page) ? p[page].map(\.id) : []
+        var ids: [UUID]
+        if let z = zoomedID {
+            ids = [z]
+        } else {
+            let p = pages
+            ids = cellsHidden || !p.indices.contains(page) ? [] : p[page].map(\.id)
+        }
+        if switchboardOnScreen, let sb = switchboard, models[sb.id] != nil { ids.append(sb.id) }
+        return ids
     }
     /// +1 / −1: which way the last page change went (the slide's direction).
     var pageDirection = 1
@@ -484,6 +497,8 @@ struct RoomStageView: View {
     /// peeks at it without changing the grid's preference.
     @State private var dockPeek = false
     private var dockShown: Bool { controller.zoomedID == nil ? dockOpen : dockPeek }
+    /// Whether the Switchboard's chat is on show: its tab at 1×1, else the dock.
+    private var switchboardShown: Bool { singleLayout ? switchboardTab : dockShown }
     @State private var renaming = false
     @State private var draftName = ""
     @State private var pickingTarget = false
@@ -509,6 +524,13 @@ struct RoomStageView: View {
     }
 
     var body: some View {
+        stage
+            // What's on show is what gets read (`onScreenIDs`).
+            .onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }
+            .onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }
+    }
+
+    private var stage: some View {
         VStack(spacing: 0) {
             header
             if controller.zoomedID == nil, controller.pages.count > 1 || controller.layout.size == 1 {
