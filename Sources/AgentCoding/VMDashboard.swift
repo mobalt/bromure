@@ -328,6 +328,10 @@ struct VMDashboardView: View {
             .fill(Color.primary.opacity(0.035)))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(Color.primary.opacity(0.06)))
+        // Leaving the dashboard (another workspace, a session, the board)
+        // tears it down before the editor's blur reaches `onChange`: the
+        // draft is saved here, like any other focus leaving.
+        .onDisappear { commitNotes() }
     }
 
     /// The notes as editable markdown. Return saves, Shift-Return (and

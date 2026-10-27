@@ -3207,8 +3207,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let info = acDelegate?.vmDashboardData(for: id)
         let view = VMDashboardView(
             model: p?.model,
-            profile: p?.profile ?? profile,
-            accentHex: (p?.profile ?? profile).color.hexInUI,
+            // The saved copy: the pane's is the one it booted with (its
+            // notes from before a dashboard save).
+            profile: profile,
+            accentHex: profile.color.hexInUI,
             state: state,
             vCPUs: UbuntuSandboxVM.runtimeCPUs,
             diskAllocatedBytes: info?.diskAllocated ?? 0,

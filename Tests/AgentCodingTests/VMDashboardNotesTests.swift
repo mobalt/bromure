@@ -20,6 +20,20 @@ struct VMDashboardNotesTests {
         let body = w[start.upperBound...].prefix(700)
         #expect(body.contains("let profile = acDelegate?.profile(for: id) else { return }"))
         #expect(!body.contains("pane(id)?.profile"))
+        // Opening it again (after a save, from the sidebar) too.
+        let open = try #require(w.range(of: "func showVMDashboard(_ id: Profile.ID, editingNotes: Bool = false) {"))
+        let built = w[open.upperBound...].prefix(1600)
+        #expect(built.contains("profile: profile,"))
+        #expect(!built.contains("p?.profile"))
+    }
+
+    /// A draft open when the dashboard goes away is saved, not dropped.
+    @Test("leaving the dashboard saves the notes being edited")
+    func teardownSaves() throws {
+        let v = try Self.src("Sources/AgentCoding/VMDashboard.swift")
+        let card = try #require(v.range(of: "private var notesCard: some View {"))
+        let editor = try #require(v.range(of: "@ViewBuilder private var notesEditor: some View {"))
+        #expect(v[card.upperBound..<editor.lowerBound].contains(".onDisappear { commitNotes() }"))
     }
 
     /// A save that fails (the store, the remote) must not leave the
