@@ -329,6 +329,7 @@ final class RoomStageController {
     func setAutoLayout() {
         backend.setLayout(roomID, "")
         page = 0
+        noteShown()   // same page, different cells
     }
 
     func show(page p: Int) {
@@ -404,6 +405,7 @@ final class RoomStageController {
         let stamp = Self.restingStamp(s)
         if let hit = Self.restingCache[s.id], hit.stamp == stamp {
             resting[s.id] = hit.items
+            noteShown()   // its cell shows the conversation now
             return
         }
         guard restingLoading.insert(s.id).inserted else { return }
@@ -430,6 +432,7 @@ final class RoomStageController {
             restingRetry[s.id] = nil
             let tail = Array(items.suffix(40))
             resting[s.id] = tail
+            noteShown()
             Self.restingCache[s.id] = (stamp, tail)
         }
     }
