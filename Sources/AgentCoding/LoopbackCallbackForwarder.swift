@@ -170,16 +170,42 @@ final class LoopbackCallbackForwarder {
 
     // MARK: - Listener
 
-    /// Bind both loopback families. Succeeds if AT LEAST ONE binds — an
-    /// IPv4-only or IPv6-only host still works, and the common dual-stack case
-    /// covers whichever `localhost` resolves to.
+    /// Bind both loopback families. Succeeds only if NEITHER address is held
+    /// by someone else: a browser follows `127.0.0.1` to the IPv4 listener and
+    /// `localhost` to whichever family it resolves first, so a forwarder that
+    /// got one family while another program held the other would open the
+    /// page and hand that program the OAuth code (Finding CWE-441, "A
+    /// one-family loopback bind is treated as owning the OAuth port, so the
+    /// page still opens"). A family this host simply lacks (IPv4-only,
+    /// IPv6-only) is skipped; at least one must bind.
     private func bindAndListen() -> Bool {
-        let v4 = bindOne(family: AF_INET)
-        let v6 = bindOne(family: AF_INET6)
-        guard v4 || v6 else { return false }
+        let results = [Self.listenLoopback(family: AF_INET, port: port),
+                       Self.listenLoopback(family: AF_INET6, port: port)]
+        guard Self.owns(results) else {
+            for case .bound(let fd) in results { Darwin.close(fd) }
+            return false
+        }
+        for case .bound(let fd) in results {
+            let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+            src.setEventHandler { [weak self] in self?.acceptOne(on: fd) }
+            src.setCancelHandler { Darwin.close(fd) }
+            listeners.append((fd, src))
+            src.activate()
+        }
         isRunning = true
         armExpiry()
         return true
+    }
+
+    /// One loopback family's listen: up (its fd), not on this host, or taken
+    /// (in use -- or any other failure: fail closed).
+    enum LoopbackListen: Equatable {
+        case bound(Int32), unavailable, taken
+    }
+
+    /// The port is ours: nothing taken, something bound.
+    nonisolated static func owns(_ results: [LoopbackListen]) -> Bool {
+        !results.contains(.taken) && results.contains { if case .bound = $0 { return true } else { return false } }
     }
 
     private func armExpiry() {
@@ -189,50 +215,44 @@ final class LoopbackCallbackForwarder {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifetimeSeconds, execute: exp)
     }
 
-    /// Bind + listen on the loopback address of one family; registers an accept
-    /// source and returns whether it came up.
-    private func bindOne(family: Int32) -> Bool {
+    /// Bind + listen on the loopback address of one family (127.0.0.1, or ::1
+    /// IPv6-only so it never collides with the IPv4 listener).
+    nonisolated static func listenLoopback(family: Int32, port: UInt16) -> LoopbackListen {
         let fd = socket(family, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT ? .unavailable : .taken }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-
-        let bound: Bool
+        let rc: Int32
         if family == AF_INET6 {
-            // Loopback only, and IPv6-only on this socket so it never collides
-            // with the IPv4 listener on a dual-stack host.
             var v6only: Int32 = 1
             setsockopt(fd, Int32(IPPROTO_IPV6), IPV6_V6ONLY, &v6only, socklen_t(MemoryLayout<Int32>.size))
             var addr = sockaddr_in6()
             addr.sin6_family = sa_family_t(AF_INET6)
             addr.sin6_port = port.bigEndian
             addr.sin6_addr = in6addr_loopback   // ::1
-            bound = withUnsafePointer(to: &addr) { ptr in
+            rc = withUnsafePointer(to: &addr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
                     Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in6>.size))
                 }
-            } == 0
+            }
         } else {
             var addr = sockaddr_in()
             addr.sin_family = sa_family_t(AF_INET)
             addr.sin_port = port.bigEndian
             addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-            bound = withUnsafePointer(to: &addr) { ptr in
+            rc = withUnsafePointer(to: &addr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
                     Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
-            } == 0
+            }
         }
-        guard bound, Darwin.listen(fd, 8) == 0 else {
+        if rc != 0 {
+            let err = errno
             Darwin.close(fd)
-            return false
+            return err == EADDRNOTAVAIL || err == EAFNOSUPPORT ? .unavailable : .taken
         }
-        let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
-        src.setEventHandler { [weak self] in self?.acceptOne(on: fd) }
-        src.setCancelHandler { Darwin.close(fd) }
-        listeners.append((fd, src))
-        src.activate()
-        return true
+        guard Darwin.listen(fd, 8) == 0 else { Darwin.close(fd); return .taken }
+        return .bound(fd)
     }
 
     private static func log(_ msg: String) {
