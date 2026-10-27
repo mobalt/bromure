@@ -67,6 +67,8 @@ cleanup() {
     [ -n "$PING_SAVED" ] && \
         sudo sh -c "printf '%s' '$PING_SAVED' > $PING_RANGE" 2>/dev/null
     rm -rf "$FRAMES" "$SINK_LOG" "$PIDS"
+    [ -n "${NETNS:-}" ] && sudo ip netns del "$NETNS" 2>/dev/null
+    return 0
 }
 trap cleanup EXIT
 
@@ -243,6 +245,54 @@ n = libc.sendto(s.fileno(), frame, len(frame), 0, sa, len(sa))
 if n < 0: raise SystemExit('sendto failed errno=%d' % ctypes.get_errno())
 \""
 ok "a SOCK_PACKET frame handed to lo (wrapper pid $(wpid sockpacket))"
+# The SENDING SOCKET's namespace, not init's. An `sll_ifindex` means nothing
+# outside the namespace that issued it, so resolving it in `init_net` names
+# whatever device happens to hold that index there.
+#
+# The fixture is built to DISCRIMINATE: a veth in a new namespace takes
+# ifindex 2 inside it, while index 2 in the guest's init netns is the virtio
+# NIC. Measured against the unfixed module, a frame sent on `veth-in` inside
+# the namespace was reported as `dev: "enp0s1"` -- the VM's own uplink, named
+# confidently for a container's frame. The assertion below therefore checks
+# BOTH that the right name appears and that the init-netns name does not;
+# without the second half it would pass on the bug whenever the two happen to
+# agree.
+NETNS=""
+NS_DEV=""
+NS_INIT_DEV=""
+export NS_DEV NS_INIT_DEV
+if command -v ip > /dev/null 2>&1 && sudo ip netns add bromure-nf-test 2>/dev/null; then
+    NETNS=bromure-nf-test
+    if sudo ip link add veth-nfout type veth peer name veth-in netns "$NETNS" 2>/dev/null; then
+        sudo ip -netns "$NETNS" link set veth-in up 2>/dev/null
+        sudo ip link set veth-nfout up 2>/dev/null
+        NS_IDX=$(sudo ip -netns "$NETNS" -o link show veth-in | cut -d: -f1 | tr -d ' ')
+        NS_DEV=veth-in
+        NS_INIT_DEV=$(ip -o link show | awk -F': ' -v i="$NS_IDX" '$1 == i {print $2}' | cut -d@ -f1)
+    fi
+fi
+if [ -n "$NS_DEV" ] && [ -n "$NS_INIT_DEV" ] && [ "$NS_DEV" != "$NS_INIT_DEV" ]; then
+    printf '  info ifindex %s is %s in the namespace and %s in init netns\n' \
+        "$NS_IDX" "$NS_DEV" "$NS_INIT_DEV"
+    drive nspacket "sudo ip netns exec $NETNS python3 -c \"
+import socket
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+s.sendto(bytes(12) + b'\\x08\\x00' + bytes(40), ('$NS_DEV', 0))
+\""
+    ok "an AF_PACKET frame sent inside a netns (wrapper pid $(wpid nspacket))"
+    # `tc` inside the namespace: the same ifindex question on the netlink
+    # path, and nothing drove the tc probes at all after the container-mark
+    # suite went away with the mark.
+    if command -v tc > /dev/null 2>&1; then
+        drive nstc "sudo ip netns exec $NETNS tc qdisc add dev $NS_DEV clsact"
+        ok "a clsact qdisc added inside the netns (wrapper pid $(wpid nstc))"
+        export NS_TC=1
+    else
+        skip "no tc(8) on this image, so the tc_change namespace check cannot run"
+    fi
+else
+    skip "no discriminating netns (need \`ip netns\` and a veth whose index differs from init)"
+fi
 
 # A bare TCP connect as well as curl: the TCP assertion must not depend on a
 # tool being installed, and `dig` and `nc` are NOT on the base image -- measured.
@@ -736,6 +786,49 @@ elif packets:
 else:
     bad("sockpacket: no proto=packet events at all; see the afpacket failure "
         "above")
+# tc_change in the namespace. Attributed by the qdisc KIND, not by the process
+# chain: `sentry_kp_tc` fills the exe but not the chain, so there are no
+# ancestor pids to match on. This is also the only thing in the suite that
+# drives the tc probes at all -- the container-mark suite that used to was
+# deleted with the mark, leaving them unexercised.
+if os.environ.get("NS_TC") and os.environ.get("NS_DEV"):
+    want, init_name = os.environ["NS_DEV"], os.environ.get("NS_INIT_DEV", "")
+    tcs = [e for e in events
+           if e.get("kind") == "tc_change" and e.get("tc_kind") == "clsact"]
+    if not tcs:
+        bad("nstc: no tc_change event with tc_kind=clsact -- the tc probes did "
+            "not fire at all, or the kind was not parsed")
+    elif tcs[0].get("dev") == want:
+        ok("nstc: tc_change dev=%s, resolved in the netlink socket's namespace"
+           % want)
+    elif tcs[0].get("dev") == init_name:
+        bad("nstc: dev=%s -- init netns's device at that index, not the "
+            "sender's. `tcm_ifindex` belongs to whoever sent the netlink "
+            "message." % init_name)
+    else:
+        bad("nstc: dev=%r, expected %r (init netns calls that index %r)"
+            % (tcs[0].get("dev"), want, init_name))
+
+# The namespace case. Attributed by its own wrapper pid, because the other
+# AF_PACKET send also reports proto=packet.
+ns_dev = os.environ.get("NS_DEV", "")
+ns_init_dev = os.environ.get("NS_INIT_DEV", "")
+ns_shell = wpid("nspacket")
+if ns_dev and ns_init_dev and ns_shell:
+    mine = [f for f in pick(kind="net_flow", proto="packet")
+            if ns_shell in chain_pids(f)]
+    if not mine:
+        bad("nspacket: no proto=packet event for the send inside the netns")
+    elif mine[0].get("dev") == ns_dev:
+        ok("nspacket: dev=%s, resolved in the SENDING socket's namespace" % ns_dev)
+    elif mine[0].get("dev") == ns_init_dev:
+        bad("nspacket: dev=%s -- that is what this ifindex names in INIT netns, "
+            "not in the sender's. The lookup used `&init_net`, so a container's "
+            "frame is reported against the host's own interface." % ns_init_dev)
+    else:
+        bad("nspacket: dev=%r, expected %r (init netns calls that index %r)"
+            % (mine[0].get("dev"), ns_dev, ns_init_dev))
+
 
 print("  --- TCP ----------------------------------------------------------")
 e = expect("tcp", "TCP on connect", kind="net_flow", proto="tcp", dst=DEST,
