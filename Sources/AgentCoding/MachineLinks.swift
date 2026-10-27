@@ -809,9 +809,27 @@ extension AttachedMachine: AgentHostLink {
     /// shown at once here (no orb until the next poll), then told to the
     /// machine, which keeps the count.
     func markRead(_ sid: UUID, upTo seen: Int) {
-        pendingReads[sid] = (seen, Date())
+        let sent = Date()
+        pendingReads[sid] = (seen, sent)
         sessionStore.applyMirror(Self.holdingReads(sessionStore.sessions, &pendingReads))
-        hostSessionCommand(sid, "read", ["seen": seen])
+        Task {
+            let r = await call("POST", "/agent-sessions/\(sid.uuidString)/read", ["seen": seen])
+            // Refused or unanswered (Finding CWE-670, "Attached-machine read is
+            // latched before the command finishes"): the hold ends 2 s on, not
+            // 10 -- the next snapshot shows it unread and a watched session's
+            // read goes again. At most one retry per 2 s, however the machine answers.
+            guard Self.readFailed(r), let p = pendingReads[sid], p.seen == seen, p.at == sent else { return }
+            pendingReads[sid] = (seen, Date().addingTimeInterval(2 - Self.readHold))
+        }
+    }
+
+    /// How long a read sent is shown before the machine has to agree.
+    static let readHold: TimeInterval = 10
+
+    /// The machine didn't take a read: no answer, an error status, or an error.
+    nonisolated static func readFailed(_ r: (status: Int, json: [String: Any])?) -> Bool {
+        guard let r else { return true }
+        return !(200..<300).contains(r.status) || r.json["error"] != nil
     }
 
     /// `sessions` with the reads not yet in a snapshot applied; a read the
@@ -821,7 +839,7 @@ extension AttachedMachine: AgentHostLink {
         var out = sessions
         for (id, p) in pending {
             guard let i = out.firstIndex(where: { $0.id == id }),
-                  (out[i].readReplies ?? 0) < p.seen, now.timeIntervalSince(p.at) <= 10 else {
+                  (out[i].readReplies ?? 0) < p.seen, now.timeIntervalSince(p.at) <= readHold else {
                 pending[id] = nil; continue
             }
             out[i].readReplies = p.seen

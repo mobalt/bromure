@@ -217,4 +217,36 @@ struct SessionUnreadTests {
         out = AttachedMachine.holdingReads([newer], &pending, now: t0.addingTimeInterval(1))
         #expect(out[0].isUnread == true)
     }
+
+    /// Finding (CWE-670): "Attached-machine read is latched before the
+    /// command finishes". A read the machine refused (or never answered) is
+    /// held 2 s, not 10, then the session shows unread and is read again.
+    @Test("a refused machine read is let go after 2 s; what counts as refused")
+    func machineReadRefused() {
+        let failed = AttachedMachine.readFailed
+        #expect(failed(nil))
+        #expect(failed((404, ["error": "unknown action"])))
+        #expect(failed((200, ["error": "unknown session"])))
+        #expect(failed((500, [:])))
+        #expect(!failed((200, ["ok": true])))
+
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "t", cwd: "~")
+        s.replies = 2
+        let t0 = Date()
+        // markRead's failure path: the hold restamped to end 2 s from now.
+        var pending: [UUID: (seen: Int, at: Date)] = [s.id: (2, t0.addingTimeInterval(2 - AttachedMachine.readHold))]
+        #expect(AttachedMachine.holdingReads([s], &pending, now: t0.addingTimeInterval(1))[0].isUnread == false)
+        #expect(AttachedMachine.holdingReads([s], &pending, now: t0.addingTimeInterval(2.5))[0].isUnread == true)
+        #expect(pending.isEmpty)
+
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ml = (try? String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/MachineLinks.swift"), encoding: .utf8)) ?? ""
+        let mark = ml.range(of: "func markRead(_ sid: UUID, upTo seen: Int) {")
+        #expect(mark != nil)
+        if let mark {
+            let body = ml[mark.upperBound...].prefix(900)
+            #expect(body.contains("guard Self.readFailed(r), let p = pendingReads[sid], p.seen == seen, p.at == sent else { return }"))
+            #expect(body.contains("pendingReads[sid] = (seen, Date().addingTimeInterval(2 - Self.readHold))"))
+        }
+    }
 }
