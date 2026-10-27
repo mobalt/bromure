@@ -87,6 +87,16 @@ struct RoomFocusTests {
         #expect(c.onScreenIDs.isEmpty && told == 4)
         c.switchboardOnScreen = true               // no change, no call
         #expect(told == 4)
+        // A member joins the page on show: a refresh says so (once).
+        c.cellsHidden = false
+        told = 0
+        var d = AgentSession(profileID: ws, tool: .grok, title: "d"); d.roomID = room.id
+        d.createdAt = b.createdAt.addingTimeInterval(10)
+        backend.roomSessions = [a, b, d]
+        c.refresh()
+        #expect(c.onScreenIDs.contains(d.id) && told == 1)
+        c.refresh()
+        #expect(told == 1)
         c.stop()
 
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -94,6 +104,7 @@ struct RoomFocusTests {
         #expect(stage.contains("if switchboardOnScreen, let sb = switchboard, models[sb.id] != nil { ids.append(sb.id) }"))
         #expect(stage.contains(".onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }"))
         #expect(stage.contains(".onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }"))
+        #expect(stage.contains(".onAppear { controller.onShownChanged?() }"))
         let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift"), encoding: .utf8)
         #expect(ios.contains("if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }"))
         #expect(ios.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))

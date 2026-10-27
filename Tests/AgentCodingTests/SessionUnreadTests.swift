@@ -174,11 +174,11 @@ struct SessionUnreadTests {
         #expect(host.components(separatedBy: "delegate.markSessionRead(id)").count == 3)   // both select paths
         #expect(host.contains("for id in sessionsOnStage { acDelegate?.markSessionRead(id) }"))   // becomeKey
         #expect(host.contains("if let rc = roomController { return rc.onScreenIDs }"))
-        #expect(host.contains("controller.onShownChanged = markShown"))
+        #expect(host.contains("controller.onShownChanged = { [weak self, weak controller] in\n            DispatchQueue.main.async {"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.components(separatedBy: "controller.markRead(id)").count >= 4)           // selects + becomeKey
         #expect(fc.contains("controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }"))
-        #expect(fc.contains("rc.onShownChanged = markShown"))
+        #expect(fc.contains("rc.onShownChanged = { [weak self, weak rc] in\n            DispatchQueue.main.async {"))
         let ios = try src("ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift")
         #expect(ios.contains(".onChange(of: session?.replies) { _, _ in markRead() }"))
         #expect(ios.contains("if scenePhase == .active { controller.markRead(sessionID) }"))

@@ -172,6 +172,7 @@ final class RoomStageController {
     /// Told when the sessions on screen change (a page, a zoom): what's on
     /// show is read.
     @ObservationIgnored var onShownChanged: (() -> Void)?
+    @ObservationIgnored private var lastShown: [UUID] = []
 
     /// The Switchboard's chat is on show (the dock open, or its own tab at
     /// 1×1) -- kept by the view, which owns the dock.
@@ -345,6 +346,10 @@ final class RoomStageController {
         if let z = zoomedID, !present.contains(z) { missingZoom += 1 } else { missingZoom = 0 }
         if missingZoom >= Self.missingRefreshesToMove { missingZoom = 0; zoomedID = nil }
         page = min(page, max(0, pages.count - 1))
+        // A member joined the page on show, or the Switchboard woke under an
+        // open dock: what's on screen changed, so it's read.
+        let shown = onScreenIDs
+        if shown != lastShown { lastShown = shown; onShownChanged?() }
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }
         // Failed resting reads, due again.
@@ -528,6 +533,9 @@ struct RoomStageView: View {
             // What's on show is what gets read (`onScreenIDs`).
             .onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }
             .onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }
+            // The first read waits for the view: before it, the 1×1 tab and
+            // the dock aren't known (the owner marks a turn later, see showRoom).
+            .onAppear { controller.onShownChanged?() }
     }
 
     private var stage: some View {
