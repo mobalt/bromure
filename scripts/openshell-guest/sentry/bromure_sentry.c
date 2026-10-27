@@ -2748,10 +2748,17 @@ static int sentry_flow_packet(struct pt_regs *regs,
 
 			/* Not necessarily NUL-terminated on the wire; the
 			 * kernel terminates it in place before its own lookup
-			 * and we must not write to the caller's buffer. */
+			 * and we must not write to the caller's buffer.
+			 * Where the kernel does: `packet_sendmsg_spkt` stores
+			 * the NUL at spkt_device[13], so a 14-byte name with no
+			 * NUL in it names its 13-character prefix -- the device
+			 * that sends (or -ENODEV). Terminating at [14] looked up
+			 * a different name (Finding CWE-670, "SOCK_PACKET
+			 * device lookup does not truncate spkt_device the way
+			 * the kernel does"). */
 			memcpy(name, spkt->spkt_device,
 			       sizeof(spkt->spkt_device));
-			name[sizeof(name) - 1] = '\0';
+			name[sizeof(spkt->spkt_device) - 1] = '\0';
 			rcu_read_lock();
 			dev = dev_get_by_name_rcu(sock_net(sock->sk), name);
 			if (dev)

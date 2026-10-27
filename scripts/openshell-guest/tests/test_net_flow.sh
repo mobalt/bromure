@@ -68,6 +68,7 @@ cleanup() {
         sudo sh -c "printf '%s' '$PING_SAVED' > $PING_RANGE" 2>/dev/null
     rm -rf "$FRAMES" "$SINK_LOG" "$PIDS"
     [ -n "${NETNS:-}" ] && sudo ip netns del "$NETNS" 2>/dev/null
+    [ -n "${SPKT13:-}" ] && sudo ip link del "$SPKT13" 2>/dev/null
     return 0
 }
 trap cleanup EXIT
@@ -245,6 +246,31 @@ n = libc.sendto(s.fileno(), frame, len(frame), 0, sa, len(sa))
 if n < 0: raise SystemExit('sendto failed errno=%d' % ctypes.get_errno())
 \""
 ok "a SOCK_PACKET frame handed to lo (wrapper pid $(wpid sockpacket))"
+
+# SOCK_PACKET with a 14-byte name and no NUL in it: the kernel stores the NUL
+# at spkt_device[13] before its lookup, so the frame goes out on the device
+# named by the first 13 bytes. A dummy device with a 13-character name, and a
+# 14th byte after it; the event must name that device (the module read the
+# 14-byte string, and found nothing or another device).
+SPKT13="brmspkt123456"     # 13 characters
+if command -v ip > /dev/null 2>&1 && sudo ip link add "$SPKT13" type dummy 2>/dev/null; then
+    sudo ip link set "$SPKT13" up 2>/dev/null
+    drive sockpacket13 "sudo python3 -c \"
+import ctypes, ctypes.util, socket, struct
+libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+libc.sendto.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+                        ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+libc.sendto.restype = ctypes.c_ssize_t
+s = socket.socket(socket.AF_PACKET, 10, socket.htons(0x0003))
+sa = struct.pack('=H14sH', socket.AF_PACKET, b'${SPKT13}X', socket.htons(0x0003))
+frame = bytes(12) + struct.pack('!H', 0x0800) + bytes(40)
+n = libc.sendto(s.fileno(), frame, len(frame), 0, sa, len(sa))
+if n < 0: raise SystemExit('sendto failed errno=%d' % ctypes.get_errno())
+\""
+    ok "a SOCK_PACKET frame named '${SPKT13}X' (14 bytes, no NUL) (wrapper pid $(wpid sockpacket13))"
+else
+    skip "no dummy device for the 14-byte SOCK_PACKET name (need \`ip link add ... type dummy\`)"
+fi
 # The SENDING SOCKET's namespace, not init's. An `sll_ifindex` means nothing
 # outside the namespace that issued it, so resolving it in `init_net` names
 # whatever device happens to hold that index there.
@@ -786,6 +812,19 @@ elif packets:
 else:
     bad("sockpacket: no proto=packet events at all; see the afpacket failure "
         "above")
+
+# The 14-byte name: the device is its 13-character prefix, as the kernel sent it.
+spkt13_shell = wpid("sockpacket13")
+if spkt13_shell:
+    mine13 = [f for f in packets if spkt13_shell in chain_pids(f)]
+    if not mine13:
+        bad("sockpacket13: no proto=packet event for the 14-byte-name send")
+    elif mine13[0].get("dev") == "brmspkt123456":
+        ok("sockpacket13: a 14-byte spkt_device names its 13-character prefix, as the kernel does")
+    else:
+        bad("sockpacket13: dev is %r, expected 'brmspkt123456' -- the name was "
+            "not cut at spkt_device[13] the way packet_sendmsg_spkt cuts it"
+            % mine13[0].get("dev"))
 # tc_change in the namespace. Attributed by the qdisc KIND, not by the process
 # chain: `sentry_kp_tc` fills the exe but not the chain, so there are no
 # ancestor pids to match on. This is also the only thing in the suite that
