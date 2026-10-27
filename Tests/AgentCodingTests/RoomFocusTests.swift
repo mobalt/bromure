@@ -107,6 +107,7 @@ struct RoomFocusTests {
         #expect(stage.contains(".onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }"))
         #expect(stage.contains(".onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }"))
         #expect(stage.contains(".onAppear { controller.onShownChanged?() }"))
+        #expect(stage.contains("_switchboardTab = State(initialValue: controller.target == .switchboard)"))
         let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift"), encoding: .utf8)
         #expect(ios.contains("if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }"))
         #expect(ios.contains("for s in onScreen where s.isUnread { controller.markRead(s.id) }"))

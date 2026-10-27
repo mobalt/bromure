@@ -502,8 +502,15 @@ struct RoomStageView: View {
     @State private var wave: Double = 1
     @State private var dockHeight: CGFloat = 220
     /// At 1×1 the Switchboard is a tab of its own (no dock under a lone
-    /// cell): whether that tab is the one on show.
-    @State private var switchboardTab = false
+    /// cell): whether that tab is the one on show. Starts where the
+    /// controller does (its target), so the first report of what's on show
+    /// doesn't flip the cell on for a moment before `syncSingleTab`.
+    @State private var switchboardTab: Bool
+
+    init(controller: RoomStageController) {
+        self.controller = controller
+        _switchboardTab = State(initialValue: controller.target == .switchboard)
+    }
     /// The member whose nickname sheet is up (from its cell's ⋯ menu).
     @State private var nicknameFor: AgentSession?
     private var singleLayout: Bool { controller.layout.size == 1 && controller.zoomedID == nil }
