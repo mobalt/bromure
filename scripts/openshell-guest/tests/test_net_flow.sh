@@ -217,6 +217,33 @@ s.sendto(b'\\x00'*12 + b'\\x08\\x00' + ip + udp, ('lo', 0))
 \""
 ok "an AF_PACKET frame handed to lo (wrapper pid $(wpid afpacket))"
 
+# SOCK_PACKET: the OBSOLETE AF_PACKET API, and a second ops table.
+# `packet_create` gives `sock->type == SOCK_PACKET` its own `packet_ops_spkt`,
+# whose `sendmsg` is `packet_sendmsg_spkt` -- and that function does not call
+# `packet_sendmsg`, it goes straight to `dev_queue_xmit`. Probing only
+# `packet_sendmsg` left this silent: measured on 6.8.0, a 54-byte frame left
+# the host and the stream carried no event at all. Creating one still needs
+# CAP_NET_RAW, which guest root has in a non-strict workspace.
+#
+# Through libc, because Python's socket module insists on a sockaddr_ll tuple
+# for AF_PACKET and this API wants a `sockaddr_pkt` -- which names the device
+# by NAME, not by ifindex, so it also exercises the other device lookup.
+# No backslash escapes in the payload (bytes()/struct.pack), to keep the
+# quoting through `drive` honest.
+drive sockpacket "sudo python3 -c \"
+import ctypes, ctypes.util, socket, struct
+libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+libc.sendto.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+                        ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+libc.sendto.restype = ctypes.c_ssize_t
+s = socket.socket(socket.AF_PACKET, 10, socket.htons(0x0003))
+sa = struct.pack('=H14sH', socket.AF_PACKET, b'lo', socket.htons(0x0003))
+frame = bytes(12) + struct.pack('!H', 0x0800) + bytes(40)
+n = libc.sendto(s.fileno(), frame, len(frame), 0, sa, len(sa))
+if n < 0: raise SystemExit('sendto failed errno=%d' % ctypes.get_errno())
+\""
+ok "a SOCK_PACKET frame handed to lo (wrapper pid $(wpid sockpacket))"
+
 # A bare TCP connect as well as curl: the TCP assertion must not depend on a
 # tool being installed, and `dig` and `nc` are NOT on the base image -- measured.
 drive tcp "python3 -c \"
@@ -682,6 +709,33 @@ else:
     bad("afpacket: no net_flow with proto=packet -- the probe on "
         "`packet_sendmsg` did not fire, or the proto renders as something else: "
         "%s" % sorted(set(f.get("proto") for f in flows)))
+
+# SOCK_PACKET, the second ops table. Attributed by its own wrapper pid rather
+# than by counting, because both APIs produce proto=packet on dev=lo from the
+# same program -- a count alone would pass with two events from the same probe.
+packets = pick(kind="net_flow", proto="packet")
+spkt_shell = wpid("sockpacket")
+mine = [f for f in packets if spkt_shell and spkt_shell in chain_pids(f)]
+if mine:
+    e = mine[0]
+    ok("sockpacket: a SOCK_PACKET send is reported too (proto=packet)")
+    # The device came from `sockaddr_pkt.spkt_device`, a NAME -- a different
+    # lookup from the sockaddr_ll ifindex the other case exercises.
+    if e.get("dev") == "lo":
+        ok("sockpacket: dev=lo, resolved by NAME from sockaddr_pkt")
+    else:
+        bad("sockpacket: dev is %r, expected 'lo' -- the spkt_device name was "
+            "not resolved (dev_get_by_name_rcu in the socket's netns)"
+            % e.get("dev"))
+elif packets:
+    bad("sockpacket: %d proto=packet event(s), none of them this send -- the "
+        "probe on `packet_sendmsg_spkt` did not fire. `packet_sendmsg_spkt` "
+        "is a SEPARATE ops table (`packet_ops_spkt`) and does not call "
+        "`packet_sendmsg`, so probing only the latter misses the obsolete "
+        "API entirely." % len(packets))
+else:
+    bad("sockpacket: no proto=packet events at all; see the afpacket failure "
+        "above")
 
 print("  --- TCP ----------------------------------------------------------")
 e = expect("tcp", "TCP on connect", kind="net_flow", proto="tcp", dst=DEST,

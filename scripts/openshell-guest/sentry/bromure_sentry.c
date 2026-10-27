@@ -2704,8 +2704,47 @@ static int sentry_flow_packet(struct pt_regs *regs,
 	event->proto = BSPR_PACKET;
 	event->addr_family = AF_PACKET;
 
-	if (msg && msg->msg_name &&
-	    msg->msg_namelen >= sizeof(struct sockaddr_ll)) {
+	/* Which address shape the message carries follows the SOCKET TYPE, not
+	 * which symbol was probed. `packet_create` keys the ops table on
+	 * exactly that --
+	 *
+	 *     if (sock->type == SOCK_PACKET) sock->ops = &packet_ops_spkt;
+	 *
+	 * -- so reading the socket keeps this right even if a kernel ever
+	 * routes the two sendmsg symbols differently, and one handler serves
+	 * both probes.
+	 */
+	if (sock->type == SOCK_PACKET) {
+		/* The obsolete API names the device by NAME, not by ifindex, in
+		 * a `sockaddr_pkt`. The length test is the kernel's own:
+		 * `packet_sendmsg_spkt` refuses a namelen below
+		 * `sizeof(struct sockaddr)` and reads `spkt_protocol` only at
+		 * the full `sockaddr_pkt` length -- so the 14-byte name is
+		 * complete from `sizeof(struct sockaddr)` up, and requiring the
+		 * longer struct would miss a legitimate caller.
+		 */
+		if (msg && msg->msg_name &&
+		    msg->msg_namelen >= offsetof(struct sockaddr_pkt,
+						 spkt_protocol)) {
+			struct sockaddr_pkt *spkt = msg->msg_name;
+			char name[sizeof(spkt->spkt_device) + 1];
+			struct net_device *dev;
+
+			/* Not necessarily NUL-terminated on the wire; the
+			 * kernel terminates it in place before its own lookup
+			 * and we must not write to the caller's buffer. */
+			memcpy(name, spkt->spkt_device,
+			       sizeof(spkt->spkt_device));
+			name[sizeof(name) - 1] = '\0';
+			rcu_read_lock();
+			dev = dev_get_by_name_rcu(sock_net(sock->sk), name);
+			if (dev)
+				strscpy(event->dev, dev->name,
+					sizeof(event->dev));
+			rcu_read_unlock();
+		}
+	} else if (msg && msg->msg_name &&
+		   msg->msg_namelen >= sizeof(struct sockaddr_ll)) {
 		struct sockaddr_ll *sll = (struct sockaddr_ll *)msg->msg_name;
 		int ifindex = sll->sll_ifindex;
 
@@ -2715,8 +2754,10 @@ static int sentry_flow_packet(struct pt_regs *regs,
 		if (ifindex > 0) {
 			struct net_device *dev;
 
+			/* The socket's own namespace, not `init_net`: a socket
+			 * in another netns resolves its ifindex there. */
 			rcu_read_lock();
-			dev = dev_get_by_index_rcu(&init_net, ifindex);
+			dev = dev_get_by_index_rcu(sock_net(sock->sk), ifindex);
 			if (dev)
 				strscpy(event->dev, dev->name,
 					sizeof(event->dev));
@@ -2879,8 +2920,19 @@ static struct sentry_flow_probe sentry_flow_probes[] = {
 	SENTRY_FLOW("rawv6_sendmsg",		BSPR_RAW,	SFS_SOCK_MSG),
 	/* AF_PACKET. Not a `struct proto` method like the rest -- a
 	 * `proto_ops` one, with a `struct socket *` first -- so it has its own
-	 * handler. See `sentry_flow_packet`. */
+	 * handler. See `sentry_flow_packet`.
+	 *
+	 * TWO symbols, because AF_PACKET has two ops tables. `packet_sendmsg`
+	 * serves SOCK_RAW and SOCK_DGRAM; `socket(AF_PACKET, SOCK_PACKET, …)`
+	 * gets `packet_ops_spkt`, whose `sendmsg` is `packet_sendmsg_spkt` --
+	 * and that function does NOT call `packet_sendmsg`, it goes straight to
+	 * `dev_queue_xmit`. Probing only the first left the obsolete API
+	 * silent: measured on 6.8.0, a 54-byte SOCK_PACKET frame went out and
+	 * the stream carried no event at all. Creating one still needs
+	 * CAP_NET_RAW, which guest root has in a non-strict workspace, so the
+	 * audit row is exactly what was missing. */
 	SENTRY_FLOW("packet_sendmsg",		BSPR_PACKET,	SFS_PACKET_MSG),
+	SENTRY_FLOW("packet_sendmsg_spkt",	BSPR_PACKET,	SFS_PACKET_MSG),
 };
 
 struct sentry_kprobe {
