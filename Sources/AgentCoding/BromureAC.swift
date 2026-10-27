@@ -3483,16 +3483,53 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return config
     }
 
+    /// The port of a guest page's loopback OAuth redirect -- the one the
+    /// host's forwarder must own before the page may open (see
+    /// `loopbackCallbackRefusal`). Any host the browser would take to this
+    /// Mac's loopback counts (`reachesLoopback`): only `127.0.0.1` and
+    /// `localhost` did, so a `[::1]` redirect -- which the forwarder also
+    /// listens on -- skipped the ownership check and the page opened, the
+    /// code landing on whichever workspace held the port (Finding CWE-441,
+    /// "Sign-in refusal ignores a [::1] redirect, so the other workspace
+    /// still receives the OAuth code").
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
               let rc = URLComponents(string: redirect),
-              let host = rc.host?.lowercased(),
-              host == "127.0.0.1" || host == "localhost",
+              let host = rc.host, reachesLoopback(host),
               let port = rc.port, port > 0, port <= 65_535 else {
             return nil
         }
         return UInt16(port)
+    }
+
+    /// Whether a browser handed this URL host connects to this Mac's
+    /// loopback: `localhost` and `*.localhost` (browsers resolve those
+    /// themselves), any IPv4 spelling of 127/8 or 0.0.0.0 (`127.1`,
+    /// `0x7f000001` and `2130706433` are all 127.0.0.1 to a URL parser), and
+    /// IPv6 `::1`, `::` and the v4-mapped loopback (`::ffff:127.0.0.1`),
+    /// bracketed or not, with or without a trailing dot.
+    nonisolated static func reachesLoopback(_ rawHost: String) -> Bool {
+        var host = rawHost.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" || host.hasSuffix(".localhost") { return true }
+        // IPv4, every form a URL parser accepts (inet_aton's: shorthand,
+        // octal, hex, a single number).
+        var v4 = in_addr()
+        if !host.contains(":"), inet_aton(host, &v4) != 0 {
+            let first = UInt32(bigEndian: v4.s_addr) >> 24
+            return first == 127 || v4.s_addr == 0
+        }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, host, &v6) == 1 {
+            let b = withUnsafeBytes(of: v6) { Array($0) }
+            if b.prefix(15).allSatisfy({ $0 == 0 }), b[15] <= 1 { return true }          // ::, ::1
+            if b.prefix(10).allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF,
+               b[12] == 127 || b[12...15].allSatisfy({ $0 == 0 }) { return true }        // ::ffff:127.x / 0.0.0.0
+            return false
+        }
+        return false
     }
 
     /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
