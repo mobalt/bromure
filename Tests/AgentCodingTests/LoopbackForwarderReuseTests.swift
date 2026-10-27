@@ -82,4 +82,22 @@ struct LoopbackForwarderReuseTests {
         let fwd = try Self.src("Sources/AgentCoding/LoopbackCallbackForwarder.swift")
         #expect(fwd.contains("for f in forwarders where f.isRunning && !f.hasWorkspace { f.stop() }"))
     }
+
+    /// Finding (CWE-459): "A refused workspace sign-in stays in flight, so
+    /// retry is blocked for five minutes".
+    @Test("a refused workspace sign-in is ended (capture disarmed, retry free), not only reported")
+    func refusedSignInEnds() throws {
+        let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
+        let gate = try #require(ac.range(of: "if let refused = self.loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice) {"))
+        let branch = ac[gate.upperBound...].prefix(900)
+        #expect(branch.contains("self.endProxySignIn(signIn, success: false, message: refused)"))
+        #expect(!branch.contains("signIn.onEvent?(.finished"))
+        let ss = try Self.src("Sources/AgentCoding/SessionSignIn.swift")
+        let end = try #require(ss.range(of: "func endProxySignIn(_ s: ProxySignIn, success: Bool, message: String?) {"))
+        let body = ss[end.upperBound...].prefix(600)
+        for step in ["s.finished = true", "s.timeout?.cancel()", "signInCaptures.disarm(profileID: s.profileID)",
+                     "proxySignIns[s.profileID] = nil"] {
+            #expect(body.contains(step), "endProxySignIn no longer does \(step)")
+        }
+    }
 }

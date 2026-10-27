@@ -15794,7 +15794,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // -- and when this workspace can't have that port, never open it.
                 if let refused = self.loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice) {
                     if let signIn = self.proxySignIns[pid], !signIn.finished {
-                        signIn.onEvent?(.finished(success: false, message: refused))
+                        // Ended, not just reported: the card said "failed"
+                        // while the sign-in stayed in flight -- its capture
+                        // armed, and the retry refused as "another sign-in"
+                        // until the 5-minute timeout (Finding CWE-459, "A
+                        // refused workspace sign-in stays in flight, so retry
+                        // is blocked for five minutes").
+                        self.endProxySignIn(signIn, success: false, message: refused)
                     } else {
                         self.unifiedWindow?.showNotice(refused)
                     }
