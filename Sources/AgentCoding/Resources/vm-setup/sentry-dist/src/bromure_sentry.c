@@ -2221,7 +2221,7 @@ struct sentry_tc_probe {
  * to include after all.
  */
 static void sentry_tc_describe(struct bromure_sentry_event *event,
-			       struct nlmsghdr *n, u8 op)
+			       struct net *net, struct nlmsghdr *n, u8 op)
 {
 	struct tcmsg *tcm;
 	struct nlattr *kind;
@@ -2241,8 +2241,15 @@ static void sentry_tc_describe(struct bromure_sentry_event *event,
 	if (tcm->tcm_ifindex > 0) {
 		struct net_device *dev;
 
+		/* The netlink socket's namespace, for the same reason the
+		 * AF_PACKET lookup uses the sending socket's: `tcm_ifindex` is
+		 * issued by whoever sent the message, and `tc` inside a
+		 * container names that namespace's devices. Resolving in
+		 * `init_net` reports the host's device at that index instead.
+		 * `tc_modify_qdisc` and friends take their own `net` from
+		 * `sock_net(skb->sk)`; this is the same value. */
 		rcu_read_lock();
-		dev = dev_get_by_index_rcu(&init_net, tcm->tcm_ifindex);
+		dev = dev_get_by_index_rcu(net, tcm->tcm_ifindex);
 		if (dev)
 			strscpy(event->dev, dev->name, sizeof(event->dev));
 		rcu_read_unlock();
@@ -2260,9 +2267,18 @@ static int sentry_kp_tc(struct kprobe *probe, struct pt_regs *regs)
 		container_of(probe, struct sentry_tc_probe, probe);
 	struct bromure_sentry_event *event = sentry_probe_event();
 
+	/* arg0 is the netlink skb; its socket carries the namespace the
+	 * message's ifindex belongs to. `&init_net` only as a fallback: a
+	 * netlink skb without a socket is not expected on these paths, and
+	 * dereferencing one would be an oops inside a kprobe -- so the
+	 * previous behaviour is kept for that case rather than guessed at. */
+	struct sk_buff *skb = (struct sk_buff *)regs->regs[0];
+	struct net *net = (skb && skb->sk) ? sock_net(skb->sk) : &init_net;
+
 	sentry_fill_common(event, BSK_TC_CHANGE);
 	sentry_fill_exe(event);
-	sentry_tc_describe(event, (struct nlmsghdr *)regs->regs[1], entry->op);
+	sentry_tc_describe(event, net, (struct nlmsghdr *)regs->regs[1],
+			   entry->op);
 	/* Unfolded and immediate: these are rare, and the host acts on the
 	 * first one. Folding would delay the very event it revokes on. */
 	sentry_submit(event);

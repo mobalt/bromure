@@ -254,6 +254,16 @@ s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
 s.sendto(bytes(12) + b'\\x08\\x00' + bytes(40), ('$NS_DEV', 0))
 \""
     ok "an AF_PACKET frame sent inside a netns (wrapper pid $(wpid nspacket))"
+    # `tc` inside the namespace: the same ifindex question on the netlink
+    # path, and nothing drove the tc probes at all after the container-mark
+    # suite went away with the mark.
+    if command -v tc > /dev/null 2>&1; then
+        drive nstc "sudo ip netns exec $NETNS tc qdisc add dev $NS_DEV clsact"
+        ok "a clsact qdisc added inside the netns (wrapper pid $(wpid nstc))"
+        export NS_TC=1
+    else
+        skip "no tc(8) on this image, so the tc_change namespace check cannot run"
+    fi
 else
     skip "no discriminating netns (need \`ip netns\` and a veth whose index differs from init)"
 fi
@@ -723,6 +733,29 @@ else:
     bad("afpacket: no net_flow with proto=packet -- the probe on "
         "`packet_sendmsg` did not fire, or the proto renders as something else: "
         "%s" % sorted(set(f.get("proto") for f in flows)))
+
+# tc_change in the namespace. Attributed by the qdisc KIND, not by the process
+# chain: `sentry_kp_tc` fills the exe but not the chain, so there are no
+# ancestor pids to match on. This is also the only thing in the suite that
+# drives the tc probes at all -- the container-mark suite that used to was
+# deleted with the mark, leaving them unexercised.
+if os.environ.get("NS_TC") and os.environ.get("NS_DEV"):
+    want, init_name = os.environ["NS_DEV"], os.environ.get("NS_INIT_DEV", "")
+    tcs = [e for e in events
+           if e.get("kind") == "tc_change" and e.get("tc_kind") == "clsact"]
+    if not tcs:
+        bad("nstc: no tc_change event with tc_kind=clsact -- the tc probes did "
+            "not fire at all, or the kind was not parsed")
+    elif tcs[0].get("dev") == want:
+        ok("nstc: tc_change dev=%s, resolved in the netlink socket's namespace"
+           % want)
+    elif tcs[0].get("dev") == init_name:
+        bad("nstc: dev=%s -- init netns's device at that index, not the "
+            "sender's. `tcm_ifindex` belongs to whoever sent the netlink "
+            "message." % init_name)
+    else:
+        bad("nstc: dev=%r, expected %r (init netns calls that index %r)"
+            % (tcs[0].get("dev"), want, init_name))
 
 # The namespace case. Attributed by its own wrapper pid, because the other
 # AF_PACKET send also reports proto=packet.
