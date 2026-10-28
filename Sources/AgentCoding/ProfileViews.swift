@@ -5343,7 +5343,7 @@ struct ProfileEditorView: View {
     }
 
     private var profileDirHint: String {
-        "~/Library/Application Support/BromureAC/profiles/\(draft.id.uuidString.prefix(8))…/"
+        "\(ACSupportDir.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))/profiles/\(draft.id.uuidString.prefix(8))…/"
     }
 
     private var isValid: Bool {

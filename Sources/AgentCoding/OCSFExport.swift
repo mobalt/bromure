@@ -35,8 +35,7 @@ public final class OCSFExporter: @unchecked Sendable {
         if let p = UserDefaults.standard.string(forKey: Self.directoryKey), !p.isEmpty {
             return URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true)
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/ocsf", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("ocsf", isDirectory: true)
     }
 
     /// Record one emitter event. Cheap no-op while the export is off.

@@ -30,7 +30,13 @@ H=/tmp/bromure-manual-home
 FIXTURE=/tmp/bromure-manual-demo
 TMP=/tmp/bromure-manual-shots
 PREFS="$HOME/Library/Preferences/io.bromure.agentic-coding.plist"
-SOCK="$H/Library/Application Support/BromureAC/control.sock"
+# The bundle's data folder (ACSupportDir): BromureSupportDirName in its
+# Info.plist, else BromureAC.
+SUPPORT_NAME=$(/usr/libexec/PlistBuddy -c "Print :BromureSupportDirName" \
+    "$(dirname "$BIN")/../Info.plist" 2>/dev/null)
+case "$SUPPORT_NAME" in ""|.|..|*/*|*:*) SUPPORT_NAME=BromureAC ;; esac
+SUPPORT="$H/Library/Application Support/$SUPPORT_NAME"
+SOCK="$SUPPORT/control.sock"
 
 [ -x "$BIN" ] || { echo "Build first: ./build.sh bromure-ac" >&2; exit 1; }
 if pgrep -x bromure-ac >/dev/null; then
@@ -152,7 +158,7 @@ for entry in "${ALL_LOCALES[@]}"; do
     shoot "session:$(session_id 'Stream the nightly CSV export')"  session-rest     "$sfx" 4
     shoot "session:$(session_id 'Switchboard')"                    switchboard      "$sfx" 4
     if want room-stage || want room-zoom; then
-        rid=$(python3 -c "import json; print(json.load(open('$H/Library/Application Support/BromureAC/rooms.json'))[0]['id'])")
+        rid=$(python3 -c "import json; print(json.load(open('$SUPPORT/rooms.json'))[0]['id'])")
         fatclient room-show "\"room\":\"$rid\"" >/dev/null; sleep 5
         shoot default room-stage "$sfx" 4
         fatclient room-zoom "\"session\":\"$(session_id 'Add Apple Pay to checkout')\"" >/dev/null; sleep 2

@@ -75,9 +75,7 @@ public enum BACEnrollmentStore {
 
     /// Path: ~/Library/Application Support/BromureAC/managed/install.json
     private static var managedDir: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let base = ACSupportDir.url
             .appendingPathComponent("managed", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base

@@ -654,10 +654,7 @@ final class AgentSessionStore {
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask).first!
-            self.fileURL = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            self.fileURL = ACSupportDir.url
                 .appendingPathComponent("sessions.json")
         }
         load()
@@ -2364,8 +2361,7 @@ final class AgentRoomStore {
 
     init(fileURL: URL? = nil) {
         isMirror = false
-        self.fileURL = fileURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!.appendingPathComponent("BromureAC", isDirectory: true)
+        self.fileURL = fileURL ?? ACSupportDir.url
             .appendingPathComponent("rooms.json")
         load()
     }
@@ -2609,10 +2605,7 @@ final class SessionTranscriptCache: @unchecked Sendable {
         if let directory {
             dir = directory
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask).first!
-            dir = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            dir = ACSupportDir.url
                 .appendingPathComponent("transcripts", isDirectory: true)
         }
     }

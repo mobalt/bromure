@@ -85,6 +85,10 @@ struct BromureAC: ParsableCommand {
     /// this, `bromure-ac -AppleLanguages "(fr)"` exits with "Unknown option"
     /// before NSApplication starts. Mirrors the browser entry point.
     static func main() {
+        // Through a symlink outside the bundle (~/.local/bin/bromure-ac,
+        // /usr/local/bin/bromure-cli) there is no Info.plist to read: become
+        // the real binary before anything looks at Bundle.main.
+        ACSupportDir.reexecIfInvokedThroughSymlink()
         // Ignore SIGPIPE process-wide. Our hand-rolled loopback servers (the
         // MITM repair proxy + inference bridge, the automation server, the MLX
         // engine) use raw BSD-socket write()s. Writing to a peer that already
@@ -610,7 +614,7 @@ struct Init: ParsableCommand {
     var storageDir: String?
 
     @Option(name: .long,
-            help: "A shell script to run as root inside the image after Bromure's setup (traced; log in ~/Library/Logs/BromureAC/base-image-customize.log). Default: the one set in Rebuild Base Image, if any.")
+            help: "A shell script to run as root inside the image after Bromure's setup (traced; log in \(UbuntuImageManager.customizeLogURL.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))). Default: the one set in Rebuild Base Image, if any.")
     var customizeScript: String?
 
     func run() throws {
@@ -2751,9 +2755,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func watchAttachedMachines() {
         guard machineLinksObserver == nil else { return }
         // The user's answers to machines asking to join, kept across launches.
-        MachineLinkHub.shared.storeURL = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/machines.json")
+        MachineLinkHub.shared.storeURL = ACSupportDir.url.appendingPathComponent("machines.json")
         // A session a remote client starts on a machine straight into a room
         // ("Add to Room"): the room is recorded here.
         MachineLinkHub.shared.onSessionStarted = { [weak self] sid, body in
@@ -3960,9 +3962,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Persist the in-process DHCP server's leases so a profile's VM — which
         // already has a stable per-profile MAC (MACBindings) — keeps the same IP
         // across agent restarts, as often as the address stays free.
-        let acSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let acSupport = ACSupportDir.url
         VMNetSwitch.shared.enablePersistentLeases(
             at: acSupport.appendingPathComponent("dhcp-leases.sqlite"))
 
@@ -9127,9 +9127,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = []          // raw disk images have no canonical UTI
-        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("BromureAC", isDirectory: true),
-           FileManager.default.fileExists(atPath: dir.path) {
+        let dir = ACSupportDir.url
+        if FileManager.default.fileExists(atPath: dir.path) {
             panel.directoryURL = dir
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -9473,8 +9472,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }()
 
     private var machineSessionRoomsURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/machine-session-rooms.json")
+        ACSupportDir.url.appendingPathComponent("machine-session-rooms.json")
     }
 
     private func saveMachineSessionRooms() {

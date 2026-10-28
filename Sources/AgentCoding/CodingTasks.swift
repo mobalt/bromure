@@ -763,11 +763,7 @@ final class CodingTaskStore {
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first!
-            self.fileURL = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            self.fileURL = ACSupportDir.url
                 .appendingPathComponent("tasks.json")
         }
         load()

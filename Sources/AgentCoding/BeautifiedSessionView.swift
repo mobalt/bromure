@@ -483,9 +483,7 @@ enum GuestDrop {
 /// carry a per-send stamp, so a path names one picture for good.
 enum DropImageStore {
     private static let dir: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("BromureAC/drop-images", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("drop-images", isDirectory: true)
     }()
 
     private static func file(for path: String) -> URL {

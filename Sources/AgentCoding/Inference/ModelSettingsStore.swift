@@ -44,10 +44,7 @@ public final class ModelSettingsStore: ObservableObject {
     }
 
     static var defaultURL: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("models.enc")
     }
 

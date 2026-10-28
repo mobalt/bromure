@@ -260,8 +260,7 @@ public final class SecurityTimeline {
         let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
             || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         guard !testing else { return nil }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("BromureAC/security-timeline", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("security-timeline", isDirectory: true)
     }
 
     /// Record a raw `BACEventEmitter` event. Callable from any thread (the

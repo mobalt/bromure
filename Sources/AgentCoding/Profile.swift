@@ -3474,9 +3474,7 @@ public final class MACBindings: @unchecked Sendable {
     private var loaded = false
 
     private init() {
-        let dir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let dir = ACSupportDir.url
         self.fileURL = dir.appendingPathComponent("profile-macs.json")
     }
 
@@ -3553,11 +3551,7 @@ public final class ProfileStore {
         if let rootDir {
             self.rootDir = rootDir
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first!
-            self.rootDir = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            self.rootDir = ACSupportDir.url
                 .appendingPathComponent("profiles", isDirectory: true)
         }
     }

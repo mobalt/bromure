@@ -407,9 +407,7 @@ final class GhosttyRuntime: @unchecked Sendable {
     }
 
     private static func writeConfigFile(named name: String, contents: String) -> String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory,
-                                           in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/ghostty", isDirectory: true)
+        let dir = ACSupportDir.url.appendingPathComponent("ghostty", isDirectory: true)
         let url = dir.appendingPathComponent(name)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

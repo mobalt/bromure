@@ -13,7 +13,12 @@ import Foundation
 /// install) running the VM headless with no GUI session — left as a follow-up
 /// because VZ-in-a-daemon is unverified and the install needs elevation.
 enum BootLaunchAgent {
-    static let label = "io.bromure.agentic-coding.boot"
+    /// The release's label is the historical one; a build with its own data
+    /// folder (`BromureSupportDirName`, the dev flavor) gets its own, so the
+    /// two don't overwrite each other's plist with whichever binary ran last.
+    static let label = ACSupportDir.name == ACSupportDir.defaultName
+        ? "io.bromure.agentic-coding.boot"
+        : "io.bromure.agentic-coding.boot.\(ACSupportDir.name)"
 
     static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
