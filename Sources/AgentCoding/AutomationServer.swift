@@ -1037,7 +1037,8 @@ final class ACAutomationServer {
                 for pair in q.split(separator: "&") {
                     let kv = pair.split(separator: "=", maxSplits: 1)
                     guard kv.count == 2 else { continue }
-                    let v = kv[1].removingPercentEncoding ?? String(kv[1])
+                    // Form encoding too: curl --data-urlencode sends a space as "+".
+                    let v = kv[1].replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[1])
                     if kv.first == "path" { pathParam = v }
                     if kv.first == "which" { whichParam = v }
                 }
