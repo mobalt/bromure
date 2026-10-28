@@ -29,6 +29,8 @@ The `build.sh` script does: release build → create .app bundle → copy resour
 
 Per-developer signing (own team ID, bundle ID, Developer ID cert) goes in the gitignored `.env.local`, never in the tracked entitlements or Info.plist; `BROMURE_DEV=1` there builds a flavor that runs next to an installed release. See BUILD_INSTRUCTIONS.md, "Building under your own team".
 
+`./build.sh` takes a target: `bromure` (default), `bromure-ac` (Bromure Agentic Coding) or `sidecar`. For Bromure Agentic Coding, the app's data lives in a *state* chosen at launch (`--state`, `BROMURE_STATE`), and builds are immutable copies made by `scripts/devbuild.sh`, run on a state with `bromure-ac instance start` and made the stable one with `bromure-ac build promote`, so the app being worked in is not rebuilt under itself. See BUILD_INSTRUCTIONS.md, "States" and "Development workflow". Use a scratch state for repros, never the default one.
+
 ## User Manual
 
 The Bromure (web) manual is `manual-web/` (MDX; `manual/` is Bromure Agentic Coding's). When you change a pictured window — a profile-settings category, an app Settings pane, the setup window, the consent/enrollment windows, the trace viewer — re-render its screenshots in the same change and update the page's text:

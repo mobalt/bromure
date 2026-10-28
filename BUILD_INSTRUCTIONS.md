@@ -159,11 +159,11 @@ Clones share keychain items (the secrets master key, workspace LUKS keys) with t
 
 ### Builds and instances
 
-`scripts/devbuild.sh <name> [<git-ref>]` (default `HEAD`) builds an immutable bundle into `~/Library/Application Support/<folder>-builds/<name>/` from a git worktree (`.worktrees/<name>`, its own `.build`), with `build.json` beside it; `--prod agentic-coding-v5.4.0` names it `prod-5.4.0` and is cached. A ref that predates the states work gets those commits cherry-picked in the worktree first, so a release tag is buildable under your `.env.local` and drivable with `--state`. The `stable` symlink there is the build the default state runs on.
+`scripts/devbuild.sh <name> [<git-ref>]` (default `HEAD`, resolved to a commit when the script starts) builds an immutable bundle into `~/Library/Application Support/<folder>-builds/<name>/` from a git worktree (`.worktrees/<name>`, its own `.build`), with `build.json` beside it; `--prod agentic-coding-v5.4.0` names it `prod-5.4.0` and is cached. A ref that predates the states work gets those commits cherry-picked in the worktree first, so a release tag is buildable under your `.env.local` and drivable with `--state`. The `stable` symlink there is the build the default state runs on.
 
 The CLI manages what it produced. `bromure-ac build ls` lists the builds with their roles; `build promote <name>` makes one stable (work is snapshotted with the new build's CLI under `pre-<name>`, its instance quits with every workspace suspended, `stable` and `stable.prev` are repointed, `~/.local/bin/bromure-ac` and the Finder alias in `~/Applications` are remade, work reopens on the new build); `build rollback` swaps `stable` and `stable.prev` the same way; `build prune` removes every other build and its devbuild worktree, keeping those with a running instance and the newest `prod-*`; `build link` remakes the two links by hand. The first build `devbuild.sh` makes becomes stable and gets the links.
 
-`bromure-ac instance start [<state>] [--build <name>] [--gui|--hidden|--headless]` runs a build (default `stable`) on a state (default `work`) and waits for its `/health`. It launches through `open -n`, so the app is a LaunchServices child like a Dock launch, a new instance despite the shared bundle ID, and outlives the terminal; `--direct` spawns the binary instead. `work` starts with a window, any other state `--hidden` (no Dock presence, never takes focus, yet renders its windows for `/debug/ui-shot`). `instance stop [<state>] [--suspend|--shutdown]` quits it over its socket (each workspace's own close action unless overridden), `restart` does both, `ls` shows every state and its instance, `health` prints `/health`, `cli [<state>] -- vm ls` runs the serving build's CLI against the state, `bin-path` prints that CLI's path.
+`bromure-ac instance start [<state>] [--build <name>] [--gui|--hidden|--headless]` runs a build (default `stable`) on a state (default `work`) and waits for its `/health`. It launches through `open -n`, so the app is a LaunchServices child like a Dock launch, a new instance despite the shared bundle ID, and outlives the terminal; `--direct` spawns the binary instead. `work` starts with a window, any other state `--hidden` (no Dock presence, never takes focus, yet renders its windows for `/debug/ui-shot`). `instance stop [<state>] [--suspend|--shutdown]` quits it over its socket (each workspace's own close action unless overridden), `restart` does both, `ls` shows every state and its instance (`stale` marks a record left by an instance that died; the next `start` replaces it), `health` prints `/health`, `cli [<state>] -- vm ls` runs the serving build's CLI against the state, `bin-path` prints that CLI's path.
 
 ## File Layout
 
@@ -232,3 +232,33 @@ APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 If `APPLE_ID`, `TEAM_ID`, or `APP_PASSWORD` are missing, the script will still sign and package but skip notarization. The resulting DMG will trigger Gatekeeper warnings on other Macs.
 
 The DMG is created at `.build/arm64-apple-macosx/release/Bromure.dmg`.
+
+## Development workflow (Bromure Agentic Coding)
+
+Every build you run is a named, immutable one, so the app you are working in is never rebuilt underneath you:
+
+1. **Build**: `scripts/devbuild.sh <name> [<git-ref>]` builds the ref (`HEAD` by default) in its own worktree and copies the bundle into `<folder>-builds/<name>/` (see [Builds and instances](#builds-and-instances)). `.build/` in your checkout is only what `build.sh` leaves behind; nothing in this workflow runs it.
+2. **Live in one**: `bromure-ac build promote <name>` makes it the stable build and reopens `work` on it, after snapshotting `work` (`pre-<name>`) and quitting the old instance with its VMs suspended; `bromure-ac build rollback` goes back to the previous one. Data is untouched by either, since it lives in the state. `bromure-ac build prune` clears the builds you no longer need.
+
+`~/.local/bin/bromure-ac` is a symlink to the stable build's CLI (made by the first `devbuild.sh` and refreshed by every promote), so `bromure-ac` on your `PATH` always means the build you live in. A symlink to the binary has no bundle around it, so the CLI re-executes the real binary when started through one (the same arguments and environment; `Bundle.main` would otherwise find no Info.plist and read the default folder, bundle identifier and build name) — this is what also makes the app's `/usr/local/bin/bromure-cli` link work on a renamed build. The Finder alias in `~/Applications` is the same build for Spotlight and the Dock.
+
+For a reproduction or scratch work, never use `work`; make a state and run a build on it:
+
+```bash
+bromure-ac state create repro-42                      # new state with work's images and caches cloned (--empty for none)
+bromure-ac instance start repro-42 --build devbuild-02
+bromure-ac instance cli repro-42 -- vm ls
+bromure-ac instance stop repro-42; bromure-ac state rm repro-42
+```
+
+Stop instances with `bromure-ac instance stop` (or the app's own quit); never signal the process, and never `pkill bromure-ac`, which hits every instance. Quitting the `work` app stops or suspends its workspace VMs.
+
+### Tests
+
+```bash
+swift test                           # unit tests (Swift Testing)
+swift test --filter StateStoreTests  # one suite
+scripts/states-e2e.sh [<build>]      # two instances on two states: health, ports, subnets, instance lock, instance cli, quit, state rm
+```
+
+`Tests/e2e.mjs` and `Tests/ac-e2e.mjs` expect a bundle from `build.sh`. The guest-side OpenShell suites (including the attestor binary-identity test) run with `scripts/openshell-guest/tests/run_all.sh`; some need root, so run them inside a VM.
