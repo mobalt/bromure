@@ -929,12 +929,16 @@ struct Run: ParsableCommand {
           help: "Run as a background agent (no window). Used by the CLI to autostart the VM service.")
     var headless = false
 
+    @Flag(name: .long,
+          help: "Like --headless, but the app never comes forward: no Dock icon, no activation, even when it opens a window (an agent's instance rendering /debug/ui-shot next to the one you type in).")
+    var hidden = false
+
     func run() throws {
         // First of all: one instance per state. A second launch on a state
         // that is already served exits here, before it can touch the control
         // socket, the lease DB or a disk image.
         do {
-            try ACInstance.acquire(mode: headless ? .headless : .gui)
+            try ACInstance.acquire(mode: hidden ? .hidden : headless ? .headless : .gui)
         } catch {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             Darwin.exit(75)   // EX_TEMPFAIL: try again once that instance has quit
@@ -960,10 +964,12 @@ struct Run: ParsableCommand {
         // pattern. NSApplication.run() needs to drive the main RunLoop
         // directly; running it inside an async context (`AsyncParsableCommand`
         // + `MainActor.run`) wedges the run loop and the app never appears.
-        let headless = self.headless
+        let headless = self.headless || self.hidden
+        let hidden = self.hidden
         MainActor.assumeIsolated {
             FileHandle.standardError.write(Data(
-                "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
+                "[run] launching NSApplication\(hidden ? " (hidden agent)" : headless ? " (headless agent)" : "")…\n".utf8))
+            BromureApplication.stayHidden = hidden
             // The first touch makes the app's class ours (an exception that
             // crossed a Swift job stops the app at once — BromureApplication).
             let app = BromureApplication.shared
